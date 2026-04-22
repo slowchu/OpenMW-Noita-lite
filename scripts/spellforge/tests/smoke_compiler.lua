@@ -79,6 +79,33 @@ local function hasErrorContaining(errors, needle)
     return false
 end
 
+local function spellbookHasSpell(actor, spell_id)
+    local actor_spells = types.Actor.spells(actor)
+
+    if type(actor_spells.hasSpell) == "function" then
+        local ok, value = pcall(actor_spells.hasSpell, actor_spells, spell_id)
+        if ok then
+            return value == true
+        end
+    end
+
+    if type(actor_spells.contains) == "function" then
+        local ok, value = pcall(actor_spells.contains, actor_spells, spell_id)
+        if ok then
+            return value == true
+        end
+    end
+
+    if type(actor_spells.has) == "function" then
+        local ok, value = pcall(actor_spells.has, actor_spells, spell_id)
+        if ok then
+            return value == true
+        end
+    end
+
+    return false
+end
+
 local function runSmoke()
     if state.running then
         log.warn("smoke run already in progress")
@@ -136,7 +163,7 @@ local function runSmoke()
             logCompileCauses("trivial", result1)
         end
 
-        local spellbook_has = result1.spell_id and types.Actor.spells(self):has(result1.spell_id)
+        local spellbook_has = result1.spell_id and spellbookHasSpell(self, result1.spell_id)
         local ok3 = spellbook_has == true
         assertLine(ok3, "front-end spell added to spellbook")
         if not ok3 then
