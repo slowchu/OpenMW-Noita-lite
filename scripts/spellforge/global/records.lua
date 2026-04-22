@@ -1,5 +1,6 @@
 local storage = require("openmw.storage")
 local world = require("openmw.world")
+local log = require("scripts.spellforge.shared.log").new("global.records")
 
 local records = {}
 
@@ -23,7 +24,12 @@ function records.put(recipe_id, payload)
 end
 
 function records.createRecord(draft)
-    return world.createRecord(draft)
+    local ok, created_or_err = pcall(world.createRecord, draft)
+    if not ok then
+        log.error(string.format("records.createRecord failed: %s", tostring(created_or_err)))
+        return nil, created_or_err
+    end
+    return created_or_err, nil
 end
 
 function records.deleteBySpellId(spell_id)

@@ -22,6 +22,16 @@ local function assertLine(ok, label)
     end
 end
 
+local function logCompileCauses(recipe_label, payload)
+    if not payload or type(payload.errors) ~= "table" then
+        return
+    end
+    for _, err in ipairs(payload.errors) do
+        local message = err.message or tostring(err)
+        log.error(string.format("  cause[%s]: %s", recipe_label, tostring(message)))
+    end
+end
+
 local function firstSpellId()
     for spell_id in pairs(core.magic.spells.records) do
         return spell_id
@@ -102,22 +112,48 @@ local function runSmoke()
     local req1 = nextRequestId("smoke-trivial")
     compile(trivial_recipe, req1)
     waitForResult(req1, 3, function(result1)
-        assertLine(result1.ok, "trivial recipe compiles")
-        assertLine(type(result1.spell_id) == "string" and result1.spell_id ~= "", "trivial compile returns front-end spell_id")
+        local ok1 = result1.ok
+        assertLine(ok1, "trivial recipe compiles")
+        if not ok1 then
+            logCompileCauses("trivial", result1)
+        end
+
+        local ok2 = type(result1.spell_id) == "string" and result1.spell_id ~= ""
+        assertLine(ok2, "trivial compile returns front-end spell_id")
+        if not ok2 then
+            logCompileCauses("trivial", result1)
+        end
+
         local spellbook_has = result1.spell_id and types.Actor.spells(self):has(result1.spell_id)
-        assertLine(spellbook_has == true, "front-end spell added to spellbook")
+        local ok3 = spellbook_has == true
+        assertLine(ok3, "front-end spell added to spellbook")
+        if not ok3 then
+            logCompileCauses("trivial", result1)
+        end
 
         local req2 = nextRequestId("smoke-cache")
         compile(trivial_recipe, req2)
         waitForResult(req2, 3, function(result2)
-            assertLine(result2.ok, "identical recipe recompiles")
+            local ok4 = result2.ok
+            assertLine(ok4, "identical recipe recompiles")
+            if not ok4 then
+                logCompileCauses("cache", result2)
+            end
             assertLine(result1.recipe_id == result2.recipe_id, "identical recipe_id is stable")
-            assertLine(result2.reused == true, "identical recipe reuses cache")
+            local ok5 = result2.reused == true
+            assertLine(ok5, "identical recipe reuses cache")
+            if not ok5 then
+                logCompileCauses("cache", result2)
+            end
 
             local req3 = nextRequestId("smoke-multicast")
             compile(multicast_recipe, req3)
             waitForResult(req3, 3, function(result3)
-                assertLine(result3.ok, "multicast recipe compiles")
+                local ok6 = result3.ok
+                assertLine(ok6, "multicast recipe compiles")
+                if not ok6 then
+                    logCompileCauses("multicast", result3)
+                end
 
                 local req4 = nextRequestId("smoke-invalid")
                 compile(invalid_nested_recipe, req4)
