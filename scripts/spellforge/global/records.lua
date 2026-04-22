@@ -20,14 +20,35 @@ local function sanitizeGeneratedSpellIds(generated_spell_ids)
     return out
 end
 
+local function sanitizeGeneratedEngineSpellIds(generated_engine_spell_ids)
+    local out = {}
+    if type(generated_engine_spell_ids) ~= "table" then
+        return out
+    end
+    for i, engine_id in ipairs(generated_engine_spell_ids) do
+        if type(engine_id) == "string" then
+            out[i] = engine_id
+        end
+    end
+    return out
+end
+
 local function sanitizeEntry(entry)
     if type(entry) ~= "table" then
         return nil
     end
+    local generated_spell_ids = sanitizeGeneratedSpellIds(entry.generated_spell_ids)
+    local generated_engine_spell_ids = sanitizeGeneratedEngineSpellIds(entry.generated_engine_spell_ids)
+    if #generated_engine_spell_ids == 0 and type(entry.frontend_spell_id) == "string" and entry.frontend_spell_id ~= "" then
+        generated_engine_spell_ids[1] = entry.frontend_spell_id
+    end
+    local frontend_logical_id = type(entry.frontend_logical_id) == "string" and entry.frontend_logical_id or generated_spell_ids[1]
     return {
         canonical = type(entry.canonical) == "string" and entry.canonical or nil,
         frontend_spell_id = type(entry.frontend_spell_id) == "string" and entry.frontend_spell_id or nil,
-        generated_spell_ids = sanitizeGeneratedSpellIds(entry.generated_spell_ids),
+        frontend_logical_id = frontend_logical_id,
+        generated_spell_ids = generated_spell_ids,
+        generated_engine_spell_ids = generated_engine_spell_ids,
     }
 end
 

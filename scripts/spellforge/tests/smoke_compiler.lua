@@ -163,6 +163,36 @@ local function runSmoke()
             logCompileCauses("trivial", result1)
         end
 
+        local spellbook_probe_result = nil
+        local actor_spells = types.Actor.spells(self)
+        if type(actor_spells.has) == "function" then
+            local probe_ok, probe_value = pcall(actor_spells.has, actor_spells, result1.spell_id)
+            if probe_ok then
+                spellbook_probe_result = probe_value
+            else
+                spellbook_probe_result = "error:" .. tostring(probe_value)
+            end
+        else
+            spellbook_probe_result = "missing-has"
+        end
+        log.info(string.format(
+            "spellbook probe: checking_id=%s type=%s has_result=%s",
+            tostring(result1.spell_id),
+            type(result1.spell_id),
+            tostring(spellbook_probe_result)
+        ))
+
+        -- OpenMW docs ("Type ActorSpells", latest): ActorSpells is iterable via pairs(mySpells).
+        -- Reference: https://openmw.readthedocs.io/en/latest/reference/lua-scripting/openmw_types.html#type-actorspells
+        local listed = 0
+        for _, s in pairs(actor_spells) do
+            listed = listed + 1
+            if listed <= 5 then
+                log.info(string.format("spellbook entry: id=%s", tostring(s and s.id)))
+            end
+        end
+        log.info(string.format("spellbook total_entries=%d", listed))
+
         local spellbook_has = result1.spell_id and spellbookHasSpell(self, result1.spell_id)
         local ok3 = spellbook_has == true
         assertLine(ok3, "front-end spell added to spellbook")
