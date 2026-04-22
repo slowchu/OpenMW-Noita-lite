@@ -35,6 +35,7 @@ end
 
 local function compile(recipe, request_id)
     core.sendGlobalEvent(events.COMPILE_RECIPE, {
+        sender = self.object,
         actor = self,
         actor_id = self.recordId,
         recipe = recipe,
@@ -133,7 +134,9 @@ end
 
 local function requestBackend()
     state.backend = "PENDING"
-    core.sendGlobalEvent(events.CHECK_BACKEND, nil)
+    core.sendGlobalEvent(events.CHECK_BACKEND, {
+        sender = self.object,
+    })
     state.handshake_timer = async:newUnsavableSimulationTimer(3, function()
         if state.backend == "PENDING" then
             state.backend = "UNAVAILABLE"

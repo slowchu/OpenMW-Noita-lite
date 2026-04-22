@@ -103,8 +103,10 @@ function compiler.handleCompileEvent(payload)
     return compiler.compile(payload.actor, payload.recipe, payload.request_id)
 end
 
-function compiler.emitResult(result)
-    core.sendGlobalEvent(events.COMPILE_RESULT, result)
+function compiler.emitResult(sender, result)
+    if sender and type(sender.sendEvent) == "function" then
+        sender:sendEvent(events.COMPILE_RESULT, result)
+    end
 end
 
 return compiler

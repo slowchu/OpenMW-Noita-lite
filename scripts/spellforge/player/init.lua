@@ -28,7 +28,9 @@ end
 
 local function requestBackend()
     state.backend = "PENDING"
-    core.sendGlobalEvent(events.CHECK_BACKEND, nil)
+    core.sendGlobalEvent(events.CHECK_BACKEND, {
+        sender = self.object,
+    })
 
     cancelHandshakeTimer()
     state.handshake_timer = async:newUnsavableSimulationTimer(3, function()
@@ -65,6 +67,7 @@ local function compileHardcodedRecipe()
     }
 
     core.sendGlobalEvent(events.COMPILE_RECIPE, {
+        sender = self.object,
         actor = self,
         actor_id = self.recordId,
         request_id = request_id,

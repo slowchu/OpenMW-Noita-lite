@@ -1,7 +1,9 @@
 local events = {}
 
 --[[
-Payload: nil
+Payload: {
+  sender: Actor
+}
 Sent by PLAYER to request backend readiness check.
 ]]
 events.CHECK_BACKEND = "Spellforge_CheckBackend"
@@ -20,6 +22,7 @@ events.BACKEND_UNAVAILABLE = "Spellforge_BackendUnavailable"
 
 --[[
 Payload: {
+  sender: Actor,         -- originating player/local actor object
   recipe: table,          -- validated by shared/validate.lua
   request_id: string,     -- caller-generated correlation id
   actor_id: string|nil    -- optional debugging actor id
@@ -44,6 +47,7 @@ events.COMPILE_RESULT = "Spellforge_CompileResult"
 
 --[[
 Payload: {
+  sender: Actor,          -- originating player/local actor object
   spell_id: string|nil,
   recipe_id: string|nil,
   request_id: string|nil
