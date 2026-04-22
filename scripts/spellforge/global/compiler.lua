@@ -43,9 +43,14 @@ local function addToSpellbook(actor, spell_id)
     local actor_spells = types.Actor.spells(actor)
     log.debug(string.format("ActorSpells:add before actor=%s spell_id=%s", tostring(actor and actor.recordId), tostring(spell_id)))
     log.info(string.format("ActorSpells:add called actor=%s spell_id=%s", tostring(actor and actor.recordId), tostring(spell_id)))
-    actor_spells:add(spell_id)
+    local ok, add_err = pcall(actor_spells.add, actor_spells, spell_id)
+    if not ok then
+        log.error(string.format("compiler ActorSpells:add failed actor=%s spell_id=%s err=%s", tostring(actor and actor.recordId), tostring(spell_id), tostring(add_err)))
+        return false, add_err
+    end
     log.debug(string.format("ActorSpells:add after actor=%s spell_id=%s", tostring(actor and actor.recordId), tostring(spell_id)))
     log.info("ActorSpells:add completed")
+    return true, nil
 end
 
 function compiler.compile(actor, recipe, request_id)
@@ -69,7 +74,10 @@ function compiler.compile(actor, recipe, request_id)
     local canonical = canonicalize.run(recipe)
     local cached = records.getByRecipeId(canonical.recipe_id)
     if cached then
-        addToSpellbook(actor, cached.frontend_spell_id)
+        local added_ok, add_err = addToSpellbook(actor, cached.frontend_spell_id)
+        if not added_ok then
+            return { request_id = request_id, ok = false, error = tostring(add_err) }
+        end
         return {
             request_id = request_id,
             ok = true,
@@ -94,14 +102,19 @@ function compiler.compile(actor, recipe, request_id)
         local created_record, create_error = records.createRecord(draft)
         if create_error then
             log.error(string.format("compiler world.createRecord failed id=%s err=%s", tostring(record_id), tostring(create_error)))
+            return { request_id = request_id, ok = false, error = tostring(create_error) }
         end
         log.info(string.format("world.createRecord returned id=%s value=%s", tostring(record_id), tostring(created_record)))
         log.debug(string.format("world.createRecord after id=%s return=%s", tostring(record_id), tostring(created_record)))
-        generated_spell_ids[#generated_spell_ids + 1] = record_id
+        local created_id = created_record and created_record.id or record_id
+        generated_spell_ids[#generated_spell_ids + 1] = created_id
     end
 
     local frontend_spell_id = generated_spell_ids[1]
-    addToSpellbook(actor, frontend_spell_id)
+    local added_ok, add_err = addToSpellbook(actor, frontend_spell_id)
+    if not added_ok then
+        return { request_id = request_id, ok = false, error = tostring(add_err) }
+    end
 
     records.put(canonical.recipe_id, {
         canonical = canonical.canonical,
