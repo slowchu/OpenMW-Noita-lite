@@ -99,4 +99,15 @@ Sent by GLOBAL to PLAYER when a watched hit event arrives.
 ]]
 events.CAST_HIT_OBSERVED = "Spellforge_CastHitObserved"
 
+--[[
+Payload: {
+  sender: Actor,
+  groupname: string|nil,
+  key: string|nil,
+  selected_spell_id: string|nil
+}
+Sent by PLAYER animation diagnostics when a spellcast text key fires.
+]]
+events.CAST_DIAG_SIGNAL = "Spellforge_CastDiagSignal"
+
 return events

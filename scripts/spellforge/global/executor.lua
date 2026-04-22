@@ -1,5 +1,6 @@
 local async = require("openmw.async")
 local interfaces = require("openmw.interfaces")
+local types = require("openmw.types")
 local util = require("openmw.util")
 
 local events = require("scripts.spellforge.shared.events")
@@ -9,6 +10,8 @@ local records = require("scripts.spellforge.global.records")
 local executor = {}
 
 local watchers = {}
+local player_ref = nil
+local last_active_spell_ids = {}
 
 local function sendResult(sender, request_id, ok, err)
     if sender and type(sender.sendEvent) == "function" then
@@ -143,6 +146,59 @@ function executor.onMagicHit(payload)
             watchers[actor_id] = nil
         end
     end
+end
+
+local function buildActiveSpellIdSet(actor)
+    local ids = {}
+    for _, active_spell in pairs(types.Actor.activeSpells(actor)) do
+        if active_spell and type(active_spell.id) == "string" then
+            ids[active_spell.id] = true
+        end
+    end
+    return ids
+end
+
+function executor.onPlayerAdded(player)
+    player_ref = player
+    last_active_spell_ids = {}
+    log.info(string.format("diagnostic onPlayerAdded player=%s", tostring(player and player.recordId)))
+    log.info("diagnostic note: OpenMW global engine handlers do not document onSpellCast; using onUpdate/animation text-key probes instead")
+end
+
+function executor.onUpdate()
+    if not player_ref then
+        return
+    end
+
+    local current_ids = buildActiveSpellIdSet(player_ref)
+    local count = 0
+    for _ in pairs(current_ids) do
+        count = count + 1
+    end
+    if count > 0 then
+        log.debug(string.format("diagnostic active spell count=%d", count))
+    end
+    for id in pairs(current_ids) do
+        if not last_active_spell_ids[id] then
+            log.info(string.format("diagnostic active spell added id=%s", tostring(id)))
+        end
+    end
+    for id in pairs(last_active_spell_ids) do
+        if not current_ids[id] then
+            log.info(string.format("diagnostic active spell removed id=%s", tostring(id)))
+        end
+    end
+    last_active_spell_ids = current_ids
+end
+
+function executor.onCastDiagSignal(payload)
+    log.info(string.format(
+        "diagnostic cast signal group=%s key=%s selected_spell_id=%s sender=%s",
+        tostring(payload and payload.groupname),
+        tostring(payload and payload.key),
+        tostring(payload and payload.selected_spell_id),
+        tostring(payload and payload.sender and payload.sender.recordId)
+    ))
 end
 
 return executor

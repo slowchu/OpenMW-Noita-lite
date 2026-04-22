@@ -1,6 +1,7 @@
 local async = require("openmw.async")
 local core = require("openmw.core")
 local input = require("openmw.input")
+local interfaces = require("openmw.interfaces")
 local self = require("openmw.self")
 local types = require("openmw.types")
 
@@ -14,6 +15,7 @@ local state = {
     pending_observe = {},
     running = false,
     last_spell_id = nil,
+    animation_diag_registered = false,
 }
 
 local function assertLine(ok, label)
@@ -163,6 +165,30 @@ local function runSmoke()
     end)
 end
 
+local function registerAnimationDiagnostics()
+    if state.animation_diag_registered then
+        return
+    end
+    if interfaces.AnimationController == nil or type(interfaces.AnimationController.addTextKeyHandler) ~= "function" then
+        log.warn("animation diagnostics unavailable: AnimationController.addTextKeyHandler missing")
+        return
+    end
+
+    -- OpenMW interface docs: addTextKeyHandler can observe spellcast release text keys.
+    -- https://openmw.readthedocs.io/en/latest/reference/lua-scripting/interface_animation.html
+    interfaces.AnimationController.addTextKeyHandler("spellcast", function(groupname, key)
+        log.info(string.format("local animation text key group=%s key=%s", tostring(groupname), tostring(key)))
+        core.sendGlobalEvent(events.CAST_DIAG_SIGNAL, {
+            sender = self.object,
+            groupname = groupname,
+            key = key,
+            selected_spell_id = state.last_spell_id,
+        })
+    end)
+    state.animation_diag_registered = true
+    log.info("registered local spellcast text-key diagnostics")
+end
+
 local function requestBackend()
     state.backend = "PENDING"
     core.sendGlobalEvent(events.CHECK_BACKEND, {
@@ -211,6 +237,7 @@ return {
             end
             state.backend = "READY"
             log.info("backend READY")
+            registerAnimationDiagnostics()
         end,
         [events.BACKEND_UNAVAILABLE] = function(payload)
             if state.handshake_timer then
