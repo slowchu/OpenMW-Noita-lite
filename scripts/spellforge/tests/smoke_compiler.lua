@@ -44,7 +44,7 @@ end
 
 local function waitForResult(request_id, timeout_seconds, callback)
     state.pending[request_id] = callback
-    async.newSimulationTimer(timeout_seconds, function()
+    async:newUnsavableSimulationTimer(timeout_seconds, function()
         if state.pending[request_id] then
             local cb = state.pending[request_id]
             state.pending[request_id] = nil
@@ -134,7 +134,7 @@ end
 local function requestBackend()
     state.backend = "PENDING"
     core.sendGlobalEvent(events.CHECK_BACKEND, nil)
-    state.handshake_timer = async.newSimulationTimer(3, function()
+    state.handshake_timer = async:newUnsavableSimulationTimer(3, function()
         if state.backend == "PENDING" then
             state.backend = "UNAVAILABLE"
             log.warn("backend timeout after 3 seconds")

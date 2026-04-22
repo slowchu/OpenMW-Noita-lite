@@ -1,4 +1,9 @@
+local bit = require("bit")
+
 local canonicalize = {}
+
+local FNV_OFFSET_32 = 2166136261
+local FNV_PRIME_32 = 16777619
 
 local function sortedKeys(tbl)
     local keys = {}
@@ -42,10 +47,10 @@ local function serializeRecipe(recipe)
 end
 
 local function fnv1a32(input)
-    local hash = 2166136261
+    local hash = FNV_OFFSET_32
     for i = 1, #input do
-        hash = hash ~ string.byte(input, i)
-        hash = (hash * 16777619) % 4294967296
+        hash = bit.bxor(hash, string.byte(input, i))
+        hash = bit.band(hash * FNV_PRIME_32, 0xFFFFFFFF)
     end
     return string.format("%08x", hash)
 end

@@ -31,7 +31,7 @@ local function requestBackend()
     core.sendGlobalEvent(events.CHECK_BACKEND, nil)
 
     cancelHandshakeTimer()
-    state.handshake_timer = async.newSimulationTimer(3, function()
+    state.handshake_timer = async:newUnsavableSimulationTimer(3, function()
         if state.backend == "PENDING" then
             state.backend = "UNAVAILABLE"
             if not state.unavailable_logged then
