@@ -177,12 +177,19 @@ local function registerAnimationDiagnostics()
     -- OpenMW interface docs: addTextKeyHandler can observe spellcast release text keys.
     -- https://openmw.readthedocs.io/en/latest/reference/lua-scripting/interface_animation.html
     interfaces.AnimationController.addTextKeyHandler("spellcast", function(groupname, key)
-        log.info(string.format("local animation text key group=%s key=%s", tostring(groupname), tostring(key)))
+        local selected_spell = types.Actor.getSelectedSpell(self)
+        local selected_spell_id = selected_spell and selected_spell.id or nil
+        log.info(string.format(
+            "local animation text key group=%s key=%s selected_spell_id=%s",
+            tostring(groupname),
+            tostring(key),
+            tostring(selected_spell_id)
+        ))
         core.sendGlobalEvent(events.CAST_DIAG_SIGNAL, {
             sender = self.object,
             groupname = groupname,
             key = key,
-            selected_spell_id = state.last_spell_id,
+            selected_spell_id = selected_spell_id,
         })
     end)
     state.animation_diag_registered = true
