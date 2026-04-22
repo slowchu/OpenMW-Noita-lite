@@ -6,8 +6,32 @@ local records = {}
 
 local section = storage.globalSection("SpellforgeCompiled")
 local KEY_RECIPE_INDEX = "recipe_index"
+
+local function normalizeRecipeIndex(value)
+    if type(value) == "table" then
+        return value
+    end
+
+    local normalized = {}
+    if value == nil then
+        return normalized
+    end
+
+    local ok, err = pcall(function()
+        for k, v in pairs(value) do
+            normalized[k] = v
+        end
+    end)
+    if not ok then
+        log.error(string.format("records.normalizeRecipeIndex failed: %s", tostring(err)))
+        return {}
+    end
+
+    return normalized
+end
+
 local in_memory = {
-    by_recipe = section:get(KEY_RECIPE_INDEX) or {},
+    by_recipe = normalizeRecipeIndex(section:get(KEY_RECIPE_INDEX)),
 }
 
 local function persist()
