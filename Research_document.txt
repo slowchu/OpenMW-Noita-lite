@@ -1,0 +1,112 @@
+A. Detection
+
+A1. What hook does OSSC use to detect cast intent?
+OSSC does not hook the vanilla cast key. It registers its own boolean input action named OSSC_QuickCast in scripts/OSSC/ossc_settings.lua:5-11, exposes that as a bindable “Quick Cast” control in scripts/OSSC/ossc_settings.lua:21-40, and then listens for that action with input.registerActionHandler('OSSC_QuickCast', ...) in scripts/OSSC/ossc_player.lua:483-664. The README matches that implementation: it describes a dedicated casting key that lets you cast without needing to switch to spell stance.
+
+A2. What information is available at that detection point?
+At the action-handler stage, OSSC resolves the currently selected magic source by trying, in order, core.magic.getSelectedSpell(), types.Player.getSelectedSpell(self), types.Player.getSelectedEnchantedItem(self), and types.Actor.getSelectedSpell(self), then normalizes the result into an activeSpell table. That happens in scripts/OSSC/ossc_player.lua:497-603. It also logs the player’s current stance there with types.Actor.getStance(self). However, OSSC does not compute startPos or direction at this stage; those are derived later, when the queued launch actually fires, in scripts/OSSC/ossc_player.lua:261-351. Likewise, magicka is not checked at detection time; OSSC checks and deducts magicka later in scripts/OSSC/ossc_player.lua:245-253. So: selected spell/enchanted item is resolved at detection; precise launch pose and magicka handling are deferred until the queued fire moment.
+
+A3. Custom hotkey or default cast key?
+It is custom hotkey only. I did not find any explicit hook for the normal vanilla cast input path. The only registered action is OSSC_QuickCast, and the README frames the mod as casting through a dedicated key “without needing to switch to spell stance.” That is a major architectural difference from Spellforge’s selective interception requirement.
+
+B. Suppression
+
+B1. How does OSSC prevent the vanilla cast from firing?
+It takes path (a): sidestep rather than suppress. OSSC does not appear to enter vanilla spell stance and then block release; it instead launches its own custom cast flow from the OSSC_QuickCast action. In scripts/OSSC/ossc_player.lua:629-662 it sets isCasting, optionally overrides combat controls, breaks invisibility via MagExp_BreakInvisibility, chooses either quickbuff or quickthrow, and plays a scripted blended animation. There is no code here that intercepts or discards a vanilla projectile after the fact.
+
+B2. How is the animation handled?
+OSSC triggers animation itself. It plays blended scripted animations through I.AnimationController.playBlendedAnimation(...) in scripts/OSSC/ossc_player.lua:640-662, registers text-key handlers for quickthrow and quickbuff in scripts/OSSC/ossc_player.lua:667-672, and uses those text keys in scripts/OSSC/ossc_player.lua:403-481 to drive wind-up sound, hand-glow VFX, queued launch timing, and cleanup. The actual spell dispatch is not tied to vanilla cast logic; it is driven by the custom animation/text-key flow plus the pendingLaunches queue.
+
+B3. What side effects does this avoid?
+The cleanest reading is: OSSC avoids double-firing and most vanilla-side conflicts by never relying on the vanilla cast path in the first place. The code removes OSSC_HandGlow on release and stop, clears custom VFX, and resets overrideCombatControls(false) when custom animations end. That strongly suggests the mod is intentionally self-contained around its own animation lifecycle rather than trying to suppress stray vanilla effects after the engine has already cast something. This is an inference from scripts/OSSC/ossc_player.lua:394-401 and 403-481, but it is consistent with both code and README.
+
+C. Dispatch
+
+C1. How does OSSC construct the launchSpell/cast request?
+OSSC does not call I.MagExp.launchSpell directly from the player script. Instead it sends the global event MagExp_CastRequest from scripts/OSSC/ossc_player.lua:341-351, which SFP handles in its global script. OSSC computes startPos differently for first- vs third-person, derives an aiming ray from the camera with nearby.castRay, resolves aimPoint/hitObject, applies a center-mass correction for nearby actors, then normalizes skewedDirection = (aimPoint - startPos):normalize(). For touch spells it clears hitObject if the target is too far; it also adjusts spawnOffset based on proximity. The event payload contains attacker, spellId, startPos, direction, area, isFree = true, item, hitObject, and spawnOffset. In SFP, launchSpell(data) expects attacker, spellId, startPos, and direction, honors isFree, and uses hitObject as the authoritative touch target when routing touch spells.
+
+C2. Does OSSC handle magicka cost itself?
+Yes. OSSC passes isFree = true, so it is intentionally bypassing SFP’s optional magicka check. In scripts/OSSC/ossc_player.lua:245-253, OSSC reads types.Actor.stats.dynamic.magicka(self), checks magicka.current < cost, shows “Not enough Magicka.” plus a failure sound, and otherwise deducts magicka itself. SFP’s launchSpell(data) only performs its own magicka guard when data.isFree is false.
+
+C3. Does OSSC handle skill XP progression?
+Yes. In scripts/OSSC/ossc_player.lua:366-381, it calls I.SkillProgression.skillUsed('enchant', ...) for item casts and I.SkillProgression.skillUsed(mgef.school, ...) for normal spells. This is explicit OSSC-side handling, not delegated to SFP.
+
+C4. Does OSSC handle vanilla failure chance?
+Yes, OSSC reimplements failure chance itself. scripts/OSSC/ossc_player.lua:109-139 computes chance from school skill, willpower, luck, cost, and fatigue ratio; then scripts/OSSC/ossc_player.lua:208-216 and 256-385 roll math.random(1, 100) and either proceed or show “Your spell failed to cast.” with a failure sound. That means OSSC is not relying on vanilla engine failure handling for this path. Also notable: there is a UseFatigue setting declared in ossc_settings.lua:51-57, but I did not find OSSC using that setting to disable fatigue from its cast-chance formula; the formula always includes fatigue.
+
+D. Script context and event flow
+
+D1. What lives in PLAYER vs GLOBAL?
+The .omwscripts file declares ossc_settings.lua and ossc_player.lua as PLAYER scripts, and ossc_global.lua as GLOBAL. The player script owns input, spell selection, animation, queued launch timing, dispatch to SFP, and XP award. The global script owns scroll removal, enchantment charge consumption, and registration of a MagExp target filter that vetoes dead actors.
+
+D2. Is there a handshake pattern like CheckBackend / BackendReady / timeout?
+No. I did not find any backend-ready handshake. The player script sends core.sendGlobalEvent(...) directly for MagExp_CastRequest, OSSC_ConsumeScroll, OSSC_ConsumeCharge, and MagExp_BreakInvisibility; the global script simply exposes matching event handlers. This is a direct fire-and-forget event contract, not a request/acknowledgment protocol.
+
+D3. How does OSSC pass the player actor reference?
+It passes the actor object itself in event payloads: attacker = self for MagExp_CastRequest and actor = self for consumption events. I did not find any addressed-reply or correlation-token pattern.
+
+E. Edge cases OSSC handles
+
+Explicitly handled in code:
+No spell selected (scripts/OSSC/ossc_player.lua:525-529), paused/UI mode (483-489), already casting (489), incapacitated animation groups including knockdown/knockout/swim knockdown/spellcast (88-90, 493-495), not enough magicka (245-253), not enough enchantment charge (227-236), out of scroll items (237-241), spell failure chance (109-139, 256-385), powers rejected from OSSC path with the message “Use spell stance” (624-626), touch target too far / no valid touch target found (322-331), and dead or dying targets vetoed globally through MagExp’s target filter (ossc_global.lua:26-39). Enchanted items and scrolls are also explicitly normalized and supported in the selection logic (ossc_player.lua:509-603).
+
+What I did not find explicit handling for:
+I did not find explicit checks for underwater state, paralysis, silence, or menu-specific edge cases beyond the generic ui.activeMode / I.UI.getMode / core.isWorldPaused() gate. I also did not find an OSSC-specific NPC casting path; the OSSC input layer is player-only. That is a negative finding from the repo review, not a guess.
+
+Save/load mid-cast:
+I only found persistence for powerCooldowns in scripts/OSSC/ossc_player.lua:677-685. I did not find serialization for isCasting, currentSpell, or pendingLaunches. My reading is that a mid-cast queue would not be restored across load. That last sentence is an inference from what onSave/onLoad do and do not store.
+
+F. Dependencies and ordering
+
+F1. Exact dependency list
+OSSC’s README lists two requirements: Magicka Expanded Framework and MaxYari Lua Physics. The current framework repo has been renamed and presents itself as SPELL FRAMEWORK PLUS v1.61, and its README says it uses MaxYari Lua Physics as a hard dependency. OSSC itself is labeled v1.2 in its README. I did not find version pins for MaxYari or for the framework dependency beyond those repo/readme labels.
+
+F2. Load order constraints vs SFP / MaxYari / others
+What is explicit: SFP says SPELL_FRAMEWORK_PLUS.omwscripts must be loaded, and OSSC clearly depends on the I.MagExp interface and on MagExp_CastRequest. What is not explicit in OSSC’s repo: I found no written load-order note like “OSSC must load after SFP” or any compatibility notes about other mods. So the practical dependency is clear, but the repo does not spell out a detailed order policy.
+
+F3. Does OSSC’s .omwscripts enforce priority?
+Only in the narrow sense that it declares script types and file order:
+PLAYER: scripts/OSSC/ossc_settings.lua
+PLAYER: scripts/OSSC/ossc_player.lua
+GLOBAL: scripts/OSSC/ossc_global.lua
+I found no explicit priority metadata beyond that declaration. SFP’s .omwscripts likewise just declares its global/player/custom/player scripts.
+
+G. Patterns worth copying vs patterns specific to OSSC
+
+G1. Patterns that apply directly to Spellforge’s selective interception
+The most reusable pieces are:
+
+spell-source normalization across multiple OpenMW APIs (core.magic.getSelectedSpell, types.Player.getSelectedSpell, enchanted-item fallback, inventory linking) in ossc_player.lua:497-603;
+player → global event handoff to SFP via MagExp_CastRequest;
+explicit resource ownership when using isFree = true—OSSC handles magicka, scroll count, charge cost, failure chance, and XP itself;
+dead-target veto through the MagExp target-filter hook in ossc_global.lua:26-39.
+Those patterns are not inherently tied to a custom hotkey.
+
+G2. Patterns that assume “replace all casting” and would need adaptation
+The big OSSC-specific assumption is the custom input path. Everything starts from OSSC_QuickCast, then runs custom animations (quickthrow / quickbuff), then uses custom text keys to time the queued fire. That is excellent for “replace casting with a new UX,” but it does not solve “intercept the normal vanilla cast key only for certain spell IDs.” Spellforge would need a different trigger if it truly must catch the vanilla stance + cast sequence.
+
+G3. Could OSSC’s hook let you check spell ID before deciding to intercept?
+Inside OSSC’s own flow, yes: once OSSC_QuickCast fires, the player script has activeSpell.id before it starts the animation, so it could branch on spell ID there. But that only helps inside OSSC’s custom hotkey path. For Spellforge’s stated requirement—selective interception of the normal vanilla cast sequence—I do not see a usable vanilla-cast hook in OSSC. You would still need different detection for the selective case.
+
+H. OpenMW API surface OSSC uses
+
+Grouped by module, these are the OpenMW Lua surfaces I found OSSC calling directly:
+
+openmw.input: registerAction, registerActionHandler, ACTION_TYPE.Boolean — define and listen for OSSC_QuickCast.
+openmw.interfaces.Settings: registerPage, registerGroup — expose bindings and gameplay settings.
+openmw.interfaces.AnimationController: playBlendedAnimation, addTextKeyHandler — run custom cast animations and observe text keys.
+openmw.interfaces.Controls: overrideCombatControls — temporarily lock combat controls during custom cast flow.
+openmw.interfaces.SkillProgression: skillUsed — award Enchant or school XP.
+openmw.interfaces.MagExp: setTargetFilter — veto dead targets globally.
+openmw.interfaces.UI: getMode — UI mode fallback check.
+openmw.core: sendGlobalEvent, getSimulationTime, isWorldPaused, sound.playSound3d, spell/enchantment/effect record lookups, core.magic.getSelectedSpell, GMST/effect enums.
+openmw.types: selected spell/item APIs, equipment/inventory access, itemData, actor stats, attributes, skills, stance, active effects, record accessors.
+openmw.animation: addVfx, removeVfx, isPlaying, setSpeed, PRIORITY.Scripted.
+openmw.camera: getMode, getPosition, getYaw, getPitch, getExtraYaw, getExtraPitch, getThirdPersonDistance.
+openmw.nearby: castRay, castRenderingRay (the latter in SharedRay_v1.lua).
+openmw.storage: playerSection — read settings like debug mode, speeds, XP ratio.
+openmw.ui: activeMode, showMessage.
+openmw.debug: isGodMode.
+openmw.util: vector3.
+openmw.async: newUnsavableSimulationTimer.
+OSSC also ships SharedRay_v1.lua, which exposes a shared per-frame raycast service through interfaceName = "SharedRay" with onFrame caching and get() access.
