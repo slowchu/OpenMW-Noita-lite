@@ -84,13 +84,20 @@ function compiler.compile(actor, recipe, request_id)
             tostring(cached.frontend_logical_id),
             tostring(cached.frontend_spell_id)
         ))
-        return {
+        local result_payload = {
             request_id = request_id,
             ok = true,
             recipe_id = canonical.recipe_id,
             spell_id = cached.frontend_spell_id,
             reused = true,
         }
+        log.info(string.format(
+            "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
+            tostring(result_payload.spell_id),
+            tostring(cached.frontend_logical_id),
+            tostring(cached.frontend_spell_id)
+        ))
+        return result_payload
     end
 
     local emitters = {}
@@ -150,13 +157,20 @@ function compiler.compile(actor, recipe, request_id)
         tostring(frontend_spell_id)
     ))
 
-    return {
+    local result_payload = {
         request_id = request_id,
         ok = true,
         recipe_id = canonical.recipe_id,
         spell_id = frontend_spell_id,
         reused = false,
     }
+    log.info(string.format(
+        "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
+        tostring(result_payload.spell_id),
+        tostring(frontend_logical_spell_id),
+        tostring(frontend_spell_id)
+    ))
+    return result_payload
 end
 
 function compiler.handleCompileEvent(payload)
