@@ -9,6 +9,8 @@ local log = require("scripts.spellforge.shared.log").new("global.compiler")
 
 local compiler = {}
 
+local MARKER_EFFECT_ID = "spellforge_composed"
+
 local KNOWN_BASE_SPELL_IDS = {}
 for _, record in pairs(core.magic.spells.records) do
     if record and type(record.id) == "string" and record.id ~= "" then
@@ -16,60 +18,168 @@ for _, record in pairs(core.magic.spells.records) do
     end
 end
 
-local function collectEmitters(nodes, out)
-    for _, node in ipairs(nodes or {}) do
-        if node.kind == "emitter" then
-            out[#out + 1] = node
-        end
-        if node.payload then
-            collectEmitters(node.payload, out)
-        end
+local function cloneEffects(effects)
+    local out = {}
+    for _, effect in ipairs(effects or {}) do
+        out[#out + 1] = {
+            id = effect.id,
+            range = effect.range,
+            area = effect.area,
+            duration = effect.duration,
+            magnitudeMin = effect.magnitudeMin,
+            magnitudeMax = effect.magnitudeMax,
+        }
     end
+    return out
 end
 
-local function createDraft(record_id, emitter)
-    local base = core.magic.spells.records[emitter.base_spell_id]
+local function scaleMagnitude(value, percent)
+    if type(value) ~= "number" then
+        return value
+    end
+    local factor = 1 + ((percent or 0) / 100)
+    if factor < 0 then
+        factor = 0
+    end
+    return math.floor((value * factor) + 0.5)
+end
+
+local function scaleArea(value, percent)
+    if type(value) ~= "number" then
+        return value
+    end
+    local factor = 1 + ((percent or 0) / 100)
+    if factor < 0 then
+        factor = 0
+    end
+    return math.floor((value * factor) + 0.5)
+end
+
+local function applyLaunchMods(base_effects, mods)
+    local out = cloneEffects(base_effects)
+    local damage_percent = 0
+    local size_percent = 0
+
+    for _, mod in ipairs(mods or {}) do
+        if mod.opcode == "Damage+" then
+            damage_percent = damage_percent + (mod.params and mod.params.percent or 0)
+        elseif mod.opcode == "Size+" then
+            size_percent = size_percent + (mod.params and mod.params.percent or 0)
+        end
+    end
+
+    if damage_percent ~= 0 or size_percent ~= 0 then
+        for _, effect in ipairs(out) do
+            effect.magnitudeMin = scaleMagnitude(effect.magnitudeMin, damage_percent)
+            effect.magnitudeMax = scaleMagnitude(effect.magnitudeMax, damage_percent)
+            effect.area = scaleArea(effect.area or 0, size_percent)
+        end
+    end
+
+    return out
+end
+
+local function markerEffect()
+    return {
+        {
+            id = MARKER_EFFECT_ID,
+            range = core.magic.RANGE.Self,
+            area = 0,
+            duration = 0,
+            magnitudeMin = 0,
+            magnitudeMax = 0,
+        },
+    }
+end
+
+local function createDraft(record_id, display_name, cost)
     local draft = core.magic.spells.createRecordDraft {
         id = record_id,
-        name = string.format("Spellforge %s", record_id),
-        cost = 0,
-        effects = base.effects,
+        name = display_name,
+        cost = cost,
+        isAutocalc = false,
+        effects = markerEffect(),
     }
-    log.info(string.format("createRecordDraft called id=%s effect_count=%d", tostring(record_id), #(draft.effects or {})))
     return draft
 end
 
 local function addToSpellbook(actor, engine_id)
     local actor_spells = types.Actor.spells(actor)
-    log.debug(string.format("ActorSpells:add before actor=%s engine_id=%s", tostring(actor and actor.recordId), tostring(engine_id)))
-    log.info(string.format("ActorSpells:add called actor=%s engine_id=%s", tostring(actor and actor.recordId), tostring(engine_id)))
     local ok, add_err = pcall(actor_spells.add, actor_spells, engine_id)
     if not ok then
         log.error(string.format("compiler ActorSpells:add failed actor=%s engine_id=%s err=%s", tostring(actor and actor.recordId), tostring(engine_id), tostring(add_err)))
         return false, add_err
     end
-    log.debug(string.format("ActorSpells:add after actor=%s engine_id=%s", tostring(actor and actor.recordId), tostring(engine_id)))
-    log.info("ActorSpells:add completed")
     return true, nil
 end
 
-function compiler.compile(actor, recipe, request_id)
-    local node_count = type(recipe) == "table" and type(recipe.nodes) == "table" and #recipe.nodes or 0
-    local root_base_spell_id = nil
-    if type(recipe) == "table" and type(recipe.nodes) == "table" and type(recipe.nodes[1]) == "table" then
-        root_base_spell_id = recipe.nodes[1].base_spell_id
+local function getSpellCost(spell_id)
+    local spell = core.magic.spells.records[spell_id]
+    if not spell then
+        return 0
     end
-    log.debug(string.format("compile entry request_id=%s actor=%s nodes=%d", tostring(request_id), tostring(actor and actor.recordId), node_count))
-    log.info(string.format("compile requested root_base_spell_id=%s node_count=%d", tostring(root_base_spell_id), node_count))
+    return tonumber(spell.cost) or 0
+end
 
+local function parseSequence(nodes, path, node_entries, runtime)
+    local pending_mods = {}
+    local last_emitter = nil
+
+    for i, node in ipairs(nodes or {}) do
+        local current_path = {}
+        for j, value in ipairs(path) do
+            current_path[j] = value
+        end
+        current_path[#current_path + 1] = i
+
+        if node.kind == "emitter" then
+            runtime.next_node_index = runtime.next_node_index + 1
+            local node_index = runtime.next_node_index
+            local base = core.magic.spells.records[node.base_spell_id]
+            local node_entry = {
+                node_index = node_index,
+                node_path = current_path,
+                base_spell_id = node.base_spell_id,
+                launch_mods = pending_mods,
+                real_effects = applyLaunchMods(base and base.effects or {}, pending_mods),
+                payload = node.payload,
+            }
+            node_entries[#node_entries + 1] = node_entry
+            last_emitter = node_entry
+            pending_mods = {}
+
+            runtime.total_cost = runtime.total_cost + getSpellCost(node.base_spell_id)
+
+            if type(node.payload) == "table" then
+                parseSequence(node.payload, current_path, node_entries, runtime)
+            end
+        elseif node.opcode == "Trigger" or node.opcode == "Timer" then
+            if last_emitter then
+                last_emitter.trigger = {
+                    opcode = node.opcode,
+                    seconds = node.params and node.params.seconds,
+                    payload = node.payload,
+                }
+                if type(node.payload) == "table" then
+                    parseSequence(node.payload, current_path, node_entries, runtime)
+                end
+            end
+        else
+            pending_mods[#pending_mods + 1] = {
+                opcode = node.opcode,
+                params = node.params,
+            }
+        end
+    end
+end
+
+function compiler.compile(actor, recipe, request_id)
     local checked = validate.run(recipe, {
         known_base_spell_ids = KNOWN_BASE_SPELL_IDS,
     })
     if not checked.ok then
-        log.info(string.format("validation failed error_count=%d", #(checked.errors or {})))
         return { request_id = request_id, ok = false, errors = checked.errors }
     end
-    log.info(string.format("validation passed node_count=%d", node_count))
 
     local canonical = canonicalize.run(recipe)
     local cached = records.getByRecipeId(canonical.recipe_id)
@@ -78,58 +188,43 @@ function compiler.compile(actor, recipe, request_id)
         if not added_ok then
             return { request_id = request_id, ok = false, error = tostring(add_err) }
         end
-        log.info(string.format(
-            "cache hit recipe_id=%s frontend_logical_id=%s frontend_engine_id=%s",
-            tostring(canonical.recipe_id),
-            tostring(cached.frontend_logical_id),
-            tostring(cached.frontend_spell_id)
-        ))
-        local result_payload = {
+        return {
             request_id = request_id,
             ok = true,
             recipe_id = canonical.recipe_id,
             spell_id = cached.frontend_spell_id,
             reused = true,
         }
-        log.info(string.format(
-            "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
-            tostring(result_payload.spell_id),
-            tostring(cached.frontend_logical_id),
-            tostring(cached.frontend_spell_id)
-        ))
-        return result_payload
     end
 
-    local emitters = {}
-    collectEmitters(recipe.nodes, emitters)
-    if #emitters == 0 then
+    local node_entries = {}
+    local runtime = {
+        total_cost = 0,
+        next_node_index = -1,
+    }
+    parseSequence(recipe.nodes, {}, node_entries, runtime)
+    if #node_entries == 0 then
         return { request_id = request_id, ok = false, error = "Recipe has no emitter nodes" }
     end
 
     local generated_spell_ids = {}
     local generated_engine_spell_ids = {}
-    for idx, emitter in ipairs(emitters) do
-        local logical_id = string.format("spellforge_%s_n%d", canonical.recipe_id, idx - 1)
-        local draft = createDraft(logical_id, emitter)
-        log.debug(string.format("world.createRecord before logical_id=%s draft=%s", tostring(logical_id), tostring(draft)))
-        log.info(string.format("world.createRecord called logical_id=%s", tostring(logical_id)))
+    for _, node_entry in ipairs(node_entries) do
+        local logical_id = string.format("spellforge_%s_n%d", canonical.recipe_id, node_entry.node_index)
+        local display_name = node_entry.node_index == 0 and string.format("Spellforge %s", canonical.recipe_id) or string.format("Spellforge Internal %s.%d", canonical.recipe_id, node_entry.node_index)
+        local draft = createDraft(logical_id, display_name, runtime.total_cost)
         local created_record, create_error = records.createRecord(draft)
         if create_error then
-            log.error(string.format("compiler world.createRecord failed logical_id=%s err=%s", tostring(logical_id), tostring(create_error)))
             return { request_id = request_id, ok = false, errors = { { message = tostring(create_error) } } }
         end
         local engine_id = created_record and created_record.id or nil
-        log.info(string.format(
-            "world.createRecord ids draft_id=%s engine_id=%s record_obj=%s",
-            tostring(draft and draft.id),
-            tostring(engine_id),
-            tostring(created_record)
-        ))
-        log.debug(string.format("world.createRecord after logical_id=%s return=%s", tostring(logical_id), tostring(created_record)))
         if type(engine_id) ~= "string" or engine_id == "" then
-            log.error(string.format("compiler world.createRecord missing engine_id logical_id=%s", tostring(logical_id)))
             return { request_id = request_id, ok = false, errors = { { message = "world.createRecord returned record without id" } } }
         end
+
+        node_entry.logical_id = logical_id
+        node_entry.engine_id = engine_id
+
         generated_spell_ids[#generated_spell_ids + 1] = logical_id
         generated_engine_spell_ids[#generated_engine_spell_ids + 1] = engine_id
     end
@@ -147,30 +242,17 @@ function compiler.compile(actor, recipe, request_id)
         frontend_spell_id = frontend_spell_id,
         generated_spell_ids = generated_spell_ids,
         generated_engine_spell_ids = generated_engine_spell_ids,
+        node_entries = node_entries,
         recipe = recipe,
     })
 
-    log.info(string.format(
-        "compiled recipe_id=%s frontend_logical_id=%s frontend_engine_id=%s",
-        canonical.recipe_id,
-        tostring(frontend_logical_spell_id),
-        tostring(frontend_spell_id)
-    ))
-
-    local result_payload = {
+    return {
         request_id = request_id,
         ok = true,
         recipe_id = canonical.recipe_id,
         spell_id = frontend_spell_id,
         reused = false,
     }
-    log.info(string.format(
-        "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
-        tostring(result_payload.spell_id),
-        tostring(frontend_logical_spell_id),
-        tostring(frontend_spell_id)
-    ))
-    return result_payload
 end
 
 function compiler.handleCompileEvent(payload)

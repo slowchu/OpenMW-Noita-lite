@@ -40,3 +40,24 @@
 
 2. **Smoke harness behavior**
    - For cast tests, include manual-cast guidance and timeout diagnostics to avoid silent hangs.
+
+## Phase 2.2 Additions
+
+1. **Marker-effect compilation for vanilla no-op casts**
+   - Compiled Spellforge spellbook records now carry a custom marker effect (`spellforge_composed`) only.
+   - Real emitter effects are preserved in global metadata (`real_effects`) and executed by the runtime dispatcher.
+
+2. **Selective vanilla-cast interception pattern**
+   - Interception is anchored on `onInputAction(input.ACTION.Use)` with stance, magicka, and delayed release checks.
+   - Spell-source normalization uses a cascade: `core.magic.getSelectedSpell()` -> `types.Player.getSelectedSpell(self)` -> `types.Player.getSelectedEnchantedItem(self)` -> `types.Actor.getSelectedSpell(self)`.
+
+3. **Player->Global ownership query before intercept**
+   - Player context does not directly inspect global metadata storage.
+   - Added query/reply event pair so player scripts can ask global whether a selected spell ID is Spellforge-owned before intercepting.
+
+4. **Runtime cookie routing for payload execution**
+   - Executor now tags launched projectiles and uses `MagExp_OnMagicHit` to route follow-up Trigger/Timer payloads.
+   - AoE-style terminal payloads should prefer `I.MagExp.detonateSpellAtPos` where possible.
+
+5. **Global MagExp target filter polish**
+   - Register a global target filter to veto dead actors so dispatched projectiles do not waste payload logic on corpses.
