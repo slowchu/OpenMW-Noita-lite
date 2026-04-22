@@ -7,19 +7,50 @@ local records = {}
 local section = storage.globalSection("SpellforgeCompiled")
 local KEY_RECIPE_INDEX = "recipe_index"
 
-local function normalizeRecipeIndex(value)
-    if type(value) == "table" then
-        return value
+local function sanitizeGeneratedSpellIds(generated_spell_ids)
+    local out = {}
+    if type(generated_spell_ids) ~= "table" then
+        return out
     end
+    for i, spell_id in ipairs(generated_spell_ids) do
+        if type(spell_id) == "string" then
+            out[i] = spell_id
+        end
+    end
+    return out
+end
 
+local function sanitizeEntry(entry)
+    if type(entry) ~= "table" then
+        return nil
+    end
+    return {
+        canonical = type(entry.canonical) == "string" and entry.canonical or nil,
+        frontend_spell_id = type(entry.frontend_spell_id) == "string" and entry.frontend_spell_id or nil,
+        generated_spell_ids = sanitizeGeneratedSpellIds(entry.generated_spell_ids),
+    }
+end
+
+local function normalizeRecipeIndex(value)
     local normalized = {}
     if value == nil then
         return normalized
     end
 
+    if type(value) == "table" then
+        for k, v in pairs(value) do
+            if type(k) == "string" then
+                normalized[k] = sanitizeEntry(v)
+            end
+        end
+        return normalized
+    end
+
     local ok, err = pcall(function()
         for k, v in pairs(value) do
-            normalized[k] = v
+            if type(k) == "string" then
+                normalized[k] = sanitizeEntry(v)
+            end
         end
     end)
     if not ok then
@@ -43,7 +74,7 @@ function records.getByRecipeId(recipe_id)
 end
 
 function records.put(recipe_id, payload)
-    in_memory.by_recipe[recipe_id] = payload
+    in_memory.by_recipe[recipe_id] = sanitizeEntry(payload)
     persist()
 end
 
