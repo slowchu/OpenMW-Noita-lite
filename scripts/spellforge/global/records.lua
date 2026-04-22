@@ -119,4 +119,21 @@ function records.deleteBySpellId(spell_id)
     return false, nil
 end
 
+function records.findByEngineSpellId(engine_id)
+    if type(engine_id) ~= "string" or engine_id == "" then
+        return nil, nil
+    end
+    for recipe_id, entry in pairs(in_memory.by_recipe) do
+        if entry and entry.frontend_spell_id == engine_id then
+            return recipe_id, entry
+        end
+        for _, generated_engine_id in ipairs(entry and entry.generated_engine_spell_ids or {}) do
+            if generated_engine_id == engine_id then
+                return recipe_id, entry
+            end
+        end
+    end
+    return nil, nil
+end
+
 return records

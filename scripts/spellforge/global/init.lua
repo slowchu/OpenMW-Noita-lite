@@ -2,6 +2,7 @@ local core = require("openmw.core")
 local interfaces = require("openmw.interfaces")
 
 local compiler = require("scripts.spellforge.global.compiler")
+local executor = require("scripts.spellforge.global.executor")
 local events = require("scripts.spellforge.shared.events")
 local records = require("scripts.spellforge.global.records")
 local log = require("scripts.spellforge.shared.log").new("global.init")
@@ -110,5 +111,8 @@ return {
         [events.CHECK_BACKEND] = onCheckBackend,
         [events.COMPILE_RECIPE] = onCompileRecipe,
         [events.DELETE_COMPILED] = onDeleteCompiled,
+        [events.CAST_REQUEST] = executor.onCastRequest,
+        [events.BEGIN_CAST_OBSERVE] = executor.onBeginObserve,
+        MagExp_OnMagicHit = executor.onMagicHit,
     },
 }
