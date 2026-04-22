@@ -39,16 +39,16 @@ local function createDraft(record_id, emitter)
     return draft
 end
 
-local function addToSpellbook(actor, spell_id)
+local function addToSpellbook(actor, engine_id)
     local actor_spells = types.Actor.spells(actor)
-    log.debug(string.format("ActorSpells:add before actor=%s spell_id=%s", tostring(actor and actor.recordId), tostring(spell_id)))
-    log.info(string.format("ActorSpells:add called actor=%s spell_id=%s", tostring(actor and actor.recordId), tostring(spell_id)))
-    local ok, add_err = pcall(actor_spells.add, actor_spells, spell_id)
+    log.debug(string.format("ActorSpells:add before actor=%s engine_id=%s", tostring(actor and actor.recordId), tostring(engine_id)))
+    log.info(string.format("ActorSpells:add called actor=%s engine_id=%s", tostring(actor and actor.recordId), tostring(engine_id)))
+    local ok, add_err = pcall(actor_spells.add, actor_spells, engine_id)
     if not ok then
-        log.error(string.format("compiler ActorSpells:add failed actor=%s spell_id=%s err=%s", tostring(actor and actor.recordId), tostring(spell_id), tostring(add_err)))
+        log.error(string.format("compiler ActorSpells:add failed actor=%s engine_id=%s err=%s", tostring(actor and actor.recordId), tostring(engine_id), tostring(add_err)))
         return false, add_err
     end
-    log.debug(string.format("ActorSpells:add after actor=%s spell_id=%s", tostring(actor and actor.recordId), tostring(spell_id)))
+    log.debug(string.format("ActorSpells:add after actor=%s engine_id=%s", tostring(actor and actor.recordId), tostring(engine_id)))
     log.info("ActorSpells:add completed")
     return true, nil
 end
@@ -78,13 +78,26 @@ function compiler.compile(actor, recipe, request_id)
         if not added_ok then
             return { request_id = request_id, ok = false, error = tostring(add_err) }
         end
-        return {
+        log.info(string.format(
+            "cache hit recipe_id=%s frontend_logical_id=%s frontend_engine_id=%s",
+            tostring(canonical.recipe_id),
+            tostring(cached.frontend_logical_id),
+            tostring(cached.frontend_spell_id)
+        ))
+        local result_payload = {
             request_id = request_id,
             ok = true,
             recipe_id = canonical.recipe_id,
             spell_id = cached.frontend_spell_id,
             reused = true,
         }
+        log.info(string.format(
+            "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
+            tostring(result_payload.spell_id),
+            tostring(cached.frontend_logical_id),
+            tostring(cached.frontend_spell_id)
+        ))
+        return result_payload
     end
 
     local emitters = {}
@@ -94,23 +107,35 @@ function compiler.compile(actor, recipe, request_id)
     end
 
     local generated_spell_ids = {}
+    local generated_engine_spell_ids = {}
     for idx, emitter in ipairs(emitters) do
-        local record_id = string.format("spellforge_%s_n%d", canonical.recipe_id, idx - 1)
-        local draft = createDraft(record_id, emitter)
-        log.debug(string.format("world.createRecord before id=%s draft=%s", tostring(record_id), tostring(draft)))
-        log.info(string.format("world.createRecord called id=%s", tostring(record_id)))
+        local logical_id = string.format("spellforge_%s_n%d", canonical.recipe_id, idx - 1)
+        local draft = createDraft(logical_id, emitter)
+        log.debug(string.format("world.createRecord before logical_id=%s draft=%s", tostring(logical_id), tostring(draft)))
+        log.info(string.format("world.createRecord called logical_id=%s", tostring(logical_id)))
         local created_record, create_error = records.createRecord(draft)
         if create_error then
-            log.error(string.format("compiler world.createRecord failed id=%s err=%s", tostring(record_id), tostring(create_error)))
-            return { request_id = request_id, ok = false, error = tostring(create_error) }
+            log.error(string.format("compiler world.createRecord failed logical_id=%s err=%s", tostring(logical_id), tostring(create_error)))
+            return { request_id = request_id, ok = false, errors = { { message = tostring(create_error) } } }
         end
-        log.info(string.format("world.createRecord returned id=%s value=%s", tostring(record_id), tostring(created_record)))
-        log.debug(string.format("world.createRecord after id=%s return=%s", tostring(record_id), tostring(created_record)))
-        local created_id = created_record and created_record.id or record_id
-        generated_spell_ids[#generated_spell_ids + 1] = created_id
+        local engine_id = created_record and created_record.id or nil
+        log.info(string.format(
+            "world.createRecord ids draft_id=%s engine_id=%s record_obj=%s",
+            tostring(draft and draft.id),
+            tostring(engine_id),
+            tostring(created_record)
+        ))
+        log.debug(string.format("world.createRecord after logical_id=%s return=%s", tostring(logical_id), tostring(created_record)))
+        if type(engine_id) ~= "string" or engine_id == "" then
+            log.error(string.format("compiler world.createRecord missing engine_id logical_id=%s", tostring(logical_id)))
+            return { request_id = request_id, ok = false, errors = { { message = "world.createRecord returned record without id" } } }
+        end
+        generated_spell_ids[#generated_spell_ids + 1] = logical_id
+        generated_engine_spell_ids[#generated_engine_spell_ids + 1] = engine_id
     end
 
-    local frontend_spell_id = generated_spell_ids[1]
+    local frontend_logical_spell_id = generated_spell_ids[1]
+    local frontend_spell_id = generated_engine_spell_ids[1]
     local added_ok, add_err = addToSpellbook(actor, frontend_spell_id)
     if not added_ok then
         return { request_id = request_id, ok = false, error = tostring(add_err) }
@@ -118,20 +143,34 @@ function compiler.compile(actor, recipe, request_id)
 
     records.put(canonical.recipe_id, {
         canonical = canonical.canonical,
+        frontend_logical_id = frontend_logical_spell_id,
         frontend_spell_id = frontend_spell_id,
         generated_spell_ids = generated_spell_ids,
+        generated_engine_spell_ids = generated_engine_spell_ids,
         recipe = recipe,
     })
 
-    log.info(string.format("compiled recipe_id=%s frontend=%s", canonical.recipe_id, frontend_spell_id))
+    log.info(string.format(
+        "compiled recipe_id=%s frontend_logical_id=%s frontend_engine_id=%s",
+        canonical.recipe_id,
+        tostring(frontend_logical_spell_id),
+        tostring(frontend_spell_id)
+    ))
 
-    return {
+    local result_payload = {
         request_id = request_id,
         ok = true,
         recipe_id = canonical.recipe_id,
         spell_id = frontend_spell_id,
         reused = false,
     }
+    log.info(string.format(
+        "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
+        tostring(result_payload.spell_id),
+        tostring(frontend_logical_spell_id),
+        tostring(frontend_spell_id)
+    ))
+    return result_payload
 end
 
 function compiler.handleCompileEvent(payload)
