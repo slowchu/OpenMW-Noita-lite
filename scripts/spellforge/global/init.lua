@@ -2,6 +2,7 @@ local core = require("openmw.core")
 local interfaces = require("openmw.interfaces")
 
 local compiler = require("scripts.spellforge.global.compiler")
+local executor = require("scripts.spellforge.global.executor")
 local events = require("scripts.spellforge.shared.events")
 local records = require("scripts.spellforge.global.records")
 local log = require("scripts.spellforge.shared.log").new("global.init")
@@ -110,5 +111,16 @@ return {
         [events.CHECK_BACKEND] = onCheckBackend,
         [events.COMPILE_RECIPE] = onCompileRecipe,
         [events.DELETE_COMPILED] = onDeleteCompiled,
+        [events.CAST_REQUEST] = executor.onCastRequest,
+        [events.BEGIN_CAST_OBSERVE] = executor.onBeginObserve,
+        [events.CAST_DIAG_SIGNAL] = executor.onCastDiagSignal,
+        MagExp_OnMagicHit = executor.onMagicHit,
+    },
+    engineHandlers = {
+        -- OpenMW engine handlers docs (global scripts): onPlayerAdded/onUpdate are documented;
+        -- there is no documented global onSpellCast handler.
+        -- https://openmw.readthedocs.io/en/latest/reference/lua-scripting/engine_handlers.html
+        onPlayerAdded = executor.onPlayerAdded,
+        onUpdate = executor.onUpdate,
     },
 }
