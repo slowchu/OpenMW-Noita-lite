@@ -106,8 +106,7 @@ function compiler.compile(actor, recipe, request_id)
         end
         log.info(string.format("world.createRecord returned id=%s value=%s", tostring(record_id), tostring(created_record)))
         log.debug(string.format("world.createRecord after id=%s return=%s", tostring(record_id), tostring(created_record)))
-        local created_id = created_record and created_record.id or record_id
-        generated_spell_ids[#generated_spell_ids + 1] = created_id
+        generated_spell_ids[#generated_spell_ids + 1] = record_id
     end
 
     local frontend_spell_id = generated_spell_ids[1]
