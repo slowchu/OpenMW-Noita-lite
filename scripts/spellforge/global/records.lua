@@ -33,6 +33,46 @@ local function sanitizeGeneratedEngineSpellIds(generated_engine_spell_ids)
     return out
 end
 
+local function sanitizeRealEffects(real_effects)
+    local out = {}
+    if type(real_effects) ~= "table" then
+        return out
+    end
+    for i, effect in ipairs(real_effects) do
+        if type(effect) == "table" then
+            out[i] = {
+                id = effect.id,
+                range = effect.range,
+                area = effect.area,
+                duration = effect.duration,
+                magnitudeMin = effect.magnitudeMin,
+                magnitudeMax = effect.magnitudeMax,
+            }
+        end
+    end
+    return out
+end
+
+local function sanitizeNodeMetadata(node_metadata)
+    local out = {}
+    if type(node_metadata) ~= "table" then
+        return out
+    end
+
+    for i, node in ipairs(node_metadata) do
+        if type(node) == "table" then
+            out[i] = {
+                logical_id = type(node.logical_id) == "string" and node.logical_id or nil,
+                engine_id = type(node.engine_id) == "string" and node.engine_id or nil,
+                base_spell_id = type(node.base_spell_id) == "string" and node.base_spell_id or nil,
+                real_effects = sanitizeRealEffects(node.real_effects),
+            }
+        end
+    end
+
+    return out
+end
+
 local function sanitizeEntry(entry)
     if type(entry) ~= "table" then
         return nil
@@ -49,6 +89,7 @@ local function sanitizeEntry(entry)
         frontend_logical_id = frontend_logical_id,
         generated_spell_ids = generated_spell_ids,
         generated_engine_spell_ids = generated_engine_spell_ids,
+        node_metadata = sanitizeNodeMetadata(entry.node_metadata),
     }
 end
 

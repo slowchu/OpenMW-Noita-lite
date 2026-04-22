@@ -193,7 +193,7 @@ local function runSmoke()
         nodes = {
             { kind = "emitter", base_spell_id = base_spell_id, payload = {
                 { opcode = "Multicast", params = { count = 3 } },
-                { opcode = "Spread", params = { arc = 90 } },
+                { opcode = "Spread", params = { preset = 1 } },
                 { kind = "emitter", base_spell_id = base_spell_id },
             } },
         },
@@ -230,6 +230,14 @@ local function runSmoke()
         if not ok3 then
             logCompileCauses("trivial", result1)
         end
+
+        local record = core.magic.spells.records[result1.spell_id]
+        local effects = record and record.effects or nil
+        local ok_marker_only = type(effects) == "table" and #effects == 1 and effects[1].id == "spellforge_composed"
+        assertLine(ok_marker_only, "compiled spell contains only marker effect")
+
+        local ok_meta_real_effects = type(result1.root_real_effect_count) == "number" and result1.root_real_effect_count > 0
+        assertLine(ok_meta_real_effects, "compile metadata preserves real effects")
 
         local req2 = nextRequestId("smoke-cache")
         compile(trivial_recipe, req2)

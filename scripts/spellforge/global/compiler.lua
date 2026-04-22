@@ -9,11 +9,28 @@ local log = require("scripts.spellforge.shared.log").new("global.compiler")
 
 local compiler = {}
 
+local MARKER_EFFECT_ID = "spellforge_composed"
+
 local KNOWN_BASE_SPELL_IDS = {}
 for _, record in pairs(core.magic.spells.records) do
     if record and type(record.id) == "string" and record.id ~= "" then
         KNOWN_BASE_SPELL_IDS[record.id] = true
     end
+end
+
+local function cloneEffects(effects)
+    local out = {}
+    for i, effect in ipairs(effects or {}) do
+        out[i] = {
+            id = effect.id,
+            range = effect.range,
+            area = effect.area,
+            duration = effect.duration,
+            magnitudeMin = effect.magnitudeMin,
+            magnitudeMax = effect.magnitudeMax,
+        }
+    end
+    return out
 end
 
 local function collectEmitters(nodes, out)
@@ -29,13 +46,24 @@ end
 
 local function createDraft(record_id, emitter)
     local base = core.magic.spells.records[emitter.base_spell_id]
+    local base_effect = base and base.effects and base.effects[1]
+    local marker_effect = {
+        id = MARKER_EFFECT_ID,
+        range = base_effect and base_effect.range or "target",
+        area = 0,
+        duration = 0,
+        magnitudeMin = 0,
+        magnitudeMax = 0,
+    }
+
     local draft = core.magic.spells.createRecordDraft {
         id = record_id,
         name = string.format("Spellforge %s", record_id),
-        cost = 0,
-        effects = base.effects,
+        cost = (base and base.cost) or 0,
+        isAutocalc = false,
+        effects = { marker_effect },
     }
-    log.info(string.format("createRecordDraft called id=%s effect_count=%d", tostring(record_id), #(draft.effects or {})))
+    log.info(string.format("createRecordDraft called id=%s effect_count=%d marker=%s", tostring(record_id), #(draft.effects or {}), MARKER_EFFECT_ID))
     return draft
 end
 
@@ -51,6 +79,17 @@ local function addToSpellbook(actor, engine_id)
     log.debug(string.format("ActorSpells:add after actor=%s engine_id=%s", tostring(actor and actor.recordId), tostring(engine_id)))
     log.info("ActorSpells:add completed")
     return true, nil
+end
+
+local function rootRealEffectCount(entry)
+    if type(entry) ~= "table" then
+        return 0
+    end
+    local first = entry.node_metadata and entry.node_metadata[1]
+    if not first or type(first.real_effects) ~= "table" then
+        return 0
+    end
+    return #first.real_effects
 end
 
 function compiler.compile(actor, recipe, request_id)
@@ -90,6 +129,7 @@ function compiler.compile(actor, recipe, request_id)
             recipe_id = canonical.recipe_id,
             spell_id = cached.frontend_spell_id,
             reused = true,
+            root_real_effect_count = rootRealEffectCount(cached),
         }
         log.info(string.format(
             "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
@@ -108,6 +148,8 @@ function compiler.compile(actor, recipe, request_id)
 
     local generated_spell_ids = {}
     local generated_engine_spell_ids = {}
+    local node_metadata = {}
+
     for idx, emitter in ipairs(emitters) do
         local logical_id = string.format("spellforge_%s_n%d", canonical.recipe_id, idx - 1)
         local draft = createDraft(logical_id, emitter)
@@ -130,8 +172,16 @@ function compiler.compile(actor, recipe, request_id)
             log.error(string.format("compiler world.createRecord missing engine_id logical_id=%s", tostring(logical_id)))
             return { request_id = request_id, ok = false, errors = { { message = "world.createRecord returned record without id" } } }
         end
+
+        local base = core.magic.spells.records[emitter.base_spell_id]
         generated_spell_ids[#generated_spell_ids + 1] = logical_id
         generated_engine_spell_ids[#generated_engine_spell_ids + 1] = engine_id
+        node_metadata[#node_metadata + 1] = {
+            logical_id = logical_id,
+            engine_id = engine_id,
+            base_spell_id = emitter.base_spell_id,
+            real_effects = cloneEffects(base and base.effects or {}),
+        }
     end
 
     local frontend_logical_spell_id = generated_spell_ids[1]
@@ -147,6 +197,7 @@ function compiler.compile(actor, recipe, request_id)
         frontend_spell_id = frontend_spell_id,
         generated_spell_ids = generated_spell_ids,
         generated_engine_spell_ids = generated_engine_spell_ids,
+        node_metadata = node_metadata,
         recipe = recipe,
     })
 
@@ -163,6 +214,7 @@ function compiler.compile(actor, recipe, request_id)
         recipe_id = canonical.recipe_id,
         spell_id = frontend_spell_id,
         reused = false,
+        root_real_effect_count = rootRealEffectCount({ node_metadata = node_metadata }),
     }
     log.info(string.format(
         "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
