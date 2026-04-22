@@ -79,30 +79,87 @@ local function hasErrorContaining(errors, needle)
     return false
 end
 
+local function runSpellbookEnumerationProbe(actor_spells, target_engine_id)
+    local function probePairs()
+        local count = 0
+        local found = false
+        for _, entry in pairs(actor_spells) do
+            count = count + 1
+            if entry and entry.id == target_engine_id then
+                found = true
+            end
+        end
+        log.info(string.format("spellbook probe pairs: count=%d found_engine_id=%s", count, tostring(found)))
+    end
+
+    local function probeIpairs()
+        local count = 0
+        local found = false
+        for _, entry in ipairs(actor_spells) do
+            count = count + 1
+            if entry and entry.id == target_engine_id then
+                found = true
+            end
+        end
+        log.info(string.format("spellbook probe ipairs: count=%d found_engine_id=%s", count, tostring(found)))
+    end
+
+    local function probeNumeric()
+        local count = 0
+        local found = false
+        local total = #actor_spells
+        for i = 1, total do
+            local entry = actor_spells[i]
+            if entry then
+                count = count + 1
+                if entry.id == target_engine_id then
+                    found = true
+                end
+            end
+        end
+        log.info(string.format("spellbook probe numeric: count=%d total=%d found_engine_id=%s", count, total, tostring(found)))
+    end
+
+    local function probeGetAll()
+        if type(actor_spells.getAll) ~= "function" then
+            log.info("spellbook probe getAll: unsupported")
+            return
+        end
+        local ok, list_or_err = pcall(actor_spells.getAll, actor_spells)
+        if not ok then
+            log.info(string.format("spellbook probe getAll: error=%s", tostring(list_or_err)))
+            return
+        end
+        local count = 0
+        local found = false
+        for _, entry in pairs(list_or_err) do
+            count = count + 1
+            if entry and entry.id == target_engine_id then
+                found = true
+            end
+        end
+        log.info(string.format("spellbook probe getAll: count=%d found_engine_id=%s", count, tostring(found)))
+    end
+
+    -- OpenMW docs:
+    -- - ActorSpells usage: pairs(mySpells) and numeric indexing are equivalent.
+    --   https://openmw.readthedocs.io/en/latest/reference/lua-scripting/openmw_types.html#type-actorspells
+    -- - List iterable supports pairs/ipairs/#/numeric indexing.
+    --   https://openmw.readthedocs.io/en/latest/reference/lua-scripting/iterables.html#list-iterable
+    probePairs()
+    probeIpairs()
+    probeNumeric()
+    probeGetAll()
+end
+
 local function spellbookHasSpell(actor, spell_id)
     local actor_spells = types.Actor.spells(actor)
-
-    if type(actor_spells.hasSpell) == "function" then
-        local ok, value = pcall(actor_spells.hasSpell, actor_spells, spell_id)
-        if ok then
-            return value == true
+    for i = 1, #actor_spells do
+        local entry = actor_spells[i]
+        if entry and entry.id == spell_id then
+            return true
         end
     end
-
-    if type(actor_spells.contains) == "function" then
-        local ok, value = pcall(actor_spells.contains, actor_spells, spell_id)
-        if ok then
-            return value == true
-        end
-    end
-
-    if type(actor_spells.has) == "function" then
-        local ok, value = pcall(actor_spells.has, actor_spells, spell_id)
-        if ok then
-            return value == true
-        end
-    end
-
     return false
 end
 
@@ -163,35 +220,9 @@ local function runSmoke()
             logCompileCauses("trivial", result1)
         end
 
-        local spellbook_probe_result = nil
         local actor_spells = types.Actor.spells(self)
-        if type(actor_spells.has) == "function" then
-            local probe_ok, probe_value = pcall(actor_spells.has, actor_spells, result1.spell_id)
-            if probe_ok then
-                spellbook_probe_result = probe_value
-            else
-                spellbook_probe_result = "error:" .. tostring(probe_value)
-            end
-        else
-            spellbook_probe_result = "missing-has"
-        end
-        log.info(string.format(
-            "spellbook probe: checking_id=%s type=%s has_result=%s",
-            tostring(result1.spell_id),
-            type(result1.spell_id),
-            tostring(spellbook_probe_result)
-        ))
-
-        -- OpenMW docs ("Type ActorSpells", latest): ActorSpells is iterable via pairs(mySpells).
-        -- Reference: https://openmw.readthedocs.io/en/latest/reference/lua-scripting/openmw_types.html#type-actorspells
-        local listed = 0
-        for _, s in pairs(actor_spells) do
-            listed = listed + 1
-            if listed <= 5 then
-                log.info(string.format("spellbook entry: id=%s", tostring(s and s.id)))
-            end
-        end
-        log.info(string.format("spellbook total_entries=%d", listed))
+        log.info(string.format("spellbook probe target_engine_id=%s type=%s", tostring(result1.spell_id), type(result1.spell_id)))
+        runSpellbookEnumerationProbe(actor_spells, result1.spell_id)
 
         local spellbook_has = result1.spell_id and spellbookHasSpell(self, result1.spell_id)
         local ok3 = spellbook_has == true
