@@ -1,0 +1,3 @@
+# Spellforge main
+GLOBAL: scripts/spellforge/global/init.lua
+PLAYER: scripts/spellforge/player/init.lua
