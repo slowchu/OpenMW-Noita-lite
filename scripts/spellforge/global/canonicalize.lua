@@ -1,4 +1,4 @@
-local bit = require("bit")
+local util = require("openmw.util")
 
 local canonicalize = {}
 
@@ -49,8 +49,8 @@ end
 local function fnv1a32(input)
     local hash = FNV_OFFSET_32
     for i = 1, #input do
-        hash = bit.bxor(hash, string.byte(input, i))
-        hash = bit.band(hash * FNV_PRIME_32, 0xFFFFFFFF)
+        hash = util.bitXor(hash, string.byte(input, i))
+        hash = util.bitAnd(hash * FNV_PRIME_32, 0xFFFFFFFF)
     end
     return string.format("%08x", hash)
 end
