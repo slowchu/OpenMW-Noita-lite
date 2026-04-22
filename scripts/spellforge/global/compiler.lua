@@ -10,8 +10,10 @@ local log = require("scripts.spellforge.shared.log").new("global.compiler")
 local compiler = {}
 
 local KNOWN_BASE_SPELL_IDS = {}
-for spell_id in pairs(core.magic.spells.records) do
-    KNOWN_BASE_SPELL_IDS[spell_id] = true
+for _, record in pairs(core.magic.spells.records) do
+    if record and type(record.id) == "string" and record.id ~= "" then
+        KNOWN_BASE_SPELL_IDS[record.id] = true
+    end
 end
 
 local function collectEmitters(nodes, out)

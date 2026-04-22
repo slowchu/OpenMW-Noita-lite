@@ -32,9 +32,11 @@ local function logCompileCauses(recipe_label, payload)
     end
 end
 
-local function firstSpellId()
-    for spell_id in pairs(core.magic.spells.records) do
-        return spell_id
+local function firstKnownSpellId()
+    for _, record in pairs(core.magic.spells.records) do
+        if record and type(record.id) == "string" and record.id ~= "" then
+            return record.id
+        end
     end
     return nil
 end
@@ -64,6 +66,19 @@ local function waitForResult(request_id, timeout_seconds, callback)
     end)
 end
 
+local function hasErrorContaining(errors, needle)
+    if type(errors) ~= "table" then
+        return false
+    end
+    for _, err in ipairs(errors) do
+        local message = err and err.message
+        if type(message) == "string" and string.find(string.lower(message), string.lower(needle), 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 local function runSmoke()
     if state.running then
         log.warn("smoke run already in progress")
@@ -75,7 +90,7 @@ local function runSmoke()
         return
     end
 
-    local base_spell_id = firstSpellId()
+    local base_spell_id = firstKnownSpellId()
     if not base_spell_id then
         log.error("no base spell available; aborting smoke")
         return
@@ -102,10 +117,7 @@ local function runSmoke()
 
     local invalid_nested_recipe = {
         nodes = {
-            { kind = "emitter", base_spell_id = base_spell_id, payload = {
-                { opcode = "Trigger" },
-                { opcode = "Timer", params = { seconds = 9999 } },
-            } },
+            { opcode = "Trigger" },
         },
     }
 
@@ -158,8 +170,23 @@ local function runSmoke()
                 local req4 = nextRequestId("smoke-invalid")
                 compile(invalid_nested_recipe, req4)
                 waitForResult(req4, 3, function(result4)
-                    assertLine(result4.ok == false, "invalid nested-trigger recipe rejected")
-                    assertLine(type(result4.errors) == "table" and #result4.errors > 0, "invalid recipe returns readable errors")
+                    local ok7 = result4.ok == false
+                    assertLine(ok7, "invalid nested-trigger recipe rejected")
+                    if not ok7 then
+                        logCompileCauses("invalid", result4)
+                    end
+
+                    local ok8 = type(result4.errors) == "table" and #result4.errors > 0
+                    assertLine(ok8, "invalid recipe returns readable errors")
+                    if not ok8 then
+                        logCompileCauses("invalid", result4)
+                    end
+
+                    local ok9 = hasErrorContaining(result4.errors, "preceded by emitter")
+                    assertLine(ok9, "invalid recipe reports structural trigger-order error")
+                    if not ok9 then
+                        logCompileCauses("invalid", result4)
+                    end
                     log.info("smoke compiler run complete")
                     state.running = false
                 end)

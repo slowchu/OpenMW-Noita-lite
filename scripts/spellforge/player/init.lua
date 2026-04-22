@@ -13,8 +13,10 @@ local state = {
 }
 
 local function firstKnownSpellId()
-    for spell_id in pairs(core.magic.spells.records) do
-        return spell_id
+    for _, record in pairs(core.magic.spells.records) do
+        if record and type(record.id) == "string" and record.id ~= "" then
+            return record.id
+        end
     end
     return nil
 end
