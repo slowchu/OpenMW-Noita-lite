@@ -1,5 +1,7 @@
 -- Pattern reference: Trap Handling's load-context custom effect registration (adapted).
 
+local content = require('openmw.content')
+
 content.magicEffects.records.spellforge_composed = {
     name = "Composed Spell",
     school = "alteration",
@@ -12,6 +14,5 @@ content.magicEffects.records.spellforge_composed = {
     allowsSpellmaking = false,
 }
 
-return {
-    marker_effect_id = "spellforge_composed",
-}
+
+
