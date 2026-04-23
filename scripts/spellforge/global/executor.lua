@@ -388,7 +388,7 @@ local function ensureTargetFilter()
     if interfaces.MagExp == nil or type(interfaces.MagExp.setTargetFilter) ~= "function" then
         return
     end
-    interfaces.MagExp.setTargetFilter("spellforge", function(target)
+    interfaces.MagExp.setTargetFilter(function(target)
         local target_id = target and target.recordId or nil
         if target == nil then
             log.info("target filter target=nil result=true")
