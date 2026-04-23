@@ -236,12 +236,8 @@ local function runSmoke()
             local record = core.magic.spells.records[result1.spell_id]
             effects = record and record.effects or nil
         end
-        local marker_applied = result1.marker_effect_applied == true
-        local ok_marker_only = (not marker_applied) or (type(effects) == "table" and #effects == 1 and effects[1].id == "spellforge_composed")
+        local ok_marker_only = type(effects) == "table" and #effects == 1 and effects[1].id == "spellforge_composed"
         assertLine(ok_marker_only, "compiled spell contains only marker effect")
-        if not marker_applied then
-            log.warn("marker effect unavailable in runtime registry; compile fell back to base effects")
-        end
 
         local ok_meta_real_effects = type(result1.root_real_effect_count) == "number" and result1.root_real_effect_count > 0
         assertLine(ok_meta_real_effects, "compile metadata preserves real effects")

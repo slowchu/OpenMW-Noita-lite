@@ -55,37 +55,16 @@ local function createDraft(record_id, emitter)
         magnitudeMax = 0,
     }
 
-    local marker_ok, marker_draft_or_err = pcall(core.magic.spells.createRecordDraft, {
+    local draft = core.magic.spells.createRecordDraft {
         id = record_id,
         name = string.format("Spellforge %s", record_id),
         cost = (base and base.cost) or 0,
         isAutocalc = false,
         effects = { marker_effect },
-    })
+    }
 
-    if marker_ok then
-        local marker_draft = marker_draft_or_err
-        log.info(string.format("createRecordDraft called id=%s effect_count=%d marker=%s", tostring(record_id), #(marker_draft.effects or {}), MARKER_EFFECT_ID))
-        return marker_draft, true, nil
-    end
-
-    log.error(string.format("createRecordDraft marker failed id=%s marker=%s err=%s", tostring(record_id), MARKER_EFFECT_ID, tostring(marker_draft_or_err)))
-
-    local fallback_ok, fallback_draft_or_err = pcall(core.magic.spells.createRecordDraft, {
-        id = record_id,
-        name = string.format("Spellforge %s", record_id),
-        cost = (base and base.cost) or 0,
-        isAutocalc = false,
-        effects = base and base.effects or {},
-    })
-    if not fallback_ok then
-        log.error(string.format("createRecordDraft fallback failed id=%s err=%s", tostring(record_id), tostring(fallback_draft_or_err)))
-        return nil, false, tostring(fallback_draft_or_err)
-    end
-
-    local fallback_draft = fallback_draft_or_err
-    log.warn(string.format("createRecordDraft fell back to base effects id=%s effect_count=%d", tostring(record_id), #(fallback_draft.effects or {})))
-    return fallback_draft, false, nil
+    log.info(string.format("createRecordDraft called id=%s effect_count=%d marker=%s", tostring(record_id), #(draft.effects or {}), MARKER_EFFECT_ID))
+    return draft
 end
 
 local function addToSpellbook(actor, engine_id)
@@ -151,7 +130,6 @@ function compiler.compile(actor, recipe, request_id)
             spell_id = cached.frontend_spell_id,
             reused = true,
             root_real_effect_count = rootRealEffectCount(cached),
-            marker_effect_applied = cached.marker_effect_applied == true,
         }
         log.info(string.format(
             "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
@@ -171,17 +149,10 @@ function compiler.compile(actor, recipe, request_id)
     local generated_spell_ids = {}
     local generated_engine_spell_ids = {}
     local node_metadata = {}
-    local marker_effect_applied = true
 
     for idx, emitter in ipairs(emitters) do
         local logical_id = string.format("spellforge_%s_n%d", canonical.recipe_id, idx - 1)
-        local draft, used_marker, draft_error = createDraft(logical_id, emitter)
-        if not draft then
-            return { request_id = request_id, ok = false, errors = { { message = tostring(draft_error or "createRecordDraft failed") } } }
-        end
-        if used_marker ~= true then
-            marker_effect_applied = false
-        end
+        local draft = createDraft(logical_id, emitter)
         log.debug(string.format("world.createRecord before logical_id=%s draft=%s", tostring(logical_id), tostring(draft)))
         log.info(string.format("world.createRecord called logical_id=%s", tostring(logical_id)))
         local created_record, create_error = records.createRecord(draft)
@@ -227,7 +198,6 @@ function compiler.compile(actor, recipe, request_id)
         generated_spell_ids = generated_spell_ids,
         generated_engine_spell_ids = generated_engine_spell_ids,
         node_metadata = node_metadata,
-        marker_effect_applied = marker_effect_applied,
         recipe = recipe,
     })
 
@@ -245,7 +215,6 @@ function compiler.compile(actor, recipe, request_id)
         spell_id = frontend_spell_id,
         reused = false,
         root_real_effect_count = rootRealEffectCount({ node_metadata = node_metadata }),
-        marker_effect_applied = marker_effect_applied,
     }
     log.info(string.format(
         "compile result payload: spell_id=%s logical_id=%s engine_id=%s",
@@ -258,9 +227,24 @@ end
 
 function compiler.handleCompileEvent(payload)
     if not payload or not payload.actor then
-        return { request_id = payload and payload.request_id, ok = false, error = "Missing actor" }
+        return { request_id = payload and payload.request_id, ok = false, success = false, error_message = "Missing actor", error = "Missing actor" }
     end
-    return compiler.compile(payload.actor, payload.recipe, payload.request_id)
+
+    local ok, result_or_err = pcall(compiler.compile, payload.actor, payload.recipe, payload.request_id)
+    if not ok then
+        local err = tostring(result_or_err)
+        log.error(string.format("handleCompileEvent failed request_id=%s err=%s", tostring(payload and payload.request_id), err))
+        return {
+            request_id = payload and payload.request_id,
+            ok = false,
+            success = false,
+            error_message = err,
+            error = err,
+            errors = { { message = err } },
+        }
+    end
+
+    return result_or_err
 end
 
 function compiler.emitResult(sender, result)
