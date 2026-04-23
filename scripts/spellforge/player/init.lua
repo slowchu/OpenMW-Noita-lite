@@ -7,7 +7,6 @@ local nearby = require("openmw.nearby")
 local self = require("openmw.self")
 local types = require("openmw.types")
 local util = require("openmw.util")
-local animation = require("openmw.animation")
 
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("player.init")
@@ -19,8 +18,12 @@ local state = {
     is_casting = false,
     animation_diag_registered = false,
     pending_spell_queries = {},
+    pending_intercept_spell_id = nil,
+    pending_intercept_variant = nil,
     intercept_spell_id = nil,
     intercept_variant = nil,
+    pending_cast_authorized = false,
+    skill_handler_registered = false,
 }
 
 local function firstKnownSpellId()
@@ -177,26 +180,6 @@ local function classifyVariant(root_base_spell_id)
     return "self"
 end
 
-local function playInterceptAnimation(variant)
-    if interfaces.AnimationController == nil or type(interfaces.AnimationController.playBlendedAnimation) ~= "function" then
-        return false, "AnimationController.playBlendedAnimation missing"
-    end
-
-    local ok, err = pcall(interfaces.AnimationController.playBlendedAnimation,
-        "spellcast",
-        {
-            startKey = variant .. " start",
-            stopKey = variant .. " stop",
-            priority = animation.PRIORITY.Scripted,
-        }
-    )
-    if not ok then
-        log.error(string.format("playBlendedAnimation failed variant=%s err=%s", tostring(variant), tostring(err)))
-        return false, tostring(err)
-    end
-    return true, nil
-end
-
 local function canAffordSpell(spell_id)
     local spell_record = core.magic.spells.records[spell_id]
     if not spell_record then
@@ -276,6 +259,66 @@ local function sendDebugVanillaFireball()
     ))
 end
 
+local function clearInterceptState()
+    state.is_casting = false
+    state.pending_intercept_spell_id = nil
+    state.pending_intercept_variant = nil
+    state.intercept_spell_id = nil
+    state.intercept_variant = nil
+    state.pending_cast_authorized = false
+end
+
+local function spellAlwaysSucceeds(spell_id)
+    local spell_record = spell_id and core.magic.spells.records[spell_id] or nil
+    if type(spell_record) ~= "table" then
+        return false
+    end
+
+    if spell_record.alwaysSucceedFlag ~= nil then
+        return spell_record.alwaysSucceedFlag == true or spell_record.alwaysSucceedFlag == 1
+    end
+    if spell_record.alwaysSucceed ~= nil then
+        return spell_record.alwaysSucceed == true or spell_record.alwaysSucceed == 1
+    end
+    return false
+end
+
+local function registerSkillProgressionHandler()
+    if state.skill_handler_registered then
+        return
+    end
+
+    local progression = interfaces.SkillProgression
+    if progression == nil or type(progression.addSkillUsedHandler) ~= "function" then
+        log.warn("skill progression unavailable: addSkillUsedHandler missing")
+        return
+    end
+
+    local use_types = progression.SKILL_USE_TYPES or {}
+    local spellcast_success = use_types.Spellcast_Success
+    if spellcast_success == nil then
+        log.warn("skill progression unavailable: SKILL_USE_TYPES.Spellcast_Success missing")
+        return
+    end
+
+    progression.addSkillUsedHandler(function(params)
+        if not params or params.useType ~= spellcast_success then
+            return
+        end
+        if state.is_casting then
+            state.pending_cast_authorized = true
+            log.info(string.format(
+                "cast authorization received useType=%s active_spell_id=%s",
+                tostring(params.useType),
+                tostring(state.intercept_spell_id)
+            ))
+        end
+    end)
+
+    state.skill_handler_registered = true
+    log.info("registered skill progression Spellcast_Success handler")
+end
+
 local function registerAnimationTextKeys()
     if state.animation_diag_registered then
         return
@@ -299,28 +342,56 @@ local function registerAnimationTextKeys()
         })
 
         if not state.is_casting then
+            local pending_spell_id = state.pending_intercept_spell_id
+            local pending_variant = state.pending_intercept_variant or "self"
+            if pending_spell_id and key == (pending_variant .. " start") then
+                local always_succeed = spellAlwaysSucceeds(pending_spell_id)
+                state.pending_cast_authorized = always_succeed == true
+                state.is_casting = true
+                state.intercept_spell_id = pending_spell_id
+                state.intercept_variant = pending_variant
+                state.pending_intercept_spell_id = nil
+                state.pending_intercept_variant = nil
+                log.info(string.format(
+                    "intercept armed spell_id=%s variant=%s alwaysSucceed=%s authorized_initial=%s",
+                    tostring(state.intercept_spell_id),
+                    tostring(state.intercept_variant),
+                    tostring(always_succeed),
+                    tostring(state.pending_cast_authorized)
+                ))
+            end
             return
         end
 
         local variant = state.intercept_variant or "self"
         if key == (variant .. " release") then
             local spell_id = state.intercept_spell_id
-            state.is_casting = false
-            state.intercept_spell_id = nil
-            state.intercept_variant = nil
+            local authorized = state.pending_cast_authorized == true
 
             if types.Actor.getStance(self) ~= types.Actor.STANCE.Spell then
+                clearInterceptState()
                 log.info("intercept release aborted: stance changed")
                 return
             end
 
-            if spell_id then
+            log.info(string.format(
+                "intercept release spell_id=%s variant=%s authorized=%s",
+                tostring(spell_id),
+                tostring(variant),
+                tostring(authorized)
+            ))
+            if spell_id and authorized then
                 dispatchInterceptCast(spell_id)
+            else
+                log.info(string.format(
+                    "intercept release suppressed spell_id=%s reason=%s",
+                    tostring(spell_id),
+                    authorized and "missing spell_id" or "no authorization"
+                ))
             end
+            clearInterceptState()
         elseif key == (variant .. " stop") then
-            state.is_casting = false
-            state.intercept_spell_id = nil
-            state.intercept_variant = nil
+            clearInterceptState()
             log.info("intercept canceled on stop key")
         end
     end)
@@ -349,7 +420,7 @@ local function onInputAction(action)
             return
         end
 
-        if state.is_casting then
+        if state.is_casting or state.pending_intercept_spell_id ~= nil then
             return
         end
 
@@ -359,20 +430,10 @@ local function onInputAction(action)
         end
 
         local variant = classifyVariant(meta.root_base_spell_id)
-        state.is_casting = true
-        state.intercept_spell_id = selected_spell_id
-        state.intercept_variant = variant
-
-        local ok, anim_err = playInterceptAnimation(variant)
-        if not ok then
-            state.is_casting = false
-            state.intercept_spell_id = nil
-            state.intercept_variant = nil
-            log.error(string.format("intercept animation failed spell_id=%s err=%s", tostring(selected_spell_id), tostring(anim_err)))
-            return
-        end
-
-        log.info(string.format("intercept armed spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
+        state.pending_intercept_spell_id = selected_spell_id
+        state.pending_intercept_variant = variant
+        state.pending_cast_authorized = false
+        log.info(string.format("intercept pending spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
     end)
 
     return true
@@ -405,6 +466,7 @@ return {
     eventHandlers = {
         [events.BACKEND_READY] = function(payload)
             onBackendReady(payload)
+            registerSkillProgressionHandler()
             registerAnimationTextKeys()
         end,
         [events.BACKEND_UNAVAILABLE] = onBackendUnavailable,
