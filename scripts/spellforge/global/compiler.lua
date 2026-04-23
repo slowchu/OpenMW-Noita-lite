@@ -98,7 +98,7 @@ local function rootRealEffectCount(entry)
     return #first.real_effects
 end
 
-function compiler.compile(actor, recipe, request_id, options)
+function compiler.compile(actor, recipe, request_id)
     local node_count = type(recipe) == "table" and type(recipe.nodes) == "table" and #recipe.nodes or 0
     local root_base_spell_id = nil
     if type(recipe) == "table" and type(recipe.nodes) == "table" and type(recipe.nodes[1]) == "table" then
@@ -107,19 +107,11 @@ function compiler.compile(actor, recipe, request_id, options)
     log.debug(string.format("compile entry request_id=%s actor=%s nodes=%d", tostring(request_id), tostring(actor and actor.recordId), node_count))
     log.info(string.format("compile requested root_base_spell_id=%s node_count=%d", tostring(root_base_spell_id), node_count))
 
-    local debug_marker_range_from_root = options and options.debug_marker_range_from_root == true
     local marker_range = "self"
-    if debug_marker_range_from_root then
-        local root_base = root_base_spell_id and core.magic.spells.records[root_base_spell_id] or nil
-        local root_effect = root_base and root_base.effects and root_base.effects[1] or nil
-        if root_effect and root_effect.range ~= nil then
-            marker_range = root_effect.range
-        end
-        log.info(string.format(
-            "debug marker range mode enabled root_base_spell_id=%s marker_range=%s",
-            tostring(root_base_spell_id),
-            tostring(marker_range)
-        ))
+    local root_base = root_base_spell_id and core.magic.spells.records[root_base_spell_id] or nil
+    local root_effect = root_base and root_base.effects and root_base.effects[1] or nil
+    if root_effect and root_effect.range ~= nil then
+        marker_range = root_effect.range
     end
 
     local checked = validate.run(recipe, {
@@ -215,19 +207,15 @@ function compiler.compile(actor, recipe, request_id, options)
         return { request_id = request_id, ok = false, error = tostring(add_err) }
     end
 
-    if not debug_marker_range_from_root then
-        records.put(canonical.recipe_id, {
-            canonical = canonical.canonical,
-            frontend_logical_id = frontend_logical_spell_id,
-            frontend_spell_id = frontend_spell_id,
-            generated_spell_ids = generated_spell_ids,
-            generated_engine_spell_ids = generated_engine_spell_ids,
-            node_metadata = node_metadata,
-            recipe = recipe,
-        })
-    else
-        log.info(string.format("debug marker range mode bypassed cache persist recipe_id=%s", tostring(canonical.recipe_id)))
-    end
+    records.put(canonical.recipe_id, {
+        canonical = canonical.canonical,
+        frontend_logical_id = frontend_logical_spell_id,
+        frontend_spell_id = frontend_spell_id,
+        generated_spell_ids = generated_spell_ids,
+        generated_engine_spell_ids = generated_engine_spell_ids,
+        node_metadata = node_metadata,
+        recipe = recipe,
+    })
 
     log.info(string.format(
         "compiled recipe_id=%s frontend_logical_id=%s frontend_engine_id=%s",
@@ -258,7 +246,7 @@ function compiler.handleCompileEvent(payload)
         return { request_id = payload and payload.request_id, ok = false, success = false, error_message = "Missing actor", error = "Missing actor" }
     end
 
-    local ok, result_or_err = pcall(compiler.compile, payload.actor, payload.recipe, payload.request_id, payload.options)
+    local ok, result_or_err = pcall(compiler.compile, payload.actor, payload.recipe, payload.request_id)
     if not ok then
         local err = tostring(result_or_err)
         log.error(string.format("handleCompileEvent failed request_id=%s err=%s", tostring(payload and payload.request_id), err))
