@@ -1,532 +1,1009 @@
-# Architecture
+# Spellforge Architecture
 
-This document describes the design of a Noita-inspired spellcrafting system for OpenMW 0.51+. It is the working specification and should be updated as the implementation evolves. If code and this document disagree, that is a bug in one of them; fix the bug.
+Authoritative architecture for **OpenMW Spellforge**, a Noita-inspired spell composition system for OpenMW 0.51+.
 
-## Overview
+This document supersedes the earlier recipe-graph / generated-node-record design. If code and this document disagree, treat that as design drift and resolve it deliberately.
 
-The mod lets players author spells as ordered recipes of modifier and effect primitives, compile those recipes into runtime `ESM::Spell` records added to the player's spellbook, and cast them like any other spell. On cast, a Lua executor interprets the recipe's payload graph and dispatches sub-spells through Spell Framework Plus (SFP), producing Noita-style behaviors: multicast fan-outs, on-hit trigger chains, timed detonations, piercing and chaining projectiles, and so on.
+---
 
-This is a **compiler plus runtime executor** architecture, not an extension of vanilla spellmaking. The vanilla spellmaking altar cannot express what we need; OpenMW 0.51's runtime record creation API is what makes this possible for the first time.
+## 1. Project Goal
 
-## Goals
+Spellforge lets the player build Morrowind spells that behave more like Noita spell chains:
 
-- Player-facing spell builder UI with a fixed opcode vocabulary and click-to-place interaction.
-- Authored recipes compiled into real `ESM::Spell` records added to the player's spellbook and cast through the normal cast path (spell stance, quickcast, hotkey, etc.).
-- Event-driven payload execution via SFP's `MagExp_OnMagicHit`.
-- Support for ordered chains of modifiers, scope-opening triggers, and nested trigger payloads up to a bounded depth.
-- Deliberate cost and progression policy, not accidental behavior inherited from the vanilla cast path we bypass.
+- multicast
+- spread
+- burst
+- speed/size modifiers
+- delayed effects
+- trigger payloads
+- chained effects
 
-## Non-Goals
+The important constraint is that Spellforge is still a Morrowind/OpenMW mod, not a full replacement spell engine.
 
-- Intercepting or rewriting the player's arbitrary vanilla spell casts. We only execute our own compiled composite spells.
-- Runtime creation of novel magic effect records. Our effect vocabulary is a fixed alphabet injected through the 0.51 load context at startup.
-- True Noita endgame density (hundreds of branching projectiles per cast). Our scope is "readable modifier-rich chains," not "fill the screen."
-- Homing projectiles in v1. True target-seeking is prohibitively expensive under the current Lua physics model.
-- Persistent world hazards (walls of fire, ice floors). Out of scope for SFP's design.
-- Multiplayer correctness. OpenMW itself is single-player and TES3MP is not a target.
+The player authors spells through a Morrowind-like spellmaking flow. A Spellforge recipe is an ordered spell effect list containing both:
 
-## Foundation
+1. **Vanilla magical effects**  
+   These are the actual spell effects: Fire Damage, Frost Damage, Shield, Resist Magic, etc.
 
-### Required engine version
+2. **Spellforge custom magical effects**  
+   These are control/modifier effects: Multicast, Trigger, Timer, Speed+, Size+, Spread, Burst, Chain.
 
-OpenMW 0.51 or later. The critical features we depend on:
+The recipe is the spell effect list.
 
-- Runtime spell record creation via `core.magic.spells.createRecordDraft` + `world.createRecord` ([#8342]).
-- Custom magic effect records injected through the load context ([#8791]).
-- `core.magic.spells.records` read access for referencing existing vanilla spells from recipe nodes.
+There is no separate wand/deck/tree data model exposed to the player in v1.
 
-0.51 RC is acceptable for development but the API surface for load-context injection is flagged work-in-progress. Budget for minor refactoring when 0.51 ships stable.
+---
 
-### Required mods
+## 2. Current Milestone State
 
-- **Spell Framework Plus (`I.MagExp`)** — provides `launchSpell`, `applySpellToActor`, `detonateSpellAtPos`, and the `MagExp_OnMagicHit` / `MagExp_OnEffectApplied` / `MagExp_OnEffectTick` / `MagExp_OnEffectOver` event surface. All projectile execution routes through this framework.
-- **MaxYari Lua Physics** — transitive dependency of SFP.
+### Completed: Milestone 2.2b — Intercept Dispatch Pipeline
 
-### Known engine issue to avoid
+The current working foundation is the intercept-dispatch path:
 
-OpenMW RC [#9069] does not gracefully handle invalid effects on spells/enchantments/potions. The compiler **must** validate generated effect lists before calling `world.createRecord`. Do not let a malformed record reach the engine — it can crash.
+1. Player selects a compiled Spellforge spell.
+2. Player naturally casts through the normal spell stance/cast animation.
+3. The player script observes cast animation text keys.
+4. Cast success is authorized through OpenMW's skill progression success signal.
+5. On release, Spellforge dispatches the stored runtime payload through the global backend.
 
-## Conceptual Model
+The key success-gating rule:
 
-### Two layers
+- `I.SkillProgression.addSkillUsedHandler`
+- `SKILL_USE_TYPES.Spellcast_Success`
+- Used as the authoritative signal that the vanilla cast succeeded.
 
-```
+This is intentionally better than trying to reimplement vanilla chance-to-cast logic in Lua.
+
+### In progress: Milestone 2.2c — Opcode Runtime
+
+2.2c introduces the real Spellforge runtime:
+
+- effect-list parser
+- emitter grouping
+- prefix/postfix operator binding
+- compiled plan cache
+- central bounded job queue
+- opcode execution
+
+2.2c should not be built on the older recipe-graph model.
+
+---
+
+## 3. Non-Goals for v1
+
+Spellforge v1 does not attempt to support:
+
+- true Noita endgame density
+- arbitrary recursive loops
+- hundreds of active projectiles
+- fully dynamic custom magic effect record generation at runtime
+- NPC usage of composed Spellforge spells
+- multiplayer/TES3MP correctness
+- persistent world hazards such as lava floors, fire patches, ice walls, etc.
+- homing projectiles unless a cheap bounded implementation becomes available
+- live editing while combat is active
+- exact vanilla parity for every reflection/resist/cost edge case
+
+The v1 goal is readable, bounded, stable spell composition.
+
+---
+
+## 4. Four-Layer Architecture
+
+Spellforge is divided into four layers.
+
+```text
 ┌──────────────────────────────────────────────┐
-│  UI Layer (PLAYER script)                    │
-│  - Crafter window                            │
-│  - Click-to-place interaction                │
-│  - Recipe editing / validation feedback      │
-│  - Persists recipes via storage API          │
+│  1. Authoring Layer                          │
+│  Player-facing spellmaker/effect-list UI     │
 └────────────────────┬─────────────────────────┘
-                     │ Save recipe → Compile request
+                     │ recipe/effect list
 ┌────────────────────▼─────────────────────────┐
-│  Compiler (GLOBAL script)                    │
-│  - Recipe graph → ESM::Spell records         │
-│  - Effect list assembly                      │
-│  - Hash-based canonicalization               │
-│  - Register with ActorSpells:add             │
+│  2. Compilation Layer                        │
+│  Validate, group, bind, cache compiled plans │
 └────────────────────┬─────────────────────────┘
-                     │ Player casts compiled spell
+                     │ compiled plan
 ┌────────────────────▼─────────────────────────┐
-│  Runtime Executor (GLOBAL script)            │
-│  - Dispatch on cast / on hit                 │
-│  - Payload resolution                        │
-│  - Chain / multicast / trigger execution     │
-│  - Cookie table for in-flight projectiles    │
+│  3. Dispatch Layer                           │
+│  Existing 2.2b intercept/cast-success gate   │
+└────────────────────┬─────────────────────────┘
+                     │ authorized cast
+┌────────────────────▼─────────────────────────┐
+│  4. Orchestration Layer                      │
+│  Bounded job queue executes runtime behavior │
 └──────────────────────────────────────────────┘
 ```
 
-The UI layer never calls `I.MagExp` or `world.createRecord` directly. All privileged operations happen in global scripts, reached through event dispatch. This follows the same PLAYER/GLOBAL split pattern validated by the multicast prototype.
+### 4.1 Authoring
 
-### The compilation metaphor
+The player builds a spell as an ordered effect list.
 
-A recipe is source code. The compiler produces a small bundle of `ESM::Spell` records — one per distinct projectile-emitting node in the graph — plus an out-of-engine metadata table linking each generated spell ID to its payload node. The player's spellbook contains only the **front-end** record; internal node records are implementation detail and should never appear in the spellbook UI.
+Example:
 
-When the player casts the front-end spell, the engine handles animation, magicka deduction (if any), and the first projectile launch through SFP. From that point forward, the executor takes over: each `MagExp_OnMagicHit` event is a lookup into the metadata table, which tells us what payload to resolve next.
-
-## Data Model
-
-### Recipe graph
-
-A recipe is a tree of nodes. The root is always an emitter. Each emitter may have a payload, which is itself a sequence of modifier nodes terminating in either an emitter (chained projectile) or a terminal effect (AoE detonation, self-buff, etc.).
-
-Example — `Fireball + Trigger → [Multicast 5 + Spread 360° + Fireball + Trigger → [Frost AoE 10ft]]`:
-
-```
-Emitter(Fireball)
-└── Payload
-    ├── Modifier(Multicast, count=5)
-    ├── Modifier(Spread, arc=360°)
-    ├── Emitter(Fireball)
-    │   └── Payload
-    │       └── Terminal(FrostAoE, radius=10ft)
+```text
+1. Multicast
+2. Fire Damage on Target
+3. Trigger
+4. Frost Damage on Target
 ```
 
-### Node kinds
+This reads as:
 
-| Kind | Purpose | Examples |
-|---|---|---|
-| **Emitter** | Produces one or more projectiles / touch effects. Terminates a modifier chain. | Fireball, Frostbolt, Shock |
-| **Launch modifier** | Prefix operator applied to the next emitter in sequence. Parameterized. | Multicast(N), Spread(θ), Damage+(%), Speed+(%), Size+(%) |
-| **Scope opener** | Opens a payload attached to the most recent emitter. | Trigger |
-| **Terminal effect** | Non-projectile effect resolved at a world position. | AoE blasts, self-buffs |
-
-Launch modifiers compose left-to-right into a **launch context** that is consumed by the next emitter. A Trigger opens a payload scope that the compiler fills with everything up to the end of the payload or the next Trigger at the same level (bounded by recursion cap).
-
-### The nine v1 opcodes
-
-| Opcode | Kind | Parameter | Semantics |
-|---|---|---|---|
-| `Multicast` | Launch modifier | `count ∈ [2..8]` | Emits N copies of the next emitter |
-| `Spread` | Launch modifier | `arc ∈ [0..360]°` | Distributes multicast copies across an arc |
-| `Damage+` | Launch modifier | `percent` | Scales damage magnitudes on the next emitter |
-| `Speed+` | Launch modifier | `percent` | Scales projectile velocity |
-| `Size+` | Launch modifier | `percent` | Scales projectile radius / AoE / VFX scale |
-| `Chain` | Launch modifier | `hops ∈ [1..5]` | On hit, redirect to next-nearest actor, N hops max |
-| `Pierce` | Launch modifier | `count ∈ [1..3]` | Projectile continues through N actors before terminating |
-| `Trigger` | Scope opener | — | Opens a payload scope on the previous emitter |
-| `Timer` | Scope opener | `seconds` | Like Trigger, but detonates after T seconds regardless of impact |
-
-Element is **not** an opcode. Morrowind already supplies all elemental damage effects; the composer picks the emitter's element at craft time. Homing is not an opcode (see Performance Architecture).
-
-### Spread axis
-
-When a multicast fans its projectiles, the axis of rotation is the most ambiguous parameter. Default behavior:
-
-- Initial cast (from caster): axis is **world up** (projectiles fan horizontally).
-- Triggered fan-out (from impact point): axis is **impact surface normal** for arcs ≤ 180°, **world up** for 360°.
-
-This keeps wall-splats feeling like splats and ground-bursts feeling like novas. If playtesting demands per-modifier axis control, add it as an opcode parameter in v1.1.
-
-## Compiler Layer
-
-### Flow
-
-1. Receive a recipe graph from the UI layer via `RecipeCompileRequest` event.
-2. **Validate**:
-   - Every Trigger has a preceding emitter at the same level.
-   - Recursion depth ≤ configured cap (default 3).
-   - Total emitter count across the tree ≤ configured cap (default 20).
-   - All magnitudes and parameters in allowed ranges.
-   - Every referenced base spell / effect ID exists.
-3. **Canonicalize**: serialize the recipe deterministically and hash it (e.g., FNV-1a over a canonical string form). This produces a stable `recipe_id`.
-4. **Cache check**: if `recipe_id` already exists in the compiled-records table, reuse it.
-5. **Generate records**: walk the tree depth-first. For each emitter, build an `ESM::Spell` draft with the effect list assembled from the emitter's base effects plus any launch-modifier transformations that apply to damage/duration/area. Each record gets a generated ID of the form `spellforge_<recipe_id>_n<node_index>`.
-6. **Register**: call `world.createRecord` on each record. Store the returned record references in the metadata table keyed by generated ID.
-7. **Add front-end to spellbook**: the root emitter's generated record is added to the player's spells via `ActorSpells:add`. Internal nodes are not added.
-8. **Return**: send `RecipeCompileComplete` back to the UI layer with the front-end spell ID so the crafter can display a success state.
-
-### Canonicalization is mandatory
-
-Without it, every cast of "the same" recipe creates fresh records and the record store grows without bound over a play session. Two recipes that serialize identically must produce the same `recipe_id` and reuse the same records. Order matters for ordered opcodes (Multicast before Trigger is not the same as Trigger before Multicast), so canonical form is positional, not sorted.
-
-### Record metadata table
-
-For every generated record, the metadata table stores:
-
-```lua
-{
-  recipe_id     = "ab3f...",
-  node_path     = {1, 2, 1},        -- path in the original recipe tree
-  payload       = <payload subtree>,  -- resolved at hit time
-  launch_ctx    = <launch context>,  -- compiled from preceding modifiers
-  parent_recipe = <recipe ref>,
-}
+```text
+Multicast the next emitter.
+Launch Fire Damage.
+When Fire Damage resolves, run Frost Damage payload.
 ```
 
-This table is the single source of truth for the executor. It lives in global script state and is persisted via the storage API.
+The UI may eventually look like a modified Morrowind spellmaker, but internally the recipe remains a flat ordered effect list with possible compiled scopes.
 
-## Runtime Executor
+### 4.2 Compilation
 
-### Entry points
+The compiler receives an ordered effect list and produces a compiled plan.
 
-1. **Player cast** of a front-end compiled spell. Detected via an `onSpellCast` handler on the global controller. The executor wraps the initial launch with any root-level launch modifiers (multicast at the root, spread, etc.) and dispatches through SFP.
-2. **Hit event** (`MagExp_OnMagicHit`). The executor looks up the hit spell's ID in the metadata table. If it's one of ours, it resolves the payload.
-3. **Timer fire**. Scheduled via `async:newSimulationTimer` when a Timer opcode is compiled into a node. On fire, the executor runs the payload at the projectile's last known position.
+The compiler is responsible for:
 
-### Cookie table
+- recognizing vanilla emitters
+- recognizing Spellforge operator effects
+- grouping compatible emitters
+- binding prefix operators
+- binding postfix operators
+- computing static bounds
+- rejecting invalid recipes
+- caching compiled plans by deterministic recipe hash
 
-Every in-flight SFP projectile that belongs to us is tagged in a cookie table keyed by the projectile's spell instance ID:
+The compiler does not execute gameplay behavior.
 
-```lua
-{
-  [instance_id] = {
-    generated_spell_id = "spellforge_ab3f_n2",
-    caster             = <actor>,
-    spawn_time         = <simulation_time>,
-    recipe_id          = "ab3f...",
-  }
-}
+### 4.3 Dispatch
+
+The dispatch layer reuses the working 2.2b intercept pipeline.
+
+The player still casts normally. Spellforge does not fire unless vanilla casting succeeds.
+
+The dispatch layer is responsible for:
+
+- detecting that the selected spell is a Spellforge spell
+- arming intercept state
+- waiting for cast-success authorization
+- firing only on the correct release text key
+- forwarding an authorized cast to the global runtime
+
+### 4.4 Orchestration
+
+The orchestrator owns runtime spell jobs.
+
+It is responsible for:
+
+- active job registry
+- bounded per-tick advancement
+- delayed Timer jobs
+- Trigger payload jobs
+- Multicast/Burst fanout jobs
+- Chain hop jobs
+- enforcing hard runtime caps
+
+No opcode should recurse synchronously.
+
+All fanout and nested behavior must enqueue bounded jobs.
+
+---
+
+## 5. Script Boundary
+
+Spellforge uses OpenMW's PLAYER/GLOBAL split.
+
+### PLAYER script responsibilities
+
+The player script may:
+
+- observe input/cast intent
+- track selected spell metadata
+- observe animation text keys
+- receive cast-success authorization
+- send authorized dispatch requests to global scripts
+- show UI/debug messages
+
+The player script should not:
+
+- call `I.MagExp` directly
+- create records
+- own the runtime job queue
+- execute opcode behavior
+- do expensive per-frame parsing
+
+### GLOBAL script responsibilities
+
+The global script may:
+
+- own backend handshake
+- access SFP / `I.MagExp`
+- own compiled plan cache
+- own active job queue
+- execute opcode behavior
+- receive SFP hit events
+- create runtime helper records if absolutely necessary
+- apply/detonate/launch spell effects
+
+All privileged runtime work belongs in global scripts.
+
+---
+
+## 6. Recipe Model
+
+A Spellforge recipe is an ordered effect list.
+
+Each entry is one of:
+
+1. **Emitter effect**
+   - vanilla magical effect
+   - examples: Fire Damage, Frost Damage, Shield, Restore Health
+
+2. **Prefix operator**
+   - Spellforge effect that modifies the next emitter group
+   - examples: Multicast, Spread, Burst, Speed+, Size+, Chain
+
+3. **Postfix operator**
+   - Spellforge effect that binds to the immediately preceding emitter group
+   - examples: Trigger, Timer
+
+There is no exposed recipe tree.
+
+The compiler may internally produce a plan with scopes and payloads, but this is a compiled representation, not the authoring model.
+
+---
+
+## 7. Emitter Groups
+
+An emitter group is one or more compatible consecutive vanilla magical effects that resolve as one spell emission.
+
+### Grouping rules
+
+Consecutive vanilla effects form one emitter group when:
+
+- they are compatible in range
+- no Spellforge control-flow operator appears between them
+- the compiler can safely dispatch them as one emission
+
+A group breaks when:
+
+- range changes
+- a Spellforge operator appears
+- an effect cannot share dispatch semantics with the current group
+
+### Ranges
+
+The compiler recognizes at least:
+
+- Self
+- Touch
+- Target
+
+Range matters because Self effects resolve immediately, Touch effects resolve on contact, and Target effects generally travel as projectiles.
+
+### Target emitter grouping
+
+OpenMW can represent multiple target-range effects as a single projectile-like spell behavior. Spellforge should preserve this grouping where possible instead of naively launching each effect separately.
+
+Bad:
+
+```text
+Fire Damage target
+Frost Damage target
+Shock Damage target
+
+=> launch three unrelated projectiles
 ```
 
-Entries have a TTL equal to the projectile's lifetime plus a small grace period. A periodic sweep reaps expired entries to prevent leaks from projectiles that despawn without triggering a hit event.
+Preferred:
 
-### Payload resolution
+```text
+Fire Damage target
+Frost Damage target
+Shock Damage target
 
-On hit, the executor:
+=> one emitter group with three effects
+```
 
-1. Looks up the cookie for the impacting projectile.
-2. Uses `generated_spell_id` to find the node's payload in the metadata table.
-3. Walks the payload left-to-right, accumulating a launch context for each emitter, and dispatching each emitter either as a new SFP launch (for projectile emitters) or as a direct application (for terminal effects — see below).
-4. For each new projectile launched, writes a new cookie entry.
+---
 
-### Performance-critical dispatch rule
+## 8. Operator Binding Rules
 
-**Do not reflexively use `I.MagExp.launchSpell` for every sub-emission.** Each SFP projectile costs us ongoing Lua Physics raycasts for its entire lifetime. Reserve `launchSpell` for the primary cast and for triggered sub-projectiles whose flight behavior the player is meant to see.
+### Prefix operators
 
-For payloads that are effectively instant-detonate, prefer:
+Prefix operators bind forward.
 
-- **`I.MagExp.detonateSpellAtPos(pos, spellId, radius, ...)`** — one-shot AoE at a world position. No projectile, no raycast tail. Use this for "on hit, frost damage in 10ft."
-- **`I.MagExp.applySpellToActor(target, spellId, ...)`** — direct application to a specific actor. Use when the payload is a debuff on the hit target.
+They apply to the next emitter group only unless explicitly defined otherwise.
 
-For secondary projectiles where SFP's event broadcast is unnecessary, consider `world.launchProjectile` (engine-native, uses vanilla collision instead of Lua Physics). The tradeoff is you lose `MagExp_OnMagicHit` and must handle `onProjectileHit` yourself — only worth it when you're sure no further chaining is needed.
+v1 prefix operators:
 
-Rule of thumb:
+- Multicast
+- Spread
+- Burst
+- Speed+
+- Size+
+- Chain
 
-| Situation | Use |
+Example:
+
+```text
+1. Speed+
+2. Multicast
+3. Fire Damage on Target
+4. Shield on Self
+```
+
+Binding:
+
+```text
+Speed+ and Multicast apply to Fire Damage only.
+Shield is not affected.
+```
+
+### Postfix operators
+
+Postfix operators bind backward.
+
+They attach to the immediately preceding emitter group.
+
+v1 postfix operators:
+
+- Trigger
+- Timer
+
+Example:
+
+```text
+1. Fire Damage on Target
+2. Trigger
+3. Frost Damage on Target
+```
+
+Binding:
+
+```text
+Trigger binds to Fire Damage.
+Frost Damage becomes Trigger's payload.
+```
+
+---
+
+## 9. Trigger and Timer Semantics
+
+### Trigger
+
+Trigger binds to the emitter group directly above it.
+
+Trigger payload is:
+
+```text
+everything after Trigger until the end of the current scope
+```
+
+For v1's flat effect-list model, "current scope" usually means the rest of the recipe.
+
+Trigger fires when its bound emitter resolves.
+
+Resolution rules:
+
+| Bound emitter range | Trigger fires when |
 |---|---|
-| Player-visible primary cast | `launchSpell` |
-| Triggered projectile that will itself trigger | `launchSpell` |
-| Terminal AoE at impact point | `detonateSpellAtPos` |
-| Terminal debuff on hit target | `applySpellToActor` |
-| Leaf projectile with no further payload | `world.launchProjectile` (optional optimization) |
+| Target | Projectile collides/resolves |
+| Touch | Touch contact resolves |
+| Self | Immediately on cast |
 
-## Script Organization
+Trigger is allowed on any emitter range.
 
-```
-scripts/spellforge/
-├── player/
-│   ├── init.lua              -- Player-side entry, handshake, input
-│   ├── ui.lua                -- Crafter window, click-to-place
-│   ├── ui_palette.lua        -- Opcode palette rendering
-│   ├── ui_slots.lua          -- Slot widget + validation feedback
-│   └── storage.lua           -- Persistence of authored recipes
-├── global/
-│   ├── init.lua              -- Global entry, SFP handshake reply
-│   ├── compiler.lua          -- Recipe → ESM::Spell records
-│   ├── executor.lua          -- Hit/timer dispatch, cookie table
-│   ├── canonicalize.lua      -- Recipe hashing
-│   ├── records.lua           -- createRecord wrapper + cache
-│   └── policy.lua            -- Cost, XP, fatigue, failure
-├── shared/
-│   ├── opcodes.lua           -- Opcode definitions (single source)
-│   ├── validate.lua          -- Recipe validation (used by UI + compiler)
-│   └── events.lua            -- Event name constants
-├── context/
-│   └── effects.lua           -- Custom magic effect records (load context)
-└── tests/
-    ├── smoke_compiler.lua    -- Compiler smoke test
-    ├── smoke_executor.lua    -- Executor smoke test
-    └── smoke_chain.lua       -- End-to-end chain test
+No range-dependent validation should reject Trigger.
+
+### Timer
+
+Timer binds to the emitter group directly above it.
+
+Timer payload is:
+
+```text
+everything after Timer until the end of the current scope
 ```
 
-### Player ↔ Global event contract
+Timer fires after its configured delay.
 
-Player scripts cannot call `I.MagExp` directly. All privileged work happens in global scripts, reached by event. Event names are constants in `shared/events.lua`.
+v1 range:
 
-| Event | Direction | Payload |
-|---|---|---|
-| `Spellforge_CheckBackend` | P → G | — |
-| `Spellforge_BackendReady` | G → P | — |
-| `Spellforge_BackendUnavailable` | G → P | `{reason}` |
-| `Spellforge_CompileRecipe` | P → G | `{recipe, request_id}` |
-| `Spellforge_CompileResult` | G → P | `{request_id, ok, spell_id, error?}` |
-| `Spellforge_DeleteCompiled` | P → G | `{spell_id}` |
-
-Any gameplay action that requires the backend blocks until the handshake completes, with a 3-second timeout falling back to `UNAVAILABLE`. Pattern inherited from the multicast prototype.
-
-## UI Layer
-
-### Interaction model
-
-**Click-to-place**, not drag-and-drop. The player clicks a palette item to "pick up" that opcode (cursor/status changes to reflect the held item), then clicks a slot to place it. Right-click clears the held item. Clicking an occupied slot with nothing held picks up its contents.
-
-Rationale: controller and keyboard support come naturally, `mouseMove` plumbing is avoided, and validity feedback is cleaner because the source and destination are known at hover time.
-
-### Window composition
-
-- **Palette** (left): grouped opcode icons, organized by category (Emitters, Launch Modifiers, Scope Openers).
-- **Slot board** (center): the recipe being edited. For v1, a flat ordered list of slots with nested payload containers for Trigger/Timer scopes. Nesting is visible; the recipe's tree structure is shown literally rather than hidden in a flat sequence.
-- **Inspector** (right): preview of the currently selected slot or held opcode, computed magicka cost, validation errors, expected behavior summary.
-- **Status line** (bottom): `Placing: Multicast x5 — click a slot` / `Recipe valid — cost: 87 magicka` / `Invalid: Trigger at slot 3 has no preceding emitter`.
-
-### Validity feedback
-
-Before and during placement, slots highlight green/red based on whether the held opcode would be valid there. Examples:
-
-- Trigger held: slots immediately following any emitter highlight green; others red.
-- Emitter held: all empty slots green.
-- Launch modifier held: all empty slots green, but the inspector warns if there is no subsequent emitter in the chain.
-
-Validity rules live in `shared/validate.lua` and are used by both the UI (for highlighting) and the compiler (for authoritative rejection).
-
-### Controller and keyboard
-
-- D-pad / arrows: move focus across slots and palette items.
-- A / Enter: pick up (from palette or occupied slot) or place (into empty slot).
-- B / Esc: clear held / close window.
-- X / 1-9 hotkeys: direct palette selection.
-- Y / Tab: cycle between palette, board, and inspector regions.
-
-### Magic Window Extender integration
-
-If Magic Window Extender is installed, compiled front-end spells should appear in the magic window with a distinct icon or border treatment identifying them as composed spells, and tooltips should display the recipe summary. This uses MWE's modder API rather than overriding the built-in magic window. If MWE is not installed, compiled spells still appear in the vanilla spell list (because they're real records via `ActorSpells:add`) but without the enhanced tooltip.
-
-## Performance Architecture
-
-### Budget targets
-
-- Idle (no casts in flight): negligible overhead beyond UI resident memory when the crafter is open.
-- Single cast with 1 primary + 5 multicast triggers + 5 terminal AoEs: no observable frame impact on mid-range hardware.
-- Worst-case legal recipe (depth 3, 20 emitters): brief stutter acceptable but no freeze.
-
-### Hard caps (enforced in compiler)
-
-| Cap | Default | Rationale |
-|---|---|---|
-| Recursion depth | 3 | Prevents exponential fan-out in pathological recipes |
-| Total emitters per recipe | 20 | Bounds worst-case compile size |
-| Multicast count per node | 8 | Combined with depth cap, limits total projectile count |
-| Chain hops | 5 | Linear cost; this is a soft cap |
-| Pierce count | 3 | Same |
-
-### Hard caps (enforced in executor)
-
-| Cap | Default | Rationale |
-|---|---|---|
-| Concurrent SFP projectiles per player | 30 | Raycast load limit |
-| Concurrent SFP projectiles per cast | 20 | Prevents one cast from starving others |
-| Cookie table size | 500 | Sanity check; TTL reap should keep this well under cap |
-
-Exceeding an executor cap silently drops further launches for that cast and logs a warning. This is preferable to engine instability.
-
-### Record lifecycle
-
-Compiled records are canonicalized and cached. Identical recipes reuse the same records across the session. A session-end cleanup is not strictly necessary (records are discarded with the world on game exit) but a manual "clear compiled records" admin action should exist for testing.
-
-## Progression and Balance Policy
-
-Because composite spells bypass the vanilla cast path, nothing related to cost, skill progression, fatigue, or failure is automatic. The `policy.lua` module is the single point of decision for all of these, and its defaults should be configurable via the settings menu.
-
-### Magicka cost
-
-Computed at compile time and cached on the front-end record. A recipe's cost is the sum of its emitter base costs, multiplied per-emitter by the compounding multiplier of its launch modifiers, summed across the full tree including triggered payloads. Multicast multiplies linearly by count (5 fireballs cost roughly 5× one fireball, not less). Damage+ multipliers scale cost quadratically to discourage trivially stacking them.
-
-The player is charged once at cast time, at the front-end record's cost. `isFree = true` is passed to every internal `launchSpell` to prevent re-deducting.
-
-### Skill progression
-
-Destruction / Alteration / etc. XP is awarded based on the primary school of the root emitter, scaled by magicka spent, applied once per cast. If the recipe contains emitters of multiple schools, each school receives a proportional share. Implemented via the `SkillProgression` interface.
-
-### Fatigue
-
-Standard vanilla fatigue cost applies to the front-end cast and is not multiplied by multicast. The composed spell is one cast, and the player's body casts it once.
-
-### Failure chance
-
-Computed from the caster's skill in the primary school versus the compiled spell's cost, using the vanilla failure formula. On failure, magicka is still partially consumed per vanilla rules and no payload runs.
-
-### Reflection
-
-Reflection applies to the front-end cast only. Triggered sub-projectiles and AoEs do not roll for reflection — they are framework-dispatched effects at known world positions, not caster-to-target spell transactions. This is a deliberate simplification; document it clearly in the help text so players understand the mechanic.
-
-## Storage
-
-OpenMW's storage API persists authored recipes. Layout:
-
-```
-spellforge:recipes:<recipe_id> → <serialized recipe>
-spellforge:spellbook:<player_id>:<recipe_id> → <metadata>
-spellforge:settings → <user settings>
+```text
+0.5s to 5.0s
 ```
 
-Recipes are stored per-recipe rather than as one large blob so individual recipe edits don't rewrite the whole store. The compiler's record cache is not persisted — records are regenerated on load from the stored recipes.
+Timer should enqueue a delayed job. It must not block or spin.
 
-## Known Limitations
+---
 
-- **SFP dependency**: we rely on framework contracts that are not part of the engine. Changes to SFP's event surface require our updates. Pin to a known-good SFP version and document it.
-- **Lua Physics cost**: every in-flight SFP projectile pays raycast cost per tick. The architecture mitigates this but does not eliminate it. True high-density spellcasting (Noita endgame) is not a design target.
-- **0.51 RC API instability**: the load context for custom effect injection is flagged work-in-progress. Expect minor refactoring before 0.51 stable.
-- **No multiplayer consideration**: the design assumes single-player OpenMW. TES3MP or future multiplayer OpenMW would need a rethink of event timing and authority.
-- **UI does not support live recipe editing during combat**: the crafter opens as a menu mode that pauses the game. Designed as a preparation tool.
-- **Mad's dehardcoded spellcasting MR is not yet merged**: if and when it lands, we may be able to replace parts of the executor with native engine hooks. Design the executor with clean seams so that refactor is feasible.
+## 10. Multicast Semantics
 
-## Deferred / Not in v1
+Multicast is a prefix operator.
 
-Explicit deferrals, following the discipline established in the multicast prototype:
+Multicast consumes only the next emitter group.
 
-- **Homing** — prohibitively expensive without engine changes. Park indefinitely.
-- **Reflect / Bounce** — straightforward to add but not core to v1. Target v1.1.
-- **Delay** (as distinct from Timer) — relatively niche. v1.1.
-- **Lifesteal / Manasteal** — requires post-hit damage resolution. Clean to add after v1 ships. v1.1.
-- **Seeking** — cheap homing variant. Evaluate after v1 based on observed performance headroom. v1.2.
-- **Gravity / Heavy / Light** — contingent on Lua Physics exposing per-body gravity multipliers. Investigate then decide.
-- **Boomerang** — novelty modifier. v1.2 or later.
-- **Split-on-timer** — likely emergent from Timer + Multicast in the executor; may not need a dedicated opcode.
-- **Orbiting / Satellite projectiles** — new projectile behavior mode, not a modifier. Separate feature; defer.
-- **Persistent world hazards** — fire patches, ice walls. Not appropriate for SFP. Separate mod category.
-- **DoT patches at impact** — technically possible; defer until base system is stable.
-- **Wand metaphor / randomized draw order** — Noita's wand mechanic proper (with shuffle, charges, recharge time) is a large design space. v1 ships with deterministic linear execution; wand mechanics are a v2 consideration.
-- **NPC usage of composed spells** — v1 is player-only. NPCs continue to cast vanilla spells.
+It does not multiply the entire remaining recipe.
 
-## Roadmap
+Example:
 
-### v1.0 — Foundation
+```text
+1. Multicast x3
+2. Fire Damage on Target
+3. Shield on Self
+```
 
-- Nine opcodes: Multicast, Spread, Damage+, Speed+, Size+, Chain, Pierce, Trigger, Timer.
-- Compiler with canonicalization and caching.
-- Executor with cookie table and performance-tiered dispatch.
-- Click-to-place UI with validity feedback and controller support.
-- Cost, XP, fatigue, failure, reflection policy.
-- Recipe persistence via storage API.
-- Smoke test harness for compiler, executor, and chain behavior.
-- MWE integration where available.
+Execution:
 
-### v1.1 — Expansion
+```text
+Fire Damage is emitted 3 times.
+Shield is applied once.
+```
 
-- Reflect, Delay, Lifesteal/Manasteal opcodes.
-- Per-opcode axis control for Spread.
-- Recipe import/export as shareable strings.
-- Tutorial sequence for new players.
+This rule prevents trivial exponential blowups and makes player intent readable.
 
-### v1.2 — Quality
+---
 
-- Seeking (limited homing).
-- Gravity modifier if Lua Physics supports it.
-- Performance profiling surfaced in debug mode.
-- Recipe library / favorites UI.
+## 11. v1 Opcode Vocabulary
 
-### v2.0 — Depth
+v1 contains exactly eight Spellforge operators.
 
-- Wand mechanic: shuffle, charges, recharge.
-- NPC composed spell casting.
-- Evaluate whether Mad's dehardcoded spellcasting has landed and plan a native-hooks migration.
+| Opcode | Kind | Range / Parameters | Binding | Notes |
+|---|---|---|---|---|
+| Multicast | Prefix | count 2–8 | next emitter group | emits N copies |
+| Spread | Prefix | forward cone preset/angle | next emitter group | modifies aim vectors |
+| Burst | Prefix | bounded burst count | next emitter group | spherical/Fibonacci burst |
+| Speed+ | Prefix | percent scalar | next emitter group | modifies projectile speed |
+| Size+ | Prefix | percent scalar | next emitter group | modifies area/VFX scale where supported |
+| Chain | Prefix | hops 1–5 | next emitter group | bounded target hopping |
+| Trigger | Postfix | none | previous emitter group | payload on resolution |
+| Timer | Postfix | 0.5–5.0s | previous emitter group | payload after delay |
 
-## Glossary
+Any doc/code mentioning v1 `Damage+` or `Pierce` is stale unless those are explicitly reintroduced later.
 
-**Recipe** — The player-authored graph of opcodes that describes a spell.
+---
 
-**Opcode** — A single primitive in the recipe vocabulary (e.g., Multicast, Trigger, Fireball).
+## 12. Shot State
 
-**Emitter** — An opcode that produces one or more projectiles or effects.
+At runtime, opcodes operate on a mutable shot state.
 
-**Launch modifier** — A prefix opcode that modifies the next emitter.
+A shot state represents one pending emission or payload execution.
 
-**Scope opener** — An opcode (Trigger, Timer) that opens a payload scope on the previous emitter.
+Suggested fields:
 
-**Payload** — The sub-graph of opcodes that runs when a scope opener fires.
+```lua
+{
+    caster = <actor>,
+    source_spell_id = "...",
+    recipe_id = "...",
+    plan = <compiled plan>,
+    pc = 1,
 
-**Front-end record** — The `ESM::Spell` record added to the player's spellbook representing the root of a compiled recipe.
+    origin = <vector3>,
+    direction = <vector3>,
+    target = <object or nil>,
+    hit_pos = <vector3 or nil>,
 
-**Node record** — An internal `ESM::Spell` record representing a non-root emitter in a compiled recipe. Not added to the spellbook.
+    recursion_depth = 0,
+    projectile_count = 0,
+    chain_hops_used = 0,
 
-**Cookie** — A metadata entry in the executor's in-flight projectile table, linking a specific projectile instance to its recipe node.
+    modifiers = {
+        multicast = 1,
+        spread = nil,
+        burst = nil,
+        speed_scale = 1.0,
+        size_scale = 1.0,
+        chain_hops = 0,
+    },
+}
+```
 
-**Canonicalization** — Deterministic serialization of a recipe such that equivalent recipes hash to the same ID and reuse compiled records.
+Shot state is copied when jobs fork.
 
-**SFP** — Spell Framework Plus; the `I.MagExp` interface. All projectile launches and hit events route through it.
+A fork must increment or preserve counters deliberately.
 
-**MWE** — Magic Window Extender; an optional dependency for enhanced spell list UI integration.
+Never let one branch mutate shared state used by another branch.
 
-## Appendix A: Example compile
+---
+
+## 13. Compiled Plan
+
+The compiled plan is the internal representation produced from a recipe effect list.
+
+It should contain:
+
+```lua
+{
+    recipe_id = "...",
+    source_spell_id = "...",
+    entries = {
+        -- grouped emitters and bound operators
+    },
+    bounds = {
+        max_recursion_depth = 3,
+        max_projectiles = 32,
+        max_chain_hops = 5,
+    },
+}
+```
+
+The exact table shape may evolve, but it must support:
+
+- deterministic replay
+- readable validation errors
+- simple debug traces
+- bounded execution
+- future UI summaries
+
+The compiled plan should be cached by recipe hash.
+
+---
+
+## 14. Recipe Hashing / Canonicalization
+
+Canonicalization is mandatory.
+
+The same recipe must hash to the same recipe ID.
+
+The canonical representation should include enough data to distinguish gameplay behavior:
+
+- ordered effect IDs
+- ranges
+- magnitude min/max
+- area
+- duration
+- operator IDs
+- operator parameters
+- any version marker for the compiler format
+
+Do not hash only high-level node names if the actual effect payload can differ.
+
+Recommended canonical version field:
+
+```text
+spellforge-plan-v1
+```
+
+This allows future compiler changes without silently reusing stale cached plans.
+
+---
+
+## 15. Runtime Job Queue
+
+The orchestrator owns a central active job queue.
+
+No opcode should directly recurse into payload execution.
+
+Instead, opcodes enqueue work.
+
+### Job shape
+
+Suggested:
+
+```lua
+{
+    id = "...",
+    kind = "execute_plan" | "emit_group" | "trigger_payload" | "timer_payload" | "chain_hop",
+    recipe_id = "...",
+    shot = <shot state>,
+    wake_time = nil,
+}
+```
+
+### Per-tick behavior
+
+Each update:
+
+1. Remove expired/dead jobs.
+2. Select ready jobs.
+3. Advance at most `MAX_JOBS_PER_TICK`.
+4. Enqueue follow-up jobs if needed.
+5. Drop jobs that exceed hard limits.
+
+This keeps pathological recipes from freezing the game.
+
+---
+
+## 16. Hard Limits
+
+Hard limits are enforced in both compiler and runtime.
+
+### Required v1 limits
+
+```lua
+MAX_RECURSION_DEPTH = 3
+MAX_PROJECTILES_PER_CAST = 32
+MAX_CHAIN_HOPS = 5
+MAX_SCAN_RADIUS = 2048
+MAX_JOBS_PER_TICK = 16
+```
+
+### Compiler enforcement
+
+The compiler should reject recipes that statically exceed obvious limits.
+
+Examples:
+
+- no emitter exists
+- operator has invalid parameter
+- Trigger has no preceding emitter group
+- Timer has no preceding emitter group
+- known static projectile count exceeds max
+
+### Runtime enforcement
+
+The runtime must still guard dynamically.
+
+Examples:
+
+- Trigger payload tries to exceed recursion depth
+- Chain cannot find valid targets
+- Burst/Multicast would exceed projectile cap
+- too many jobs are already active
+- scan radius exceeded
+
+Runtime should drop excess work safely and log a warning in debug/dev builds.
+
+---
+
+## 17. Dispatch Strategy
+
+Spellforge should choose the cheapest dispatch method that preserves behavior.
+
+### Preferred dispatch tiers
+
+| Runtime situation | Preferred method |
+|---|---|
+| visible projectile that may trigger later | SFP `launchSpell` |
+| direct application to a known actor | SFP `applySpellToActor` if available |
+| terminal AoE at a position | SFP `detonateSpellAtPos` if available |
+| self effect | direct apply path if available |
+| diagnostic/prototype projectile | existing 2.2b dispatch path |
+
+The runtime should avoid using SFP projectile launches for every effect when a cheaper direct apply/detonation path is enough.
+
+Projectile launches are expensive because they require continued collision/raycast tracking.
+
+---
+
+## 18. Hit / Resolution Events
+
+For Target and Touch emitters, Trigger depends on knowing when an emission resolves.
+
+The runtime should use the best available event source, currently expected to be SFP hit events such as `MagExp_OnMagicHit`.
+
+A major implementation question:
+
+```text
+Does the hit event identify a projectile/cast instance, or only a spell ID?
+```
+
+If only spell ID is available, the runtime must not rely on `spell_id` alone for per-projectile cookies once Multicast exists.
+
+Possible fallback strategies:
+
+- per-launch unique helper spell records
+- spell ID + attacker + timestamp queue
+- SFP-supported launch cookie, if available
+- bounded active launch table keyed by enough available payload fields
+
+This must be solved before real Multicast + Trigger behavior is considered complete.
+
+---
+
+## 19. 2.2b Prototype Compatibility
+
+The existing 2.2b code may still contain:
+
+- marker effect records
+- generated helper spells
+- real-effect metadata tables
+- diagnostic SFP launches
+- debug fireball dispatch
+- verbose cast/hit logging
+
+These are acceptable as prototype scaffolding.
+
+However, they must not be treated as the final 2.2c architecture.
+
+Recommended policy:
+
+- keep 2.2b working
+- label prototype-only paths clearly
+- avoid deleting useful diagnostics too early
+- do not build new opcode runtime directly on the old recipe-graph compiler
+
+---
+
+## 20. Metadata Query / Cast Race Rule
+
+The player-side intercept path must not depend on a slow async metadata query during the same cast input that needs interception.
+
+Bad pattern:
+
+```text
+Use pressed
+→ query global metadata
+→ animation start key may fire before response
+→ intercept misses arming window
+```
+
+Preferred pattern:
+
+```text
+Compile succeeds
+→ player-side cache receives spellforge metadata
+→ cast input uses local cache synchronously
+→ intercept arms before animation start/release flow
+```
+
+Metadata may still be refreshed asynchronously, but the cast-critical path should use local cached knowledge.
+
+---
+
+## 21. Validation Rules
+
+A valid v1 recipe must:
+
+- contain at least one vanilla emitter group
+- contain only known vanilla effects and known Spellforge operators
+- satisfy all operator parameter ranges
+- have every prefix operator followed by an emitter group within its binding range
+- have every Trigger/Timer preceded by an emitter group
+- respect hard static caps where calculable
+- avoid malformed generated records or invalid effect definitions
+
+Validation should produce readable errors.
+
+Example errors:
+
+```text
+Slot 1: Trigger has no emitter above it.
+Slot 3: Multicast must be followed by an emitter group.
+Slot 5: Timer duration must be between 0.5 and 5.0 seconds.
+Recipe rejected: no vanilla emitter effects found.
+```
+
+---
+
+## 22. Example Parses
+
+### Example A: Fireball + Shield + Trigger + Resist Magic
 
 Recipe:
 
-```
-[Fireball] [Trigger] [Multicast 5] [Spread 360°] [Fireball] [Trigger] [FrostAoE 10ft]
-```
-
-Recipe tree (after parsing):
-
-```
-Emitter("fireball_base")
-└── Payload
-    ├── LaunchMod(Multicast, count=5)
-    ├── LaunchMod(Spread, arc=360)
-    ├── Emitter("fireball_base")
-    │   └── Payload
-    │       └── Terminal("frost_aoe_base", radius_ft=10)
+```text
+1. Fire Damage on Target
+2. Shield on Self
+3. Trigger
+4. Resist Magic on Self
 ```
 
-Canonical form (sketch):
+Grouping:
 
-```
-E:fireball_base|T|M:5|S:360|E:fireball_base|T|X:frost_aoe_base:r10
-```
-
-Hash: `ab3f9c2e` (recipe_id)
-
-Records generated:
-
-- `spellforge_ab3f9c2e_n0` — front-end fireball (added to spellbook)
-- `spellforge_ab3f9c2e_n1` — inner fireball (metadata only)
-
-Metadata:
-
-```
-spellforge_ab3f9c2e_n0:
-  payload: [Multicast(5), Spread(360), launch → n1]
-spellforge_ab3f9c2e_n1:
-  payload: [detonate → frost_aoe_base radius=10ft]
+```text
+Group 1: Fire Damage on Target
+Group 2: Shield on Self
+Trigger binds to Group 2
+Payload: Resist Magic on Self
 ```
 
-Runtime trace on cast:
+Execution:
 
-1. Player casts `spellforge_ab3f9c2e_n0`. SFP launches the front-end fireball. Cookie written.
-2. Fireball impacts target. `MagExp_OnMagicHit` fires. Executor looks up cookie → finds `n0`'s payload.
-3. Executor walks payload: Multicast(5) + Spread(360) → launches 5 copies of `n1` fanned in a 360° ring around world-up at the impact position. 5 cookies written.
-4. Each `n1` fireball flies until impact or lifetime expiry.
-5. On each `n1` impact: `MagExp_OnMagicHit` fires. Executor looks up cookie → finds `n1`'s payload.
-6. Payload resolves: `detonateSpellAtPos(impact_pos, frost_aoe_base, radius=10ft)`. Terminal; no further chaining.
+```text
+Fire Damage launches normally.
+Shield applies to caster.
+Shield is Self range, so it resolves immediately.
+Trigger fires immediately.
+Resist Magic applies to caster.
+```
 
-Total SFP projectiles in flight at peak: 6 (1 + 5). Total AoE detonations: up to 5. Within budget.
+### Example B: Multicast + Fireball + Shield
 
-## Appendix B: Smoke test expectations
+Recipe:
 
-The smoke test harness (`tests/`) is a separate `.omwscripts` file that validates plumbing independently of gameplay. It should be runnable without affecting a player save.
+```text
+1. Multicast x3
+2. Fire Damage on Target
+3. Shield on Self
+```
 
-- `smoke_compiler.lua`: constructs a hardcoded recipe graph, runs it through the compiler, asserts that records are created and that re-compiling the same recipe reuses them.
-- `smoke_executor.lua`: registers a known recipe, issues a synthetic `MagExp_OnMagicHit` for the front-end spell, asserts the executor dispatches the expected payload.
-- `smoke_chain.lua`: end-to-end test from player cast to terminal AoE, asserting cookie table lifecycle and cleanup.
+Binding:
 
-Failures in smoke tests are logged loudly and block gameplay loading. Smoke tests are intended to catch breakage from OpenMW and SFP updates early, not to validate gameplay correctness.
+```text
+Multicast binds to Fire Damage only.
+Shield is outside Multicast's operand.
+```
+
+Execution:
+
+```text
+Three Fire Damage emissions.
+One Shield application.
+```
+
+### Example C: Fireball + Trigger + Burst + Frost
+
+Recipe:
+
+```text
+1. Fire Damage on Target
+2. Trigger
+3. Burst
+4. Frost Damage on Target
+```
+
+Binding:
+
+```text
+Trigger binds to Fire Damage.
+Trigger payload is Burst + Frost Damage.
+Burst binds to Frost Damage.
+```
+
+Execution:
+
+```text
+Fire projectile launches.
+On impact, payload runs.
+Burst emits bounded Frost projectiles from impact position.
+```
+
+---
+
+## 23. Proposed Module Layout
+
+Final 2.2c-oriented layout:
+
+```text
+scripts/spellforge/
+├── player/
+│   ├── init.lua                  -- 2.2b intercept, local metadata cache
+│   ├── ui.lua                    -- future spellforge authoring UI
+│   └── metadata_cache.lua        -- selected spell / compiled plan cache
+│
+├── global/
+│   ├── init.lua                  -- backend events, SFP event registration
+│   ├── compiler.lua              -- effect-list recipe -> compiled plan
+│   ├── parser.lua                -- grouping and operator binding
+│   ├── orchestrator.lua          -- central bounded job queue
+│   ├── executor.lua              -- dispatch helpers and hit resolution
+│   ├── records.lua               -- runtime helper record/cache utilities
+│   └── canonicalize.lua          -- deterministic recipe hashing
+│
+├── shared/
+│   ├── events.lua                -- event name constants
+│   ├── opcodes.lua               -- v1 opcode definitions
+│   ├── limits.lua                -- hard caps
+│   ├── validate.lua              -- effect-list validation
+│   └── log.lua                   -- logging
+│
+└── context/
+    └── effects.lua               -- Spellforge custom magic effects
+```
+
+Existing files do not need to match this immediately, but new 2.2c work should move toward this shape.
+
+---
+
+## 24. Logging Policy
+
+Debug logging is useful during 2.2b/2.2c development, but high-frequency runtime paths must be quiet by default.
+
+Default:
+
+```text
+info: milestones, compile success/failure, backend availability
+warn: dropped jobs, cap enforcement, missing backend
+error: failed dispatch, invalid runtime state
+debug: hit payload dumps, target filters, per-projectile traces
+```
+
+Do not stringify full hit payloads or target filter decisions at info level during normal gameplay.
+
+---
+
+## 25. Acceptance Criteria for 2.2c.0
+
+2.2c.0 is a design/code realignment milestone.
+
+It is complete when:
+
+- `ARCHITECTURE.md` describes the effect-list model.
+- Old graph/tree language is removed or clearly marked deprecated.
+- `shared/opcodes.lua` matches the v1 eight-opcode vocabulary.
+- hard limits live in one shared module or are clearly centralized.
+- old compiler/executor paths are labeled prototype where applicable.
+- no new opcode behavior is implemented yet.
+- 2.2b intercept dispatch still works.
+
+---
+
+## 26. Acceptance Criteria for 2.2c.1
+
+2.2c.1 introduces parser/compiler skeleton only.
+
+It is complete when:
+
+- effect-list parser exists
+- compatible vanilla effects become emitter groups
+- prefix operators bind forward
+- Trigger/Timer bind backward
+- Multicast consumes only the next emitter group
+- readable validation errors exist
+- compiled plan can be printed/debugged
+- no real projectile fanout is required yet
+
+---
+
+## 27. Acceptance Criteria for 2.2c.2
+
+2.2c.2 introduces the orchestrator skeleton.
+
+It is complete when:
+
+- global job queue exists
+- jobs advance at most `MAX_JOBS_PER_TICK`
+- dummy jobs can enqueue sub-jobs
+- recursion/projectile/job caps are enforced
+- no synchronous recursive opcode execution exists
+- debug logs show enqueue/advance/drop/complete
+
+---
+
+## 28. Opcode Implementation Order
+
+Implement opcodes one at a time.
+
+Recommended order:
+
+1. Speed+ / Size+ as shot-state mutators
+2. Multicast
+3. Timer
+4. Trigger
+5. Spread
+6. Burst
+7. Chain
+
+Do not implement all eight in one PR.
+
+---
+
+## 29. Glossary
+
+**Recipe**  
+The ordered Morrowind spell effect list containing vanilla effects and Spellforge operator effects.
+
+**Emitter**  
+A vanilla magical effect or compatible group of effects that produces an actual spell emission or application.
+
+**Emitter group**  
+One or more compatible consecutive vanilla effects compiled as one runtime emission.
+
+**Prefix operator**  
+A Spellforge effect that modifies the next emitter group.
+
+**Postfix operator**  
+A Spellforge effect that binds to the previous emitter group.
+
+**Trigger payload**  
+The effect-list segment that runs when the bound emitter resolves.
+
+**Compiled plan**  
+Internal validated representation of the recipe used by the runtime.
+
+**Shot state**  
+Mutable runtime state passed through opcode execution.
+
+**Job**  
+A bounded unit of runtime work advanced by the orchestrator.
+
+**SFP**  
+Spell Framework Plus, exposed as `I.MagExp`.
+
+**2.2b**  
+Current working intercept-dispatch milestone.
+
+**2.2c**  
+Opcode runtime design and implementation milestone.
