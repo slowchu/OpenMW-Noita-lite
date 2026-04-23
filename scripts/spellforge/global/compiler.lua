@@ -124,7 +124,10 @@ function compiler.compile(actor, recipe, request_id)
     log.info(string.format("validation passed node_count=%d", node_count))
 
     local canonical = canonicalize.run(recipe)
-    local cached = records.getByRecipeId(canonical.recipe_id)
+    local cached = nil
+    if not debug_marker_range_from_root then
+        cached = records.getByRecipeId(canonical.recipe_id)
+    end
     if cached then
         local added_ok, add_err = addToSpellbook(actor, cached.frontend_spell_id)
         if not added_ok then
