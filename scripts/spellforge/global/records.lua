@@ -90,6 +90,7 @@ local function sanitizeEntry(entry)
         generated_spell_ids = generated_spell_ids,
         generated_engine_spell_ids = generated_engine_spell_ids,
         node_metadata = sanitizeNodeMetadata(entry.node_metadata),
+        marker_effect_applied = entry.marker_effect_applied == true,
     }
 end
 
