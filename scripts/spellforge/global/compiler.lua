@@ -46,10 +46,9 @@ end
 
 local function createDraft(record_id, emitter)
     local base = core.magic.spells.records[emitter.base_spell_id]
-    local base_effect = base and base.effects and base.effects[1]
     local marker_effect = {
         id = MARKER_EFFECT_ID,
-        range = base_effect and base_effect.range or "target",
+        range = "self",
         area = 0,
         duration = 0,
         magnitudeMin = 0,
