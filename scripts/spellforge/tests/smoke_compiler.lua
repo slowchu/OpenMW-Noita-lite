@@ -14,6 +14,8 @@ local state = {
     running = false,
 }
 
+local DEBUG_MARKER_RANGE_FROM_ROOT = true
+
 local function assertLine(ok, label)
     if ok then
         log.info("PASS " .. label)
@@ -72,6 +74,9 @@ local function compile(recipe, request_id)
         actor_id = self.recordId,
         recipe = recipe,
         request_id = request_id,
+        options = {
+            debug_marker_range_from_root = DEBUG_MARKER_RANGE_FROM_ROOT,
+        },
     })
 end
 
@@ -202,6 +207,7 @@ local function runSmoke()
     log.info(string.format("smoke fixture base_spell_id=%s", base_spell_id))
 
     state.running = true
+    log.info(string.format("smoke compiler debug_marker_range_from_root=%s", tostring(DEBUG_MARKER_RANGE_FROM_ROOT)))
     log.info("starting smoke compiler run")
 
     local trivial_recipe = {
