@@ -178,4 +178,14 @@ function records.findByEngineSpellId(engine_id)
     return nil, nil
 end
 
+
+function records.findRootNodeByEngineSpellId(engine_id)
+    local recipe_id, entry = records.findByEngineSpellId(engine_id)
+    if not recipe_id or not entry then
+        return nil, nil, nil
+    end
+    local root = entry.node_metadata and entry.node_metadata[1] or nil
+    return recipe_id, entry, root
+end
+
 return records

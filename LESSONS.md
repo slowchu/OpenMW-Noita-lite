@@ -41,6 +41,16 @@
 2. **Smoke harness behavior**
    - For cast tests, include manual-cast guidance and timeout diagnostics to avoid silent hangs.
 
+## Phase 2.2b Additions
+
+1. **Interception uses text-key release, not fixed timers**
+   - Player intercept dispatch is keyed to spellcast `<variant> release` and aborts on `<variant> stop`.
+
+2. **Round-trip metadata gate before interception**
+   - Player script queries global metadata (`Spellforge_QuerySpellMetadata`) before arming intercept.
+
+3. **Root-only dispatch scope for 2.2b**
+   - Executor dispatches only root emitter `real_effects` and records root cookies for hit observability.
 
 ## OpenMW 0.51 load context
 

@@ -1,7 +1,6 @@
 local async = require("openmw.async")
 local core = require("openmw.core")
 local input = require("openmw.input")
-local interfaces = require("openmw.interfaces")
 local self = require("openmw.self")
 local types = require("openmw.types")
 
@@ -15,7 +14,7 @@ local state = {
     pending_observe = {},
     running = false,
     last_spell_id = nil,
-    animation_diag_registered = false,
+    intercept_seen = false,
 }
 
 local function assertLine(ok, label)
@@ -55,15 +54,6 @@ local function beginObserve(spell_id, request_id)
         spell_id = spell_id,
         request_id = request_id,
         timeout_seconds = 30,
-    })
-end
-
-local function castRequest(spell_id, request_id)
-    core.sendGlobalEvent(events.CAST_REQUEST, {
-        sender = self.object,
-        actor = self,
-        spell_id = spell_id,
-        request_id = request_id,
     })
 end
 
@@ -116,6 +106,7 @@ local function runSmoke()
     end
 
     state.running = true
+    state.intercept_seen = false
     log.info("starting smoke cast run")
 
     local trivial_recipe = {
@@ -129,7 +120,7 @@ local function runSmoke()
     waitForCompile(compile_request_id, 5, function(compile_result)
         assertLine(compile_result.ok == true, "trivial cast recipe compiles")
         if not compile_result.ok then
-            log.error(string.format("  cause[compile]: %s", tostring(compile_result.error)))
+            log.error(string.format("  cause[compile]: %s", tostring(compile_result.error or compile_result.error_message)))
             state.running = false
             return
         end
@@ -148,52 +139,19 @@ local function runSmoke()
         local observe_request_id = nextRequestId("smoke-cast-observe")
         beginObserve(compile_result.spell_id, observe_request_id)
 
-        local cast_request_id = nextRequestId("smoke-cast-launch")
-        castRequest(compile_result.spell_id, cast_request_id)
-        log.info("manual cast fallback: select the compiled spell and cast within 30s (or press I to fire launchSpell request again)")
+        log.info("manual cast required: select the compiled spell and cast within 30s")
 
         waitForObserve(observe_request_id, 30, function(hit_result)
+            assertLine(state.intercept_seen == true, "intercept dispatched for compiled spell")
             local ok = hit_result.ok == true and hit_result.matched == true
             assertLine(ok, "MagExp_OnMagicHit observed for compiled spell")
             if not ok then
                 log.error(string.format("  cause[observe]: %s", tostring(hit_result.error or "timeout/no matching hit")))
-                log.error("  hint: cast the compiled spell manually, then check global.executor MagExp_OnMagicHit logs")
             end
             log.info("smoke cast run complete")
             state.running = false
         end)
     end)
-end
-
-local function registerAnimationDiagnostics()
-    if state.animation_diag_registered then
-        return
-    end
-    if interfaces.AnimationController == nil or type(interfaces.AnimationController.addTextKeyHandler) ~= "function" then
-        log.warn("animation diagnostics unavailable: AnimationController.addTextKeyHandler missing")
-        return
-    end
-
-    -- OpenMW interface docs: addTextKeyHandler can observe spellcast release text keys.
-    -- https://openmw.readthedocs.io/en/latest/reference/lua-scripting/interface_animation.html
-    interfaces.AnimationController.addTextKeyHandler("spellcast", function(groupname, key)
-        local selected_spell = types.Actor.getSelectedSpell(self)
-        local selected_spell_id = selected_spell and selected_spell.id or nil
-        log.info(string.format(
-            "local animation text key group=%s key=%s selected_spell_id=%s",
-            tostring(groupname),
-            tostring(key),
-            tostring(selected_spell_id)
-        ))
-        core.sendGlobalEvent(events.CAST_DIAG_SIGNAL, {
-            sender = self.object,
-            groupname = groupname,
-            key = key,
-            selected_spell_id = selected_spell_id,
-        })
-    end)
-    state.animation_diag_registered = true
-    log.info("registered local spellcast text-key diagnostics")
 end
 
 local function requestBackend()
@@ -213,15 +171,6 @@ local function onKeyPress(key)
     local symbol = key.symbol and string.lower(key.symbol) or ""
     if symbol == "o" or key.code == input.KEY.O then
         runSmoke()
-        return false
-    end
-    if symbol == "i" or key.code == input.KEY.I then
-        if state.last_spell_id then
-            castRequest(state.last_spell_id, nextRequestId("smoke-cast-launch-manual"))
-            log.info(string.format("manual launch request dispatched spell_id=%s", tostring(state.last_spell_id)))
-        else
-            log.warn("manual launch request ignored: no compiled spell_id in state")
-        end
         return false
     end
     return true
@@ -244,7 +193,6 @@ return {
             end
             state.backend = "READY"
             log.info("backend READY")
-            registerAnimationDiagnostics()
         end,
         [events.BACKEND_UNAVAILABLE] = function(payload)
             if state.handshake_timer then
@@ -276,6 +224,14 @@ return {
             if cb then
                 state.pending_observe[request_id] = nil
                 cb({ ok = true, matched = payload and payload.matched == true })
+            end
+        end,
+        [events.INTERCEPT_DISPATCH_RESULT] = function(payload)
+            if payload and payload.ok == true then
+                state.intercept_seen = true
+                log.info(string.format("intercept dispatch observed spell_id=%s count=%s", tostring(payload.spell_id), tostring(payload.dispatch_count)))
+            else
+                log.error(string.format("intercept dispatch failed spell_id=%s err=%s", tostring(payload and payload.spell_id), tostring(payload and payload.error)))
             end
         end,
     },

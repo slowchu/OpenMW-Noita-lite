@@ -1,4 +1,5 @@
 local async = require("openmw.async")
+local core = require("openmw.core")
 local interfaces = require("openmw.interfaces")
 local types = require("openmw.types")
 local util = require("openmw.util")
@@ -10,6 +11,9 @@ local records = require("scripts.spellforge.global.records")
 local executor = {}
 
 local watchers = {}
+local dispatch_spell_cache = {}
+local launch_cookies = {}
+
 local player_ref = nil
 local last_active_spell_ids = {}
 
@@ -31,7 +35,36 @@ local function findSpellforgeEntry(engine_id)
     return nil, nil
 end
 
-local function launchSpell(actor, engine_id)
+local function createDispatchSpellForEffect(recipe_id, effect_index, effect)
+    local cache_key = string.format("%s:%d", tostring(recipe_id), effect_index)
+    if dispatch_spell_cache[cache_key] then
+        return dispatch_spell_cache[cache_key], nil
+    end
+
+    local draft = core.magic.spells.createRecordDraft {
+        id = string.format("spellforge_%s_dispatch_%d", tostring(recipe_id), effect_index),
+        name = string.format("Spellforge Dispatch %s %d", tostring(recipe_id), effect_index),
+        cost = 0,
+        isAutocalc = false,
+        effects = { effect },
+    }
+
+    local created, create_err = records.createRecord(draft)
+    if create_err then
+        log.error(string.format("executor create dispatch spell failed recipe_id=%s effect_index=%s err=%s", tostring(recipe_id), tostring(effect_index), tostring(create_err)))
+        return nil, tostring(create_err)
+    end
+
+    local dispatch_spell_id = created and created.id
+    if type(dispatch_spell_id) ~= "string" or dispatch_spell_id == "" then
+        return nil, "dispatch spell create returned invalid id"
+    end
+
+    dispatch_spell_cache[cache_key] = dispatch_spell_id
+    return dispatch_spell_id, nil
+end
+
+local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_object)
     if interfaces.MagExp == nil then
         return false, "I.MagExp missing"
     end
@@ -39,20 +72,20 @@ local function launchSpell(actor, engine_id)
         return false, "I.MagExp.launchSpell missing"
     end
 
-    local start_pos = actor.position + util.vector3(0, 0, 120)
-    local direction = actor.rotation * util.vector3(0, 1, 0)
     local ok, err = pcall(interfaces.MagExp.launchSpell, {
         attacker = actor,
-        spellId = engine_id,
+        spellId = dispatch_spell_id,
         startPos = start_pos,
         direction = direction,
+        hitObject = hit_object,
         isFree = true,
     })
     if not ok then
-        log.error(string.format("executor launchSpell failed engine_id=%s err=%s", tostring(engine_id), tostring(err)))
+        log.error(string.format("executor launchSpell failed spell_id=%s err=%s", tostring(dispatch_spell_id), tostring(err)))
         return false, tostring(err)
     end
-    log.info(string.format("executor launchSpell dispatched engine_id=%s actor=%s", tostring(engine_id), tostring(actor and actor.recordId)))
+
+    log.info(string.format("executor launchSpell dispatched spell_id=%s actor=%s", tostring(dispatch_spell_id), tostring(actor and actor.recordId)))
     return true, nil
 end
 
@@ -81,8 +114,65 @@ function executor.onCastRequest(payload)
         tostring(entry.frontend_logical_id),
         tostring(engine_id)
     ))
-    local ok, err = launchSpell(actor, engine_id)
+
+    local ok, err = launchSpell(actor, engine_id, actor.position + util.vector3(0, 0, 120), actor.rotation * util.vector3(0, 1, 0), nil)
     sendResult(sender, request_id, ok, err)
+end
+
+function executor.onInterceptCast(payload)
+    local sender = payload and payload.sender
+    local engine_id = payload and payload.spell_id
+    if not sender then
+        return
+    end
+
+    local recipe_id, entry, root = records.findRootNodeByEngineSpellId(engine_id)
+    if not recipe_id or not root then
+        log.error(string.format("intercept cast missing metadata for spell_id=%s", tostring(engine_id)))
+        sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
+            ok = false,
+            spell_id = engine_id,
+            error = "metadata not found",
+        })
+        return
+    end
+
+    local dispatched = 0
+    for effect_index, effect in ipairs(root.real_effects or {}) do
+        local dispatch_spell_id, dispatch_err = createDispatchSpellForEffect(recipe_id, effect_index, effect)
+        if not dispatch_spell_id then
+            sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
+                ok = false,
+                spell_id = engine_id,
+                error = dispatch_err,
+            })
+            return
+        end
+
+        local ok, launch_err = launchSpell(sender, dispatch_spell_id, payload.start_pos, payload.direction, payload.hit_object)
+        if not ok then
+            sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
+                ok = false,
+                spell_id = engine_id,
+                error = launch_err,
+            })
+            return
+        end
+
+        launch_cookies[dispatch_spell_id] = {
+            recipe_id = recipe_id,
+            node_path = { 1 },
+            source_actor = sender,
+        }
+        dispatched = dispatched + 1
+    end
+
+    sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
+        ok = dispatched > 0,
+        spell_id = engine_id,
+        recipe_id = recipe_id,
+        dispatch_count = dispatched,
+    })
 end
 
 function executor.onBeginObserve(payload)
@@ -113,37 +203,41 @@ function executor.onMagicHit(payload)
     local attacker_id = payload and payload.attacker and payload.attacker.recordId or nil
     local victim_id = payload and payload.target and payload.target.recordId or nil
     local spell_id = payload and (payload.spellId or payload.spell_id) or nil
-    local school = payload and payload.school or nil
     local hit_pos = payload and payload.hitPos or nil
-    log.info(string.format(
-        "MagExp_OnMagicHit attacker=%s victim=%s spell_id=%s school=%s hit_pos=%s",
-        tostring(attacker_id),
-        tostring(victim_id),
-        tostring(spell_id),
-        tostring(school),
-        tostring(hit_pos)
-    ))
+
+    local cookie = spell_id and launch_cookies[spell_id] or nil
+    if cookie then
+        log.info(string.format(
+            "Spellforge hit matched recipe_id=%s spell_id=%s attacker=%s victim=%s hit_pos=%s",
+            tostring(cookie.recipe_id),
+            tostring(spell_id),
+            tostring(attacker_id),
+            tostring(victim_id),
+            tostring(hit_pos)
+        ))
+    end
 
     local recipe_id = nil
-    if type(spell_id) == "string" then
+    if cookie then
+        recipe_id = cookie.recipe_id
+    elseif type(spell_id) == "string" then
         recipe_id = select(1, findSpellforgeEntry(spell_id))
-    end
-    if recipe_id then
-        log.info(string.format("hit event matched Spellforge spell recipe_id=%s spell_id=%s", tostring(recipe_id), tostring(spell_id)))
-    else
-        log.info(string.format("hit event not ours, ignoring spell_id=%s", tostring(spell_id)))
     end
 
     for actor_id, watcher in pairs(watchers) do
-        if watcher.spell_id == spell_id and watcher.sender and type(watcher.sender.sendEvent) == "function" then
-            watcher.sender:sendEvent(events.CAST_HIT_OBSERVED, {
-                request_id = watcher.request_id,
-                spell_id = spell_id,
-                matched = recipe_id ~= nil,
-                attacker_id = attacker_id,
-                victim_id = victim_id,
-            })
-            watchers[actor_id] = nil
+        if watcher.sender and type(watcher.sender.sendEvent) == "function" then
+            local match = recipe_id ~= nil and (watcher.spell_id == spell_id or recipe_id == select(1, findSpellforgeEntry(watcher.spell_id)))
+            if match then
+                watcher.sender:sendEvent(events.CAST_HIT_OBSERVED, {
+                    request_id = watcher.request_id,
+                    spell_id = spell_id,
+                    matched = true,
+                    attacker_id = attacker_id,
+                    victim_id = victim_id,
+                    recipe_id = recipe_id,
+                })
+                watchers[actor_id] = nil
+            end
         end
     end
 end
@@ -158,11 +252,27 @@ local function buildActiveSpellIdSet(actor)
     return ids
 end
 
+local function ensureTargetFilter()
+    if interfaces.MagExp == nil or type(interfaces.MagExp.setTargetFilter) ~= "function" then
+        return
+    end
+    interfaces.MagExp.setTargetFilter("spellforge", function(target)
+        if target == nil then
+            return true
+        end
+        local health = types.Actor.stats.dynamic.health(target)
+        if not health then
+            return true
+        end
+        return (health.current or 0) > 0
+    end)
+end
+
 function executor.onPlayerAdded(player)
     player_ref = player
     last_active_spell_ids = {}
+    ensureTargetFilter()
     log.info(string.format("diagnostic onPlayerAdded player=%s", tostring(player and player.recordId)))
-    log.info("diagnostic note: OpenMW global engine handlers do not document onSpellCast; using onUpdate/animation text-key probes instead")
 end
 
 function executor.onUpdate()
@@ -171,21 +281,9 @@ function executor.onUpdate()
     end
 
     local current_ids = buildActiveSpellIdSet(player_ref)
-    local count = 0
-    for _ in pairs(current_ids) do
-        count = count + 1
-    end
-    if count > 0 then
-        log.debug(string.format("diagnostic active spell count=%d", count))
-    end
     for id in pairs(current_ids) do
         if not last_active_spell_ids[id] then
-            log.info(string.format("diagnostic active spell added id=%s", tostring(id)))
-        end
-    end
-    for id in pairs(last_active_spell_ids) do
-        if not current_ids[id] then
-            log.info(string.format("diagnostic active spell removed id=%s", tostring(id)))
+            log.debug(string.format("diagnostic active spell added id=%s", tostring(id)))
         end
     end
     last_active_spell_ids = current_ids
