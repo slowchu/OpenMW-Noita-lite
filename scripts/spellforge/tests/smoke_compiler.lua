@@ -32,12 +32,32 @@ local function logCompileCauses(recipe_label, payload)
     end
 end
 
-local function firstKnownSpellId()
-    for _, record in pairs(core.magic.spells.records) do
-        if record and type(record.id) == "string" and record.id ~= "" then
-            return record.id
+local KNOWN_COMBAT_SPELL_IDS = {
+    "fireball",
+    "frostball",
+    "lightning bolt",
+    "fire bite",
+}
+
+local function resolveSmokeBaseSpellId()
+    local default_id = KNOWN_COMBAT_SPELL_IDS[1]
+    local default_record = core.magic.spells.records[default_id]
+    if default_record then
+        return default_id
+    end
+
+    for i = 2, #KNOWN_COMBAT_SPELL_IDS do
+        local fallback_id = KNOWN_COMBAT_SPELL_IDS[i]
+        if core.magic.spells.records[fallback_id] then
+            log.warn(string.format("base_spell_id default missing; using fallback id=%s (default=%s)", fallback_id, default_id))
+            return fallback_id
         end
     end
+
+    log.error(string.format(
+        "no known vanilla combat spell found; checked ids=%s",
+        table.concat(KNOWN_COMBAT_SPELL_IDS, ", ")
+    ))
     return nil
 end
 
@@ -174,11 +194,12 @@ local function runSmoke()
         return
     end
 
-    local base_spell_id = firstKnownSpellId()
+    local base_spell_id = resolveSmokeBaseSpellId()
     if not base_spell_id then
-        log.error("no base spell available; aborting smoke")
+        log.error("no deterministic base spell available; aborting smoke")
         return
     end
+    log.info(string.format("smoke fixture base_spell_id=%s", base_spell_id))
 
     state.running = true
     log.info("starting smoke compiler run")
