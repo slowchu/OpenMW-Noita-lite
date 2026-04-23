@@ -20,5 +20,6 @@ events.QUERY_SPELL_METADATA_RESULT = "Spellforge_QuerySpellMetadataResult"
 
 events.INTERCEPT_CAST = "Spellforge_InterceptCast"
 events.INTERCEPT_DISPATCH_RESULT = "Spellforge_InterceptDispatchResult"
+events.DEBUG_LAUNCH_VANILLA_FIREBALL = "Spellforge_DebugLaunchVanillaFireball"
 
 return events

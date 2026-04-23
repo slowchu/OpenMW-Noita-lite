@@ -236,6 +236,42 @@ local function dispatchInterceptCast(spell_id)
     log.info(string.format("intercept dispatch sent spell_id=%s", tostring(spell_id)))
 end
 
+local function sendDebugVanillaFireball()
+    local cp = -camera.getPitch()
+    local cy = camera.getYaw()
+    local camera_dir = util.vector3(
+        math.cos(cp) * math.sin(cy),
+        math.cos(cp) * math.cos(cy),
+        math.sin(cp)
+    )
+
+    local start_pos = camera.getPosition()
+    local hit_object = nil
+    local hit_pos = start_pos
+
+    local ray = nearby.castRay(start_pos, start_pos + (camera_dir * 500), { ignore = self })
+    if ray and ray.hit and ray.hitObject then
+        hit_object = ray.hitObject
+    end
+    if ray and ray.hitPos then
+        hit_pos = ray.hitPos
+    end
+
+    core.sendGlobalEvent(events.DEBUG_LAUNCH_VANILLA_FIREBALL, {
+        sender = self.object,
+        start_pos = start_pos,
+        direction = camera_dir,
+        hit_object = hit_object,
+        hit_pos = hit_pos,
+    })
+    log.info(string.format(
+        "debug vanilla fireball launch request sent start_pos=%s direction=%s hit_object=%s",
+        tostring(start_pos),
+        tostring(camera_dir),
+        tostring(hit_object and hit_object.recordId or hit_object)
+    ))
+end
+
 local function registerAnimationTextKeys()
     if state.animation_diag_registered then
         return
@@ -343,6 +379,10 @@ local function onKeyPress(key)
     if symbol == "k" or key.code == input.KEY.K then
         log.debug("handled dev compile hotkey")
         compileHardcodedRecipe()
+        return false
+    end
+    if symbol == "v" or key.code == input.KEY.V then
+        sendDebugVanillaFireball()
         return false
     end
     return true

@@ -134,6 +134,7 @@ return {
         [events.QUERY_SPELL_METADATA] = onQuerySpellMetadata,
         [events.CAST_REQUEST] = executor.onCastRequest,
         [events.INTERCEPT_CAST] = executor.onInterceptCast,
+        [events.DEBUG_LAUNCH_VANILLA_FIREBALL] = executor.onDebugLaunchVanillaFireball,
         [events.BEGIN_CAST_OBSERVE] = executor.onBeginObserve,
         [events.CAST_DIAG_SIGNAL] = executor.onCastDiagSignal,
         MagExp_OnMagicHit = executor.onMagicHit,

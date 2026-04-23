@@ -262,6 +262,49 @@ function executor.onInterceptCast(payload)
     })
 end
 
+function executor.onDebugLaunchVanillaFireball(payload)
+    local sender = payload and payload.sender
+    if not sender then
+        log.error("debug launch missing payload.sender")
+        return
+    end
+
+    log.info("debug launch requested: vanilla fireball via I.MagExp.launchSpell")
+    logSpellRecord("vanilla fireball record", "fireball")
+
+    local ok, launch_err = launchSpell(
+        sender,
+        "fireball",
+        payload and payload.start_pos,
+        payload and payload.direction,
+        payload and payload.hit_object
+    )
+    if not ok then
+        if type(sender.sendEvent) == "function" then
+            sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
+                ok = false,
+                spell_id = "fireball",
+                error = launch_err,
+            })
+        end
+        return
+    end
+
+    launch_cookies["fireball"] = {
+        recipe_id = "debug_vanilla_fireball",
+        node_path = { 1 },
+        source_actor = sender,
+    }
+    if type(sender.sendEvent) == "function" then
+        sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
+            ok = true,
+            spell_id = "fireball",
+            recipe_id = "debug_vanilla_fireball",
+            dispatch_count = 1,
+        })
+    end
+end
+
 function executor.onBeginObserve(payload)
     local sender = payload and payload.sender
     local request_id = payload and payload.request_id
