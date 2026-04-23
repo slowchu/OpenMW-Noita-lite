@@ -1,0 +1,208 @@
+Executive summary
+
+Your hypothesis is mostly right in spirit, but not in mechanism.
+
+template is not a special runtime “inherit behavior from this other effect” switch. In the implementation I inspected, it is a construction-time full-record copy: OpenMW starts your new MagicEffect record as a copy of the template record, then overwrites only the fields you explicitly set. If you omit template, it starts from blank() instead. The public docs show template in an example, but they do not explain these semantics; that part comes from source inspection.
+
+That matters because your spellforge_composed effect therefore copied Open’s MGEF data unless you overrode it. Separately, the vanilla cast pipeline has generic projectile / VFX / SFX behavior for target-range effects and for effect application. So a custom effect can absolutely produce a bolt or default impact visuals without having a custom gameplay handler. In the code I inspected, built-in gameplay side effects like Open and Lock are still dispatched by exact effect ID checks, not by template lookup.
+
+The practical correction to your mental model is:
+
+Custom effect record ≠ pure no-op.
+A custom effect record is a full MGEF record.
+template copies another full MGEF record into it.
+Vanilla casting still does generic spell work: magicka cost, animation, projectile generation for RT_Target, and fallback/default VFX/SFX when certain per-effect fields are empty.
+What seems to remain ID-specific is the built-in gameplay logic for effects like Open, Lock, Summon, etc.
+
+A. What does template do?
+A1. What fields are inherited?
+
+From the implementation, template is generic record initialization, not magic-effect-specific logic: initFromTemplate<Record> returns a copy of rec["template"] if present; otherwise it returns a blank record. Then tableToMagicEffect applies only the keys that were provided in the Lua table.
+
+For MagicEffect, the public API and binding code expose these record fields:
+
+Visual/static/particle fields: particle, areaStatic, bolt, castStatic, hitStatic
+Sound fields: areaSound, boltSound, castSound, hitSound
+Metadata/gameplay flags and data: name, school, baseCost, color, continuousVfx, hasDuration, hasMagnitude, isAppliedOnce, harmful, casterLinked, nonRecastable, hasAttribute, hasSkill, onSelf, onTouch, onTarget, unreflectable, allowsSpellmaking, allowsEnchanting, negativeLight, speed, description, icon, id (read-only as a record identity)
+
+So, yes, template inherits:
+
+projectile model data (bolt)
+particle texture
+cast/hit/area statics
+cast/bolt/hit/area sounds
+school
+icon
+base cost
+allowed-range flags (onSelf, onTouch, onTarget)
+duration/magnitude flags (hasDuration, hasMagnitude)
+other effect flags like harmful, isAppliedOnce, casterLinked, etc.
+
+Two important distinctions:
+
+Area is not a MagicEffect record field. Spell area lives on the effect instance in spell/enchantment/potion effect params (area on ENAM-like structs), not on the MagicEffect record itself. So template does not inherit spell-instance area.
+Actual cast range on a spell instance is also not stored on the MagicEffect record. The record has allowed-range flags (onSelf, onTouch, onTarget), but the spell effect instance’s actual range is separate.
+
+On cast animation specifically: I found fields for cast VFX statics and sounds, but I did not find a documented per-MGEF field for the actor’s spellcasting animation itself. So I do not have a source that template affects the actor animation beyond copied cast VFX/SFX.
+
+A2. Do explicit fields override inherited ones?
+
+Yes. The source path is: copy template first, then overwrite only the keys you supplied in the Lua table. If you omit a field, the template’s value remains.
+
+A3. Is template required?
+
+No. In the implementation, if template is absent or nil, initialization falls back to Record out; out.blank(); return out;.
+
+The public docs show template in an example, but they do not say it is mandatory.
+
+B. Why is your marker casting like Open?
+B1. Does a custom effect with no handler fall back to the template’s handler?
+
+Based on the code I inspected, I did not find evidence of runtime fallback to the template’s gameplay handler.
+
+What I did find is:
+
+effect application resolves the effect by the effect instance’s own mEffectID
+built-in behavior for Lock and Open is checked with exact comparisons like if (effect.mEffectId == ESM::MagicEffect::Lock) and else if (effect.mEffectId == ESM::MagicEffect::Open)
+
+So the best-supported reading is:
+
+template copied Open’s record data into your custom record
+the runtime then used your custom record’s copied data
+but the built-in Open gameplay branch still appears to be keyed on the actual effect ID, not on template ancestry.
+
+I cannot honestly say I exhaustively ruled out every other engine path, but in the source paths I inspected, I found no template-based handler lookup. That means your current working model “derived effect with no handler falls back to template handler” is not supported by the evidence I found.
+
+B2. Is the observed purple orb purely visual, or is it “real Open Lock” gameplay too?
+
+The purple orb is very well explained by the generic target-spell projectile path, not by proof of Open gameplay fallback.
+
+ProjectileManager::getMagicBoltData iterates the spell’s effects, keeps only those whose effect-instance range is RT_Target, and builds projectile data from the actual referenced effect record. If magicEffect->mBolt is empty, it falls back to VFX_DefaultBolt; if boltSound is empty, it falls back to the school’s bolt sound. On hit, the projectile manager reconstructs a CastSpell and calls cast.inflict(target, *effects, ESM::RT_Target) using the original spell’s effect list.
+
+Separately, the Open gameplay branch I found is keyed on effect.mEffectId == ESM::MagicEffect::Open, and that branch is where unlock logic lives.
+
+So the strongest source-backed conclusion is:
+
+the orb is not sufficient evidence that the engine is truly treating your custom effect as Open gameplay
+the orb is fully consistent with “custom target-range effect + copied/open-like projectile data + generic target-bolt pipeline”
+based on the exact-ID checks I inspected, I would not expect your custom ID to unlock a door unless there is some other code path I did not inspect.
+B3. Does spell range matter?
+
+Yes — the spell effect instance’s range matters a lot.
+
+Projectile construction in ProjectileManager::getMagicBoltData includes only effects where effect.mData.mRange == ESM::RT_Target. If no target-range effects survive that filter, the magic-bolt state ends up empty and launchMagicBolt returns without creating a projectile.
+
+So changing your spell’s effect instance range from Target to Self or Touch should prevent the projectile path, regardless of template.
+
+C. How do you define a truly inert marker effect?
+
+This is where the available evidence gets more restrictive.
+
+The hard part: “truly inert” may not be fully achievable with data alone
+
+I did not find a source-backed pure-data recipe that guarantees zero visuals and zero sounds under vanilla casting, because the engine code I inspected supplies defaults when certain effect record fields are empty:
+
+for target bolts: empty bolt falls back to VFX_DefaultBolt; empty boltSound falls back to the school bolt sound
+for cast visuals: empty castStatic falls back to VFX_DefaultCast; empty castSound falls back to the school cast sound
+for hit visuals: empty hitStatic falls back to VFX_DefaultHit; empty hitSound falls back to the school hit sound
+for area visuals: empty areaStatic falls back to VFX_DefaultArea; empty areaSound falls back to the school area sound
+
+So the strongest correction here is: omitting template avoids inherited Open data, but it does not automatically guarantee a totally invisible/silent effect under vanilla casting.
+
+Ranked recommendations
+1. Highest confidence
+
+Use no template at all, and make the spell effect instance Self range, not Target. That is the cleanest source-backed way to avoid both inherited Open data and the generic target-bolt path. In source terms, this gives you a blank-initialized record instead of a cloned Open record, and it avoids the projectile collector’s RT_Target path.
+
+What this recommendation is strong on:
+
+no copied Open bolt/static/sound/flag data
+no target projectile
+no source-backed reason for exact-ID Open gameplay to fire
+
+What it is not strong on:
+
+zero cast/hit visuals or sounds, because empty fields may still fall back to generic defaults.
+2. Medium confidence
+
+If you need the cast to be as inert as possible under vanilla casting, still use no template, but also plan to set the effect’s cast/hit/area/bolt asset references deliberately instead of leaving them empty. The source shows that “empty” means “use defaults,” so a truly silent/invisible route would likely need explicit dummy/silent assets rather than blank fields. That is an engineering recommendation based on the fallback logic; I did not find an official OpenMW “null asset” convention.
+
+3. Speculation
+
+Using a benign self-only vanilla template, or an effect whose magnitude is 0, might produce an acceptably inert result in some cases — but I would not recommend that as a general marker strategy. The codebase still contains many exact-ID gameplay branches for specific effects, so “safe because it seems harmless” is not a robust rule. I do not have a source-backed list of vanilla templates that are universally inert when cloned.
+
+C1. Candidate templates
+
+I do not think another vanilla template is the right primary answer.
+
+From the evidence I found, the safest candidate is actually:
+
+no template
+
+Why I am not endorsing a specific vanilla template:
+
+a self-only template can avoid projectiles, but may still carry gameplay or default VFX/SFX implications
+a zero-magnitude template is effect-specific and not source-backed as a general “null” convention
+I did not find a public OpenMW community source that designates a particular vanilla effect as the standard marker/no-op template.
+C2. Minimum field set if template is omitted
+
+The docs do not spell this out. In the implementation I inspected, tableToMagicEffect does not enforce required user-supplied fields for a MagicEffect; it starts from template-or-blank and conditionally assigns whichever keys are present. That strongly suggests the table itself can be minimal. However, I did not inspect every outer layer of the content-record insertion path, so I am treating that as a source-based inference, not a guaranteed public contract.
+
+C3. Is there a community “null effect” convention?
+
+I did not find a documented OpenMW convention for a pure marker / null effect.
+
+The closest public example is the docs’ "Summon Nothing" example:
+
+content.magicEffects.records.MyMagicEffect = {
+    template = content.magicEffects.records['summonscamp'],
+    name = 'Summon Nothing',
+}
+
+But the docs present that only as an example of record creation; they do not explain it as a marker-effect convention or document its runtime behavior.
+
+D. How does vanilla’s cast pipeline process unknown/custom effects?
+D1. What the inspected code shows
+
+The runtime works off the effect IDs in the spell’s effect list, and then looks up the corresponding MagicEffect records from the store. inflict() does store.find(effect.mData.mEffectID) on each effect instance. Projectile creation likewise finds the referenced MagicEffect record for each effect instance.
+
+Projectile spawn is driven by effect-instance range:
+
+CastSpell::cast(const ESM::Spell*) calls launchMagicBolt()
+ProjectileManager::getMagicBoltData keeps only RT_Target effects
+if that filtered projectile effect list is empty, launchMagicBolt returns without making a bolt.
+
+Gameplay application on impact is done by taking the original spell effect list and applying the RT_Target subset on hit. Built-in behaviors like Open/Lock are then handled by exact effect-ID branches in applyMagicEffect.
+
+D2. Reconciling skrow42’s “custom spells cast via vanilla are no-ops” with your observation
+
+The most coherent reconciliation is:
+
+Gameplay no-op can still be true for many custom effects, because the code I inspected dispatches built-in special behavior by exact effect ID. A custom ID does not automatically become Open, Lock, SummonScamp, etc.
+Visual no-op is a different claim, and it does not follow from gameplay no-op. Generic vanilla casting still creates target bolts for RT_Target effects, and empty asset fields often fall back to defaults.
+skrow42’s own public mods/framework logs show active work around touch/target spell application and Open/Lock edge cases, which fits the idea that generic spell-pipeline behavior is still very much in play even when custom frameworks are involved.
+
+So I would update the statement to:
+
+“Custom effect IDs appear to be mostly gameplay-no-op unless some code handles them, but vanilla casting still processes them as real spell effects for range/projectile/VFX/SFX purposes.”
+
+E. Open questions I could not fully answer from available sources
+Exact contents of MagicEffect::blank(). I confirmed the blank path exists, but I did not recover a clean, citable extract of the blank() implementation itself, so I cannot tell you from source exactly which fields it zeroes or defaults.
+Whether player-side spellcasting animation/VFX has any additional engine path outside the files I inspected that would force visible effects even if the record-level statics/sounds were neutralized.
+Whether OpenMW modders already use a known silent static / silent sound record pattern for marker effects. I did not find a documented convention.
+Whether Magicka Expanded / skrow’s framework intentionally bypasses some of these vanilla defaults in Lua-driven paths. The Nexus pages show those frameworks exist and are evolving quickly, but I did not find a public source bundle that let me audit their code directly from search alone.
+
+Those are good candidates to ask skrow42 directly.
+
+F. Corrections to the current working model
+
+I would replace your current model with this one:
+
+template is construction-time record cloning. It copies the entire template MagicEffect record, then your Lua table overwrites the fields you explicitly set. It is not documented as a separate runtime inheritance layer.
+A custom effect record is still a full MGEF record. Even if it has no bespoke gameplay handler, vanilla casting can still use its range, bolt/static/sound fields, school, flags, and generic defaults.
+Target-range alone is enough to expose the projectile path. If the spell effect instance is RT_Target, the projectile manager tries to build a magic bolt from that effect set; if bolt fields are empty, it substitutes defaults.
+Built-in gameplay like Open/Lock appears to remain exact-ID based. In the code I inspected, Open and Lock behavior is tied to effect.mEffectId == ESM::MagicEffect::Open/Lock, not to template ancestry.
+Therefore, “custom effect = vanilla no-op” is incomplete. The more precise version is:
+“custom effect = usually no built-in gameplay side effect unless handled, but still subject to vanilla cast/projectile/VFX/SFX machinery.”
+
+If you want, I can turn this into a tighter internal design note with a recommended test matrix next: “blank vs template,” “Self vs Touch vs Target,” and “empty fields vs dummy assets.”

@@ -1,0 +1,55 @@
+1. Does playBlendedAnimation suppress vanilla spellcast animation, or can both play?
+
+By itself, playBlendedAnimation does not guarantee suppression of vanilla spellcasting. OpenMW’s own animation docs explicitly warn that the still-hardcoded character controller can “at any time and for any reason alter or cancel currently playing animations,” so a scripted blended animation is not automatically authoritative over vanilla state handling.
+
+What does reliably suppress non-scripted animation is using animation.PRIORITY.Scripted. OpenMW documents that priority as: “When any animation with this priority is present, all animations without this priority are paused.” So if OSSC’s playBlendedAnimation call uses PRIORITY.Scripted, that would pause vanilla/non-scripted animation while the scripted cast anim is active; if it uses normal weapon-style priorities instead, overlap is possible.
+
+The best public evidence for real overlap is OSSC’s own public changelog and support thread: skrow42 lists fixes for “quickcast being able to cast while casting a normal spell stance animation” and “prevented double spellcasting (quickcast + vanilla),” and a user explicitly described an “animation cancel bug” where interrupting a vanilla cast with quickcast caused both to happen. That strongly suggests OSSC needed explicit guarding against overlap; playBlendedAnimation alone was not enough.
+
+So the safest answer is: both can play unless the mod explicitly prevents it or uses scripted-priority animation that pauses non-scripted animation.
+
+2. What animation group/key names correspond to self, touch, and target?
+
+The animation group is spellcast. OpenMW’s AnimationController docs use playBlendedAnimation('spellcast', { startkey = 'self start', stopkey = 'self stop', ... }) as the canonical example, and show listening for the cast release text key on that same spellcast group.
+
+For the actual key names, the hardcoded Morrowind/OpenMW spellcast variants are:
+
+self start, self release, self stop
+touch start, touch release, touch stop
+target start, target release, target stop
+
+UEESP’s animation-group list shows Self Start, Self Release, Self Stop, Touch Start, Touch Release, Touch Stop, Target Start, Target Release, and Target Stop as hardcoded animation groups, alongside SpellCast. OpenMW’s docs independently confirm the spellcast group plus self start / self stop usage and release-key handling.
+
+So the practical mapping for playBlendedAnimation is:
+
+group: spellcast
+self: startKey='self start', stopKey='self stop', release text key self release
+touch: startKey='touch start', stopKey='touch stop', release text key touch release
+target: startKey='target start', stopKey='target stop', release text key target release
+
+3. What are the release timings for touch and target?
+
+I could not verify absolute seconds for touch and target from the available public documentation.
+
+What the docs give you is:
+
+the key names
+the ability to listen for release text keys on spellcast
+animation end metadata like time and completion in addAnimationEndedHandler
+start/stop key control in playBlendedAnimation
+
+But they do not publish a table of absolute spell release times in seconds for self/touch/target. UESP likewise lists the animation groups, not their durations.
+
+So I can confirm:
+
+self release, touch release, and target release are the release events you should key off
+I cannot confirm from source text alone that touch and target are 0.94s, or that they differ from self, or what their exact timings are in seconds.
+
+The most robust takeaway is that OSSC should not hardcode seconds if it can avoid it. OpenMW’s animation interface is built to react to the release text key directly, which is the engine-supported way to synchronize the actual cast/release moment.
+
+Bottom line
+
+playBlendedAnimation does not inherently suppress vanilla casting; overlap is possible unless the mod prevents it or uses PRIORITY.Scripted.
+The cast animation uses group spellcast with keys:
+self/touch/target start, self/touch/target release, self/touch/target stop.
+I could not verify exact touch/target release times in seconds from accessible sources. The source-backed recommendation is to trigger off the ... release text key instead of fixed timestamps.
