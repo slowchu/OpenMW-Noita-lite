@@ -310,9 +310,7 @@ Shock Damage target
 
 ### Prefix operators
 
-Prefix operators bind forward.
-
-They apply to the next emitter group only unless explicitly defined otherwise.
+Prefix operators bind forward to the next emitter group. v1 has no exceptions to this rule.
 
 v1 prefix operators:
 
@@ -365,6 +363,36 @@ Trigger binds to Fire Damage.
 Frost Damage becomes Trigger's payload.
 ```
 
+### Prefix Chains and Pattern Operators
+
+A prefix chain is the sequence of prefix operators immediately preceding an emitter group. The entire chain binds to that emitter group as a unit.
+
+All of these are valid chains:
+
+```text
+Multicast x5 → Fireball
+Burst → Multicast x5 → Fireball
+Multicast x5 → Burst → Fireball
+Burst → Speed+ → Multicast x5 → Fireball
+Size+ → Multicast x3 → Spread → Fireball
+```
+
+Pattern operators (Burst, Spread) shape the spatial distribution of emissions produced by a Multicast. They do not generate emissions themselves.
+
+Binding rule: A prefix chain containing Burst or Spread is invalid unless the same prefix chain also contains Multicast. Pattern operators cannot apply to a single emission.
+
+Invalid:
+
+```text
+Burst → Fireball
+(Compile error: "Burst requires a Multicast in the same prefix chain")
+
+Spread → Speed+ → Fireball
+(Compile error: "Spread requires a Multicast in the same prefix chain")
+```
+
+Default pattern: A Multicast without an explicit Burst or Spread uses a default forward-spread distribution similar to vanilla Morrowind's multi-projectile behavior. This default is a runtime parameter, not a separate opcode.
+
 ---
 
 ## 9. Trigger and Timer Semantics
@@ -415,6 +443,18 @@ v1 range:
 
 Timer should enqueue a delayed job. It must not block or spin.
 
+### Resolution Cardinality
+
+Trigger and Timer payloads fire once per emission of the bound emitter group, not once per group.
+
+Example: `Multicast x5 → Fireball → Trigger → Frost`
+
+Five Fireball projectiles launch. Each independently resolves its Trigger payload on hit. Total: 5 Frost emissions.
+
+This matches Noita's behavior where each projectile is an independent entity carrying its own payload instance.
+
+The payload plan itself is compiled once. Each payload execution runs the same plan from its own emission's resolution point (hit position for Target, touch point for Touch, caster for Self).
+
 ---
 
 ## 10. Multicast Semantics
@@ -451,8 +491,8 @@ v1 contains exactly eight Spellforge operators.
 | Opcode | Kind | Range / Parameters | Binding | Notes |
 |---|---|---|---|---|
 | Multicast | Prefix | count 2–8 | next emitter group | emits N copies |
-| Spread | Prefix | forward cone preset/angle | next emitter group | modifies aim vectors |
-| Burst | Prefix | bounded burst count | next emitter group | spherical/Fibonacci burst |
+| Spread | Prefix | forward cone preset/angle | next emitter group via prefix chain | pattern only; requires Multicast in same prefix chain |
+| Burst | Prefix | spherical/hemisphere pattern | next emitter group via prefix chain | pattern only; requires Multicast in same prefix chain |
 | Speed+ | Prefix | percent scalar | next emitter group | modifies projectile speed |
 | Size+ | Prefix | percent scalar | next emitter group | modifies area/VFX scale where supported |
 | Chain | Prefix | hops 1–5 | next emitter group | bounded target hopping |
@@ -669,26 +709,59 @@ Projectile launches are expensive because they require continued collision/rayca
 
 ## 18. Hit / Resolution Events
 
-For Target and Touch emitters, Trigger depends on knowing when an emission resolves.
+For Target and Touch emitters, Trigger depends on knowing when an emission resolves. The runtime uses SFP hit events (`MagExp_OnMagicHit`) for this.
 
-The runtime should use the best available event source, currently expected to be SFP hit events such as `MagExp_OnMagicHit`.
+### Identity Requirement
 
-A major implementation question:
+A hit event must uniquely identify the emission it resolves. Without this, Multicast, Chain, and nested Triggers cannot route payloads correctly — a hit event for "spell X" is ambiguous when multiple emissions of spell X are in flight.
 
-```text
-Does the hit event identify a projectile/cast instance, or only a spell ID?
-```
+This identity requirement is architectural. How it is achieved is an implementation choice that may evolve.
 
-If only spell ID is available, the runtime must not rely on `spell_id` alone for per-projectile cookies once Multicast exists.
+### v1 Default Implementation Strategy
 
-Possible fallback strategies:
+v1 uses per-emission helper spell records as structural cookies. This approach is chosen because current SFP hit events do not expose a unique projectile or cast instance ID; `spell_id` is the most specific identifier available.
 
-- per-launch unique helper spell records
-- spell ID + attacker + timestamp queue
-- SFP-supported launch cookie, if available
-- bounded active launch table keyed by enough available payload fields
+The compiler may allocate one helper spell record per static emission slot in the compiled plan. A Multicast x5 emitter therefore has five emission slots. Each slot maps to the same logical emitter group and payload, but uses a distinct helper spell ID so SFP hit events can be routed unambiguously.
 
-This must be solved before real Multicast + Trigger behavior is considered complete.
+### Emission Slot Counting
+
+- Each emitter group contributes 1 slot by default
+- Multicast N multiplies the emitter group's slot count by N
+- Pattern opcodes (Spread, Burst) do not add slots — they modify spatial distribution only
+- Speed+, Size+ do not add slots — they modify launch parameters only
+- For cap accounting, Chain N counts as N additional emission slots per initial emission, unless implemented later as a non-projectile direct-apply chain
+- Trigger/Timer payloads contribute their own slots per trigger-projectile emission
+- Nested Trigger/Timer is bounded by `MAX_RECURSION_DEPTH` (3)
+
+### Static Cap Enforcement
+
+Total static emission slots per recipe must not exceed `MAX_PROJECTILES_PER_CAST` (32). The compiler rejects recipes that statically exceed this cap with a readable error identifying the overflow.
+
+Example rejection: "Recipe exceeds projectile cap: requires 48 slots, maximum is 32. Reduce Multicast counts or remove Chain hops."
+
+### Example Slot Allocations
+
+| Recipe | Slots |
+|---|---|
+| Fireball | 1 |
+| Multicast x5 → Fireball | 5 |
+| Fireball → Trigger → Frost | 2 |
+| Multicast x5 → Fireball → Trigger → Frost | 10 |
+| Fireball → Trigger → Multicast x5 → Frost | 6 |
+| Multicast x5 → Fireball → Trigger → Multicast x3 → Frost | 20 |
+| Multicast x3 → Fireball → Trigger → Multicast x3 → Frost → Trigger → Shock | 21 |
+
+### Record Caching
+
+Records are cached by recipe canonical hash. Same recipe produces the same set of records across casts. Editing a recipe produces a new hash and new records; old records may be retained or garbage-collected in future milestones.
+
+Record creation may be lazy — deferred to first cast of a recipe — to avoid upfront cost on compile.
+
+### Future Flexibility
+
+If SFP adds a per-launch cookie field to hit events, the identity requirement can be satisfied without helper records. The architectural requirement (unique per-emission identification) remains; only the mechanism changes.
+
+Implementations should keep the cookie abstraction separate from other compilation concerns so this substitution is local.
 
 ---
 
@@ -751,6 +824,8 @@ A valid v1 recipe must:
 - satisfy all operator parameter ranges
 - have every prefix operator followed by an emitter group within its binding range
 - have every Trigger/Timer preceded by an emitter group
+- have every prefix chain containing Burst or Spread also contain Multicast
+- have total static emission slots not exceeding `MAX_PROJECTILES_PER_CAST`
 - respect hard static caps where calculable
 - avoid malformed generated records or invalid effect definitions
 
@@ -760,9 +835,12 @@ Example errors:
 
 ```text
 Slot 1: Trigger has no emitter above it.
+Slot 2: Burst requires a Multicast in the same prefix chain.
 Slot 3: Multicast must be followed by an emitter group.
+Slot 4: Spread requires a Multicast in the same prefix chain.
 Slot 5: Timer duration must be between 0.5 and 5.0 seconds.
 Recipe rejected: no vanilla emitter effects found.
+Recipe rejected: 48 emission slots exceeds cap of 32.
 ```
 
 ---
@@ -831,15 +909,17 @@ Recipe:
 1. Fire Damage on Target
 2. Trigger
 3. Burst
-4. Frost Damage on Target
+4. Multicast x4
+5. Frost Damage on Target
 ```
 
 Binding:
 
 ```text
 Trigger binds to Fire Damage.
-Trigger payload is Burst + Frost Damage.
-Burst binds to Frost Damage.
+Trigger payload is [Burst, Multicast x4, Frost Damage].
+Burst + Multicast x4 prefix chain binds to Frost Damage.
+Prefix chain contains Multicast, so Burst is valid.
 ```
 
 Execution:
@@ -847,7 +927,60 @@ Execution:
 ```text
 Fire projectile launches.
 On impact, payload runs.
-Burst emits bounded Frost projectiles from impact position.
+4 Frost projectiles emit from impact position in hemisphere pattern.
+```
+
+Emission slots:
+
+```text
+Fire Damage: 1 slot
+Frost Damage: 4 slots (from Multicast x4)
+Total: 5 slots
+```
+
+### Example D: Burst + Multicast + Fireball + Trigger + Frost
+
+Recipe:
+
+```text
+1. Burst
+2. Multicast x5
+3. Fire Damage on Target
+4. Trigger
+5. Frost Damage on Target
+```
+
+Prefix chain analysis:
+
+```text
+Chain 1: [Burst, Multicast x5] → Fire Damage
+- Valid: chain contains Multicast
+- Burst provides hemisphere pattern
+- Multicast provides count = 5
+
+Trigger binds backward to Fire Damage group.
+Frost Damage is Trigger's payload.
+
+Chain 2: [] → Frost Damage
+- Valid: empty prefix chain
+- No Multicast: 1 emission per trigger
+```
+
+Emission slots:
+
+```text
+Fire Damage group: 5 slots (from Multicast)
+Frost Damage group: 5 slots (one per fire emission's trigger)
+Total: 10 slots, well under cap of 32
+```
+
+Execution:
+
+```text
+Cast: 5 fireballs launch in hemisphere distribution.
+Each fireball, on hit, runs its own Frost payload.
+5 Frost projectiles total, each originating from its
+corresponding fireball's hit position.
 ```
 
 ---
@@ -931,8 +1064,10 @@ It is complete when:
 - prefix operators bind forward
 - Trigger/Timer bind backward
 - Multicast consumes only the next emitter group
+- Burst/Spread validation requires Multicast in same prefix chain
 - readable validation errors exist
 - compiled plan can be printed/debugged
+- emission slot enumeration produces correct counts for Section 18 table
 - no real projectile fanout is required yet
 
 ---
@@ -968,6 +1103,8 @@ Recommended order:
 
 Do not implement all eight in one PR.
 
+Chain requires a target-acquisition subsystem (finding valid next-hop targets within range). Budget for that work before Chain implementation.
+
 ---
 
 ## 29. Glossary
@@ -987,6 +1124,15 @@ A Spellforge effect that modifies the next emitter group.
 **Postfix operator**  
 A Spellforge effect that binds to the previous emitter group.
 
+**Prefix chain**  
+The sequence of prefix operators immediately preceding an emitter group. Binds to that emitter group as a unit.
+
+**Pattern operator**  
+A prefix operator that modifies spatial distribution of emissions (Burst, Spread). Requires a Multicast in the same prefix chain.
+
+**Emission slot**  
+A static unit of potential emission in the compiled plan. Used for cap accounting and helper-record allocation.
+
 **Trigger payload**  
 The effect-list segment that runs when the bound emitter resolves.
 
@@ -998,6 +1144,9 @@ Mutable runtime state passed through opcode execution.
 
 **Job**  
 A bounded unit of runtime work advanced by the orchestrator.
+
+**Helper spell record**  
+A dynamically created spell record used as a structural cookie so SFP hit events can be routed to the correct emission.
 
 **SFP**  
 Spell Framework Plus, exposed as `I.MagExp`.
