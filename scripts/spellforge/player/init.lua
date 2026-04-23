@@ -178,13 +178,14 @@ local function playInterceptAnimation(variant)
         return false, "AnimationController.playBlendedAnimation missing"
     end
 
-    local ok, err = pcall(interfaces.AnimationController.playBlendedAnimation, {
-        actor = self,
-        groupname = "spellcast",
-        startkey = variant .. " start",
-        stopkey = variant .. " stop",
-        priority = animation.PRIORITY.Scripted,
-    })
+    local ok, err = pcall(interfaces.AnimationController.playBlendedAnimation,
+        "spellcast",
+        {
+            startKey = variant .. " start",
+            stopKey = variant .. " stop",
+            priority = animation.PRIORITY.Scripted,
+        }
+    )
     if not ok then
         log.error(string.format("playBlendedAnimation failed variant=%s err=%s", tostring(variant), tostring(err)))
         return false, tostring(err)
@@ -249,11 +250,12 @@ local function registerAnimationTextKeys()
             return
         end
 
+        local selected_spell = resolveSelectedSpell()
         core.sendGlobalEvent(events.CAST_DIAG_SIGNAL, {
             sender = self.object,
             groupname = groupname,
             key = key,
-            selected_spell_id = state.intercept_spell_id,
+            selected_spell_id = (selected_spell and selected_spell.id) or state.intercept_spell_id,
         })
 
         if not state.is_casting then
@@ -317,15 +319,19 @@ local function onInputAction(action)
         end
 
         local variant = classifyVariant(meta.root_base_spell_id)
+        state.is_casting = true
+        state.intercept_spell_id = selected_spell_id
+        state.intercept_variant = variant
+
         local ok, anim_err = playInterceptAnimation(variant)
         if not ok then
+            state.is_casting = false
+            state.intercept_spell_id = nil
+            state.intercept_variant = nil
             log.error(string.format("intercept animation failed spell_id=%s err=%s", tostring(selected_spell_id), tostring(anim_err)))
             return
         end
 
-        state.is_casting = true
-        state.intercept_spell_id = selected_spell_id
-        state.intercept_variant = variant
         log.info(string.format("intercept armed spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
     end)
 
