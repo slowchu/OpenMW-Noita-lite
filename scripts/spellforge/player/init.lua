@@ -163,11 +163,15 @@ end
 
 local function classifyVariant(root_base_spell_id)
     local base = root_base_spell_id and core.magic.spells.records[root_base_spell_id] or nil
-    local range = base and base.effects and base.effects[1] and base.effects[1].range or "self"
-    if range == "target" then
+    local range = base and base.effects and base.effects[1] and base.effects[1].range or nil
+
+    -- OpenMW spell effect range in records is numeric in many runtimes:
+    --   0=self, 1=touch, 2=target.
+    -- Keep string handling for compatibility with environments exposing symbolic strings.
+    if range == 2 or range == "target" or range == "Target" then
         return "target"
     end
-    if range == "touch" then
+    if range == 1 or range == "touch" or range == "Touch" then
         return "touch"
     end
     return "self"
