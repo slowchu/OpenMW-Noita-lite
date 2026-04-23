@@ -96,7 +96,7 @@ end
 
 local function onCompileResult(payload)
     if payload.ok then
-        log.info(string.format("compile success recipe_id=%s spell_id=%s reused=%s", tostring(payload.recipe_id), tostring(payload.spell_id), tostring(payload.reused)))
+        log.info(string.format("compile success recipe_id=%s engine_spell_id=%s reused=%s", tostring(payload.recipe_id), tostring(payload.spell_id), tostring(payload.reused)))
     else
         log.error(string.format("compile failed request=%s error=%s", tostring(payload.request_id), tostring(payload.error or "validation failed")))
     end
