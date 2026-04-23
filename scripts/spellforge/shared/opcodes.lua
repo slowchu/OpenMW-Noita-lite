@@ -10,17 +10,17 @@ local opcodes = {
     Spread = {
         kind = "launch_modifier",
         display_name = "Spread",
-        description = "Distribute multicast copies across an arc in degrees.",
+        description = "Apply spread preset to multicast emissions.",
         parameters = {
-            arc = { type = "number", min = 0, max = 360 },
+            preset = { type = "integer", min = 1, max = 4 },
         },
     },
-    ["Damage+"] = {
+    Burst = {
         kind = "launch_modifier",
-        display_name = "Damage+",
-        description = "Scale damage magnitudes on the next emitter by percent.",
+        display_name = "Burst",
+        description = "Emit spherical burst copies of the next emitter.",
         parameters = {
-            percent = { type = "number", min = -90, max = 400 },
+            count = { type = "integer", min = 2, max = 16 },
         },
     },
     ["Speed+"] = {
@@ -45,14 +45,6 @@ local opcodes = {
         description = "Redirect projectile on hit to nearest actor up to N hops.",
         parameters = {
             hops = { type = "integer", min = 1, max = 5 },
-        },
-    },
-    Pierce = {
-        kind = "launch_modifier",
-        display_name = "Pierce",
-        description = "Allow projectile to pass through N actors before terminating.",
-        parameters = {
-            count = { type = "integer", min = 1, max = 3 },
         },
     },
     Trigger = {
