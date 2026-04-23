@@ -56,4 +56,58 @@ Sent by PLAYER to request record/cache deletion.
 ]]
 events.DELETE_COMPILED = "Spellforge_DeleteCompiled"
 
+--[[
+Payload: {
+  sender: Actor,          -- originating player/local actor object
+  spell_id: string,       -- compiled front-end engine spell id
+  request_id: string
+}
+Sent by PLAYER to request a one-shot SFP launchSpell call for diagnostics.
+]]
+events.CAST_REQUEST = "Spellforge_CastRequest"
+
+--[[
+Payload: {
+  sender: Actor,          -- originating player/local actor object
+  spell_id: string,       -- compiled front-end engine spell id
+  request_id: string,
+  timeout_seconds: number|nil
+}
+Sent by PLAYER to register a temporary observer for MagExp_OnMagicHit.
+]]
+events.BEGIN_CAST_OBSERVE = "Spellforge_BeginCastObserve"
+
+--[[
+Payload: {
+  request_id: string,
+  ok: boolean,
+  error: string|nil
+}
+Sent by GLOBAL to acknowledge CAST_REQUEST / BEGIN_CAST_OBSERVE.
+]]
+events.CAST_OBSERVE_RESULT = "Spellforge_CastObserveResult"
+
+--[[
+Payload: {
+  request_id: string|nil,
+  spell_id: string|nil,
+  matched: boolean,
+  attacker_id: string|nil,
+  victim_id: string|nil
+}
+Sent by GLOBAL to PLAYER when a watched hit event arrives.
+]]
+events.CAST_HIT_OBSERVED = "Spellforge_CastHitObserved"
+
+--[[
+Payload: {
+  sender: Actor,
+  groupname: string|nil,
+  key: string|nil,
+  selected_spell_id: string|nil
+}
+Sent by PLAYER animation diagnostics when a spellcast text key fires.
+]]
+events.CAST_DIAG_SIGNAL = "Spellforge_CastDiagSignal"
+
 return events
