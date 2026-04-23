@@ -14,6 +14,8 @@ local state = {
     running = false,
 }
 
+local DEBUG_MARKER_RANGE_FROM_ROOT = true
+
 local function assertLine(ok, label)
     if ok then
         log.info("PASS " .. label)
@@ -32,12 +34,32 @@ local function logCompileCauses(recipe_label, payload)
     end
 end
 
-local function firstKnownSpellId()
-    for _, record in pairs(core.magic.spells.records) do
-        if record and type(record.id) == "string" and record.id ~= "" then
-            return record.id
+local KNOWN_COMBAT_SPELL_IDS = {
+    "fireball",
+    "frostball",
+    "lightning bolt",
+    "fire bite",
+}
+
+local function resolveSmokeBaseSpellId()
+    local default_id = KNOWN_COMBAT_SPELL_IDS[1]
+    local default_record = core.magic.spells.records[default_id]
+    if default_record then
+        return default_id
+    end
+
+    for i = 2, #KNOWN_COMBAT_SPELL_IDS do
+        local fallback_id = KNOWN_COMBAT_SPELL_IDS[i]
+        if core.magic.spells.records[fallback_id] then
+            log.warn(string.format("base_spell_id default missing; using fallback id=%s (default=%s)", fallback_id, default_id))
+            return fallback_id
         end
     end
+
+    log.error(string.format(
+        "no known vanilla combat spell found; checked ids=%s",
+        table.concat(KNOWN_COMBAT_SPELL_IDS, ", ")
+    ))
     return nil
 end
 
@@ -52,6 +74,9 @@ local function compile(recipe, request_id)
         actor_id = self.recordId,
         recipe = recipe,
         request_id = request_id,
+        options = {
+            debug_marker_range_from_root = DEBUG_MARKER_RANGE_FROM_ROOT,
+        },
     })
 end
 
@@ -79,30 +104,87 @@ local function hasErrorContaining(errors, needle)
     return false
 end
 
+local function runSpellbookEnumerationProbe(actor_spells, target_engine_id)
+    local function probePairs()
+        local count = 0
+        local found = false
+        for _, entry in pairs(actor_spells) do
+            count = count + 1
+            if entry and entry.id == target_engine_id then
+                found = true
+            end
+        end
+        log.info(string.format("spellbook probe pairs: count=%d found_engine_id=%s", count, tostring(found)))
+    end
+
+    local function probeIpairs()
+        local count = 0
+        local found = false
+        for _, entry in ipairs(actor_spells) do
+            count = count + 1
+            if entry and entry.id == target_engine_id then
+                found = true
+            end
+        end
+        log.info(string.format("spellbook probe ipairs: count=%d found_engine_id=%s", count, tostring(found)))
+    end
+
+    local function probeNumeric()
+        local count = 0
+        local found = false
+        local total = #actor_spells
+        for i = 1, total do
+            local entry = actor_spells[i]
+            if entry then
+                count = count + 1
+                if entry.id == target_engine_id then
+                    found = true
+                end
+            end
+        end
+        log.info(string.format("spellbook probe numeric: count=%d total=%d found_engine_id=%s", count, total, tostring(found)))
+    end
+
+    local function probeGetAll()
+        if type(actor_spells.getAll) ~= "function" then
+            log.info("spellbook probe getAll: unsupported")
+            return
+        end
+        local ok, list_or_err = pcall(actor_spells.getAll, actor_spells)
+        if not ok then
+            log.info(string.format("spellbook probe getAll: error=%s", tostring(list_or_err)))
+            return
+        end
+        local count = 0
+        local found = false
+        for _, entry in pairs(list_or_err) do
+            count = count + 1
+            if entry and entry.id == target_engine_id then
+                found = true
+            end
+        end
+        log.info(string.format("spellbook probe getAll: count=%d found_engine_id=%s", count, tostring(found)))
+    end
+
+    -- OpenMW docs:
+    -- - ActorSpells usage: pairs(mySpells) and numeric indexing are equivalent.
+    --   https://openmw.readthedocs.io/en/latest/reference/lua-scripting/openmw_types.html#type-actorspells
+    -- - List iterable supports pairs/ipairs/#/numeric indexing.
+    --   https://openmw.readthedocs.io/en/latest/reference/lua-scripting/iterables.html#list-iterable
+    probePairs()
+    probeIpairs()
+    probeNumeric()
+    probeGetAll()
+end
+
 local function spellbookHasSpell(actor, spell_id)
     local actor_spells = types.Actor.spells(actor)
-
-    if type(actor_spells.hasSpell) == "function" then
-        local ok, value = pcall(actor_spells.hasSpell, actor_spells, spell_id)
-        if ok then
-            return value == true
+    for i = 1, #actor_spells do
+        local entry = actor_spells[i]
+        if entry and entry.id == spell_id then
+            return true
         end
     end
-
-    if type(actor_spells.contains) == "function" then
-        local ok, value = pcall(actor_spells.contains, actor_spells, spell_id)
-        if ok then
-            return value == true
-        end
-    end
-
-    if type(actor_spells.has) == "function" then
-        local ok, value = pcall(actor_spells.has, actor_spells, spell_id)
-        if ok then
-            return value == true
-        end
-    end
-
     return false
 end
 
@@ -117,13 +199,15 @@ local function runSmoke()
         return
     end
 
-    local base_spell_id = firstKnownSpellId()
+    local base_spell_id = resolveSmokeBaseSpellId()
     if not base_spell_id then
-        log.error("no base spell available; aborting smoke")
+        log.error("no deterministic base spell available; aborting smoke")
         return
     end
+    log.info(string.format("smoke fixture base_spell_id=%s", base_spell_id))
 
     state.running = true
+    log.info(string.format("smoke compiler debug_marker_range_from_root=%s", tostring(DEBUG_MARKER_RANGE_FROM_ROOT)))
     log.info("starting smoke compiler run")
 
     local trivial_recipe = {
@@ -136,7 +220,7 @@ local function runSmoke()
         nodes = {
             { kind = "emitter", base_spell_id = base_spell_id, payload = {
                 { opcode = "Multicast", params = { count = 3 } },
-                { opcode = "Spread", params = { arc = 90 } },
+                { opcode = "Spread", params = { preset = 1 } },
                 { kind = "emitter", base_spell_id = base_spell_id },
             } },
         },
@@ -163,12 +247,27 @@ local function runSmoke()
             logCompileCauses("trivial", result1)
         end
 
+        local actor_spells = types.Actor.spells(self)
+        log.info(string.format("spellbook probe target_engine_id=%s type=%s", tostring(result1.spell_id), type(result1.spell_id)))
+        runSpellbookEnumerationProbe(actor_spells, result1.spell_id)
+
         local spellbook_has = result1.spell_id and spellbookHasSpell(self, result1.spell_id)
         local ok3 = spellbook_has == true
         assertLine(ok3, "front-end spell added to spellbook")
         if not ok3 then
             logCompileCauses("trivial", result1)
         end
+
+        local effects = nil
+        if type(result1.spell_id) == "string" and result1.spell_id ~= "" then
+            local record = core.magic.spells.records[result1.spell_id]
+            effects = record and record.effects or nil
+        end
+        local ok_marker_only = type(effects) == "table" and #effects == 1 and effects[1].id == "spellforge_composed"
+        assertLine(ok_marker_only, "compiled spell contains only marker effect")
+
+        local ok_meta_real_effects = type(result1.root_real_effect_count) == "number" and result1.root_real_effect_count > 0
+        assertLine(ok_meta_real_effects, "compile metadata preserves real effects")
 
         local req2 = nextRequestId("smoke-cache")
         compile(trivial_recipe, req2)
