@@ -1,0 +1,3 @@
+# Spellforge smoke cast harness
+GLOBAL: scripts/spellforge/global/init.lua
+PLAYER: scripts/spellforge/tests/smoke_cast.lua
