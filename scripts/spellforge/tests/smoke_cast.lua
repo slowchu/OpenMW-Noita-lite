@@ -17,6 +17,8 @@ local state = {
     intercept_seen = false,
 }
 
+local DEBUG_MARKER_RANGE_FROM_ROOT = true
+
 local function assertLine(ok, label)
     if ok then
         log.info("PASS " .. label)
@@ -65,6 +67,9 @@ local function compile(recipe, request_id)
         actor_id = self.recordId,
         recipe = recipe,
         request_id = request_id,
+        options = {
+            debug_marker_range_from_root = DEBUG_MARKER_RANGE_FROM_ROOT,
+        },
     })
 end
 
@@ -129,6 +134,7 @@ local function runSmoke()
     state.running = true
     state.intercept_seen = false
     log.info("starting smoke cast run")
+    log.info(string.format("smoke cast debug_marker_range_from_root=%s", tostring(DEBUG_MARKER_RANGE_FROM_ROOT)))
 
     local trivial_recipe = {
         nodes = {

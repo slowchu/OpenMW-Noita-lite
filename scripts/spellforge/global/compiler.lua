@@ -44,11 +44,11 @@ local function collectEmitters(nodes, out)
     end
 end
 
-local function createDraft(record_id, emitter)
+local function createDraft(record_id, emitter, marker_range)
     local base = core.magic.spells.records[emitter.base_spell_id]
     local marker_effect = {
         id = MARKER_EFFECT_ID,
-        range = "self",
+        range = marker_range or "self",
         area = 0,
         duration = 0,
         magnitudeMin = 0,
@@ -63,7 +63,13 @@ local function createDraft(record_id, emitter)
         effects = { marker_effect },
     }
 
-    log.info(string.format("createRecordDraft called id=%s effect_count=%d marker=%s", tostring(record_id), #(draft.effects or {}), MARKER_EFFECT_ID))
+    log.info(string.format(
+        "createRecordDraft called id=%s effect_count=%d marker=%s marker_range=%s",
+        tostring(record_id),
+        #(draft.effects or {}),
+        MARKER_EFFECT_ID,
+        tostring(marker_effect.range)
+    ))
     return draft
 end
 
@@ -92,7 +98,7 @@ local function rootRealEffectCount(entry)
     return #first.real_effects
 end
 
-function compiler.compile(actor, recipe, request_id)
+function compiler.compile(actor, recipe, request_id, options)
     local node_count = type(recipe) == "table" and type(recipe.nodes) == "table" and #recipe.nodes or 0
     local root_base_spell_id = nil
     if type(recipe) == "table" and type(recipe.nodes) == "table" and type(recipe.nodes[1]) == "table" then
@@ -100,6 +106,20 @@ function compiler.compile(actor, recipe, request_id)
     end
     log.debug(string.format("compile entry request_id=%s actor=%s nodes=%d", tostring(request_id), tostring(actor and actor.recordId), node_count))
     log.info(string.format("compile requested root_base_spell_id=%s node_count=%d", tostring(root_base_spell_id), node_count))
+
+    local marker_range = "self"
+    if options and options.debug_marker_range_from_root == true then
+        local root_base = root_base_spell_id and core.magic.spells.records[root_base_spell_id] or nil
+        local root_effect = root_base and root_base.effects and root_base.effects[1] or nil
+        if root_effect and root_effect.range ~= nil then
+            marker_range = root_effect.range
+        end
+        log.info(string.format(
+            "debug marker range mode enabled root_base_spell_id=%s marker_range=%s",
+            tostring(root_base_spell_id),
+            tostring(marker_range)
+        ))
+    end
 
     local checked = validate.run(recipe, {
         known_base_spell_ids = KNOWN_BASE_SPELL_IDS,
@@ -152,7 +172,7 @@ function compiler.compile(actor, recipe, request_id)
 
     for idx, emitter in ipairs(emitters) do
         local logical_id = string.format("spellforge_%s_n%d", canonical.recipe_id, idx - 1)
-        local draft = createDraft(logical_id, emitter)
+        local draft = createDraft(logical_id, emitter, marker_range)
         log.debug(string.format("world.createRecord before logical_id=%s draft=%s", tostring(logical_id), tostring(draft)))
         log.info(string.format("world.createRecord called logical_id=%s", tostring(logical_id)))
         local created_record, create_error = records.createRecord(draft)
@@ -230,7 +250,7 @@ function compiler.handleCompileEvent(payload)
         return { request_id = payload and payload.request_id, ok = false, success = false, error_message = "Missing actor", error = "Missing actor" }
     end
 
-    local ok, result_or_err = pcall(compiler.compile, payload.actor, payload.recipe, payload.request_id)
+    local ok, result_or_err = pcall(compiler.compile, payload.actor, payload.recipe, payload.request_id, payload.options)
     if not ok then
         local err = tostring(result_or_err)
         log.error(string.format("handleCompileEvent failed request_id=%s err=%s", tostring(payload and payload.request_id), err))
