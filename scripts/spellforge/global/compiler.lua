@@ -107,8 +107,9 @@ function compiler.compile(actor, recipe, request_id, options)
     log.debug(string.format("compile entry request_id=%s actor=%s nodes=%d", tostring(request_id), tostring(actor and actor.recordId), node_count))
     log.info(string.format("compile requested root_base_spell_id=%s node_count=%d", tostring(root_base_spell_id), node_count))
 
+    local debug_marker_range_from_root = options and options.debug_marker_range_from_root == true
     local marker_range = "self"
-    if options and options.debug_marker_range_from_root == true then
+    if debug_marker_range_from_root then
         local root_base = root_base_spell_id and core.magic.spells.records[root_base_spell_id] or nil
         local root_effect = root_base and root_base.effects and root_base.effects[1] or nil
         if root_effect and root_effect.range ~= nil then
@@ -131,7 +132,10 @@ function compiler.compile(actor, recipe, request_id, options)
     log.info(string.format("validation passed node_count=%d", node_count))
 
     local canonical = canonicalize.run(recipe)
-    local cached = records.getByRecipeId(canonical.recipe_id)
+    local cached = nil
+    if not debug_marker_range_from_root then
+        cached = records.getByRecipeId(canonical.recipe_id)
+    end
     if cached then
         local added_ok, add_err = addToSpellbook(actor, cached.frontend_spell_id)
         if not added_ok then
@@ -211,15 +215,19 @@ function compiler.compile(actor, recipe, request_id, options)
         return { request_id = request_id, ok = false, error = tostring(add_err) }
     end
 
-    records.put(canonical.recipe_id, {
-        canonical = canonical.canonical,
-        frontend_logical_id = frontend_logical_spell_id,
-        frontend_spell_id = frontend_spell_id,
-        generated_spell_ids = generated_spell_ids,
-        generated_engine_spell_ids = generated_engine_spell_ids,
-        node_metadata = node_metadata,
-        recipe = recipe,
-    })
+    if not debug_marker_range_from_root then
+        records.put(canonical.recipe_id, {
+            canonical = canonical.canonical,
+            frontend_logical_id = frontend_logical_spell_id,
+            frontend_spell_id = frontend_spell_id,
+            generated_spell_ids = generated_spell_ids,
+            generated_engine_spell_ids = generated_engine_spell_ids,
+            node_metadata = node_metadata,
+            recipe = recipe,
+        })
+    else
+        log.info(string.format("debug marker range mode bypassed cache persist recipe_id=%s", tostring(canonical.recipe_id)))
+    end
 
     log.info(string.format(
         "compiled recipe_id=%s frontend_logical_id=%s frontend_engine_id=%s",
