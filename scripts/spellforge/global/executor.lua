@@ -16,6 +16,60 @@ local launch_cookies = {}
 
 local player_ref = nil
 local last_active_spell_ids = {}
+local fireball_logged = false
+
+local function stringifyValue(value, depth)
+    if depth <= 0 then
+        return "<max-depth>"
+    end
+    local value_type = type(value)
+    if value_type == "table" then
+        local parts = {}
+        for k, v in pairs(value) do
+            parts[#parts + 1] = string.format("%s=%s", tostring(k), stringifyValue(v, depth - 1))
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    return tostring(value)
+end
+
+local function logSpellRecord(label, spell_id)
+    local record = spell_id and core.magic.spells.records[spell_id] or nil
+    if not record then
+        log.info(string.format("%s spell_id=%s record=nil", label, tostring(spell_id)))
+        return
+    end
+
+    log.info(string.format(
+        "%s spell_id=%s name=%s type=%s cost=%s isAutocalc=%s record=%s",
+        label,
+        tostring(spell_id),
+        tostring(record.name),
+        tostring(record.type),
+        tostring(record.cost),
+        tostring(record.isAutocalc),
+        tostring(record)
+    ))
+
+    local effects = record.effects
+    if type(effects) ~= "table" then
+        log.info(string.format("%s spell_id=%s effects=nil", label, tostring(spell_id)))
+        return
+    end
+    for i, effect in ipairs(effects) do
+        log.info(string.format(
+            "%s effect[%d] id=%s range=%s area=%s duration=%s magnitudeMin=%s magnitudeMax=%s",
+            label,
+            i,
+            tostring(effect.id),
+            tostring(effect.range),
+            tostring(effect.area),
+            tostring(effect.duration),
+            tostring(effect.magnitudeMin),
+            tostring(effect.magnitudeMax)
+        ))
+    end
+end
 
 local function sendResult(sender, request_id, ok, err)
     if sender and type(sender.sendEvent) == "function" then
@@ -71,6 +125,15 @@ local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_o
     if type(interfaces.MagExp.launchSpell) ~= "function" then
         return false, "I.MagExp.launchSpell missing"
     end
+
+    log.info(string.format(
+        "executor launchSpell params attacker=%s spellId=%s startPos=%s direction=%s isFree=true hitObject=%s",
+        tostring(actor and actor.recordId),
+        tostring(dispatch_spell_id),
+        tostring(start_pos),
+        tostring(direction),
+        tostring(hit_object and hit_object.recordId or hit_object)
+    ))
 
     local ok, err = pcall(interfaces.MagExp.launchSpell, {
         attacker = actor,
@@ -138,7 +201,25 @@ function executor.onInterceptCast(payload)
     end
 
     local dispatched = 0
+    log.info(string.format(
+        "intercept metadata root recipe_id=%s spell_id=%s real_effect_count=%s real_effects=%s",
+        tostring(recipe_id),
+        tostring(engine_id),
+        tostring(root.real_effects and #root.real_effects or 0),
+        stringifyValue(root.real_effects, 3)
+    ))
+
     for effect_index, effect in ipairs(root.real_effects or {}) do
+        log.info(string.format(
+            "intercept real_effect[%d] id=%s range=%s area=%s duration=%s magnitudeMin=%s magnitudeMax=%s",
+            effect_index,
+            tostring(effect.id),
+            tostring(effect.range),
+            tostring(effect.area),
+            tostring(effect.duration),
+            tostring(effect.magnitudeMin),
+            tostring(effect.magnitudeMax)
+        ))
         local dispatch_spell_id, dispatch_err = createDispatchSpellForEffect(recipe_id, effect_index, effect)
         if not dispatch_spell_id then
             sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
@@ -147,6 +228,12 @@ function executor.onInterceptCast(payload)
                 error = dispatch_err,
             })
             return
+        end
+
+        logSpellRecord("dispatch spell record", dispatch_spell_id)
+        if not fireball_logged then
+            fireball_logged = true
+            logSpellRecord("vanilla fireball record", "fireball")
         end
 
         local ok, launch_err = launchSpell(sender, dispatch_spell_id, payload.start_pos, payload.direction, payload.hit_object)
@@ -200,6 +287,8 @@ function executor.onBeginObserve(payload)
 end
 
 function executor.onMagicHit(payload)
+    log.info(string.format("MagExp_OnMagicHit payload=%s", stringifyValue(payload, 4)))
+
     local attacker_id = payload and payload.attacker and payload.attacker.recordId or nil
     local victim_id = payload and payload.target and payload.target.recordId or nil
     local spell_id = payload and (payload.spellId or payload.spell_id) or nil
@@ -257,14 +346,24 @@ local function ensureTargetFilter()
         return
     end
     interfaces.MagExp.setTargetFilter("spellforge", function(target)
+        local target_id = target and target.recordId or nil
         if target == nil then
+            log.info("target filter target=nil result=true")
             return true
         end
         local health = types.Actor.stats.dynamic.health(target)
         if not health then
+            log.info(string.format("target filter target=%s health=nil result=true", tostring(target_id)))
             return true
         end
-        return (health.current or 0) > 0
+        local allow = (health.current or 0) > 0
+        log.info(string.format(
+            "target filter target=%s health=%s result=%s",
+            tostring(target_id),
+            tostring(health.current),
+            tostring(allow)
+        ))
+        return allow
     end)
 end
 
