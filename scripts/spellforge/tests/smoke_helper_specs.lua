@@ -1,5 +1,3 @@
-local input = require("openmw.input")
-
 local emission_slots = require("scripts.spellforge.global.emission_slots")
 local helper_specs = require("scripts.spellforge.global.helper_record_specs")
 local plan_cache = require("scripts.spellforge.global.plan_cache")
@@ -179,20 +177,12 @@ end
 
 return {
     engineHandlers = {
-        onFrame = function()
+        onUpdate = function()
             if state.ran then
                 return
             end
             state.ran = true
             run()
-        end,
-        onKeyPress = function(key)
-            local symbol = key.symbol and string.lower(key.symbol) or ""
-            if symbol == "j" or key.code == input.KEY.J then
-                run()
-                return false
-            end
-            return true
         end,
     },
 }

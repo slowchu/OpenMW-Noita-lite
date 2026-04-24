@@ -1,5 +1,3 @@
-local input = require("openmw.input")
-
 local plan_cache = require("scripts.spellforge.global.plan_cache")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_plan_cache")
 
@@ -95,20 +93,12 @@ end
 
 return {
     engineHandlers = {
-        onFrame = function()
+        onUpdate = function()
             if state.ran then
                 return
             end
             state.ran = true
             run()
-        end,
-        onKeyPress = function(key)
-            local symbol = key.symbol and string.lower(key.symbol) or ""
-            if symbol == "k" or key.code == input.KEY.K then
-                run()
-                return false
-            end
-            return true
         end,
     },
 }

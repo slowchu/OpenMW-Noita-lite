@@ -1,5 +1,3 @@
-local input = require("openmw.input")
-
 local emission_slots = require("scripts.spellforge.global.emission_slots")
 local plan_cache = require("scripts.spellforge.global.plan_cache")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_emission_slots")
@@ -170,20 +168,12 @@ end
 
 return {
     engineHandlers = {
-        onFrame = function()
+        onUpdate = function()
             if state.ran then
                 return
             end
             state.ran = true
             run()
-        end,
-        onKeyPress = function(key)
-            local symbol = key.symbol and string.lower(key.symbol) or ""
-            if symbol == "l" or key.code == input.KEY.L then
-                run()
-                return false
-            end
-            return true
         end,
     },
 }
