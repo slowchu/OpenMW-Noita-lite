@@ -31,4 +31,5 @@ This file tracks transitional implementation status.
 - 2.2c.4 per-emission helper-slot allocation skeleton now exists (metadata-only, no helper records, not wired into live 2.2b casting yet).
 - 2.2c.5 helper-record spec generation now exists (metadata-only, no live helper records, not wired into live 2.2b casting yet).
 - 2.2c.6 helper-record materialization now exists in staged/dev smoke paths (creates internal helper records, does not add to player spellbook, not wired into live 2.2b casting yet).
+- 2.2c.7 central orchestrator/job queue skeleton now exists (dummy jobs only, no opcode execution, no SFP launch, not wired into live 2.2b casting yet).
 - Existing node-graph compiler path remains transitional scaffolding until a later migration PR.
