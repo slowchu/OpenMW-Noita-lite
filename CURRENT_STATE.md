@@ -25,3 +25,5 @@ This file tracks transitional implementation status.
 - 2.2c replaces graph-oriented compiler assumptions with **ordered effect-list parsing**.
 - v1 structural-cookie strategy is **per-emission helper spell records** (internal only).
 - No real opcode runtime is complete yet (no final Trigger/Timer/Multicast/Burst/Spread/Chain/Speed+/Size+ runtime behavior).
+- 2.2c.1 parser skeleton now exists for effect-list grouping/binding validation, but it is not wired into live 2.2b casting yet.
+- Existing node-graph compiler path remains transitional scaffolding until a later migration PR.
