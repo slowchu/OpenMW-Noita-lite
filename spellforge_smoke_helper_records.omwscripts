@@ -1,0 +1,3 @@
+# Spellforge smoke helper records harness
+LOAD: scripts/spellforge/context/effects.lua
+GLOBAL: scripts/spellforge/tests/smoke_helper_records.lua
