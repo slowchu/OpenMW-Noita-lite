@@ -29,7 +29,7 @@ local function runSpellsRecordsProbe()
             break
         end
     end
-    log.info(string.format(
+    log.debug(string.format(
         "spells.records probe: count>=%d first_key_type=%s first_key=%s first_value_type=%s first_value_id=%s",
         count,
         type(first_key),
@@ -39,7 +39,7 @@ local function runSpellsRecordsProbe()
     ))
 
     local probe_id = first_value and first_value.id or "fireball"
-    log.info(string.format(
+    log.debug(string.format(
         "spells.records lookup probe: by_string=%s by_int=%s",
         tostring(core.magic.spells.records[probe_id] ~= nil),
         tostring(core.magic.spells.records[1] ~= nil)
@@ -68,7 +68,7 @@ local function onCheckBackend(payload)
 
     if isBackendReady() then
         sender:sendEvent(events.BACKEND_READY, { backend_version = "sfp-unknown" })
-        log.info("backend handshake ready")
+        log.debug("backend handshake ready")
     else
         sender:sendEvent(events.BACKEND_UNAVAILABLE, { reason = "Spell Framework Plus (I.MagExp) missing" })
         log.warn("backend handshake unavailable")

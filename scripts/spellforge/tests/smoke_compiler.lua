@@ -6,6 +6,7 @@ local types = require("openmw.types")
 
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_compiler")
+local dev = require("scripts.spellforge.shared.dev")
 
 local state = {
     backend = "INIT",
@@ -189,6 +190,9 @@ local function spellbookHasSpell(actor, spell_id)
 end
 
 local function runSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     if state.running then
         log.warn("smoke run already in progress")
         return
@@ -263,7 +267,14 @@ local function runSmoke()
             local record = core.magic.spells.records[result1.spell_id]
             effects = record and record.effects or nil
         end
-        local ok_marker_only = type(effects) == "table" and #effects == 1 and effects[1].id == "spellforge_composed"
+        local marker_id = type(effects) == "table" and effects[1] and effects[1].id or nil
+        local ok_marker_only = type(effects) == "table"
+            and #effects == 1
+            and (
+                marker_id == "spellforge_marker_target"
+                or marker_id == "spellforge_marker_target_destruction"
+                or marker_id == "spellforge_composed"
+            )
         assertLine(ok_marker_only, "compiled spell contains only marker effect")
 
         local ok_meta_real_effects = type(result1.root_real_effect_count) == "number" and result1.root_real_effect_count > 0
@@ -322,6 +333,9 @@ local function runSmoke()
 end
 
 local function requestBackend()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     state.backend = "PENDING"
     core.sendGlobalEvent(events.CHECK_BACKEND, {
         sender = self.object,
@@ -335,6 +349,9 @@ local function requestBackend()
 end
 
 local function onKeyPress(key)
+    if not dev.smokeTestsEnabled() then
+        return true
+    end
     local symbol = key.symbol and string.lower(key.symbol) or ""
     if symbol == "u" or key.code == input.KEY.U then
         log.debug("handled smoke hotkey")
@@ -347,6 +364,9 @@ end
 return {
     engineHandlers = {
         onFrame = function()
+            if not dev.smokeTestsEnabled() then
+                return
+            end
             if state.backend == "INIT" then
                 requestBackend()
             end
@@ -360,7 +380,7 @@ return {
                 state.handshake_timer = nil
             end
             state.backend = "READY"
-            log.info("backend ready for smoke harness")
+            log.debug("backend ready for smoke harness")
         end,
         [events.BACKEND_UNAVAILABLE] = function(payload)
             if state.handshake_timer then
