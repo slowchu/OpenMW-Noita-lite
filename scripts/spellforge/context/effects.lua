@@ -35,12 +35,11 @@ content.magicEffects.records.spellforge_marker_target = {
     harmful = false,
     allowsEnchanting = false,
     allowsSpellmaking = false,
-    -- Explicit inert shell markers (when static/sound records are available).
-    castStatic = static_records and "spellforge_invisible_static" or nil,
+    -- Keep normal vanilla cast/fizzle feedback on hands/animation.
+    -- Inert only the placeholder projectile path (bolt/hit/area) for shell casts.
     hitStatic = static_records and "spellforge_invisible_static" or nil,
     areaStatic = static_records and "spellforge_invisible_static" or nil,
     bolt = static_records and "spellforge_invisible_static" or nil,
-    castSound = sound_records and "spellforge_silence" or nil,
     hitSound = sound_records and "spellforge_silence" or nil,
     areaSound = sound_records and "spellforge_silence" or nil,
     boltSound = sound_records and "spellforge_silence" or nil,
