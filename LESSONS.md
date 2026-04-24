@@ -171,15 +171,17 @@ This avoids reimplementing vanilla chance-to-cast logic in Lua.
 
 The handler should remain narrowly scoped to active Spellforge intercept state. If future OpenMW payloads expose actor or spell identity, use that information to tighten matching.
 
-### 3. Metadata gating before interception is transitional
+### 3. Metadata gating must be cache-first
 
-2.2b currently queries global metadata with `Spellforge_QuerySpellMetadata` before arming intercept.
+Interception should arm from player-side metadata that is already cached before cast input.
 
-This proved the dispatch path, but it is transitional.
+The old per-input global metadata query path was useful for proving dispatch, but introduced a race against animation start.
 
-Future cleanup should move Spellforge spell metadata into a player-side cache so cast input can arm intercept synchronously.
+Current discipline:
 
-Do not rely on async request/response timing during the same input event that starts a cast animation.
+- warm metadata cache ahead of cast input (for example on selected-spell change)
+- treat async metadata queries as cache-refresh/fallback work, not synchronous cast-input gating
+- do not rely on request/response timing during the same input event that starts a cast animation
 
 ### 4. Root-only dispatch scope is prototype scaffolding
 

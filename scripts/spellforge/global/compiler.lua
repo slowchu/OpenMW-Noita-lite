@@ -34,6 +34,9 @@ local function cloneEffects(effects)
 end
 
 local function collectEmitters(nodes, out)
+    -- Transitional 2.2b scaffolding:
+    -- this walks prototype node trees instead of parsing ordered effect lists.
+    -- TODO(2.2c): replace with effect-list parser + emitter-group binding.
     for _, node in ipairs(nodes or {}) do
         if node.kind == "emitter" then
             out[#out + 1] = node
@@ -124,6 +127,8 @@ function compiler.compile(actor, recipe, request_id)
     log.info(string.format("validation passed node_count=%d", node_count))
 
     local canonical = canonicalize.run(recipe)
+    -- TODO(2.2c): cache compiled plans by canonical effect-list recipe hash/version,
+    -- distinct from this transitional generated-record metadata cache.
     local cached = nil
     if not debug_marker_range_from_root then
         cached = records.getByRecipeId(canonical.recipe_id)
@@ -165,6 +170,8 @@ function compiler.compile(actor, recipe, request_id)
     local generated_spell_ids = {}
     local generated_engine_spell_ids = {}
     local node_metadata = {}
+    -- TODO(2.2c): allocate per-emission helper records up to MAX_PROJECTILES_PER_CAST
+    -- as structural cookies for unambiguous hit routing.
 
     for idx, emitter in ipairs(emitters) do
         local logical_id = string.format("spellforge_%s_n%d", canonical.recipe_id, idx - 1)

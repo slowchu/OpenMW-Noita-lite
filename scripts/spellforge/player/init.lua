@@ -18,6 +18,9 @@ local state = {
     is_casting = false,
     animation_diag_registered = false,
     pending_spell_queries = {},
+    spell_metadata_cache = {},
+    pending_metadata_by_spell_id = {},
+    last_selected_spell_id = nil,
     pending_intercept_spell_id = nil,
     pending_intercept_variant = nil,
     intercept_spell_id = nil,
@@ -164,6 +167,47 @@ local function querySpellMetadata(spell_id, callback)
     end)
 end
 
+local function refreshSpellMetadata(spell_id, reason)
+    if type(spell_id) ~= "string" or spell_id == "" then
+        return
+    end
+    if state.backend ~= "READY" then
+        return
+    end
+    if state.pending_metadata_by_spell_id[spell_id] then
+        return
+    end
+
+    state.pending_metadata_by_spell_id[spell_id] = true
+    querySpellMetadata(spell_id, function(meta)
+        state.pending_metadata_by_spell_id[spell_id] = nil
+        if type(meta) ~= "table" then
+            state.spell_metadata_cache[spell_id] = {
+                is_spellforge = false,
+                updated_at = os.time(),
+                error = "invalid metadata response",
+            }
+            return
+        end
+
+        state.spell_metadata_cache[spell_id] = {
+            is_spellforge = meta.is_spellforge == true,
+            recipe_id = meta.recipe_id,
+            root_base_spell_id = meta.root_base_spell_id,
+            frontend_spell_id = meta.frontend_spell_id,
+            updated_at = os.time(),
+            reason = reason,
+            error = meta.error,
+        }
+        log.debug(string.format(
+            "metadata cache updated spell_id=%s is_spellforge=%s reason=%s",
+            tostring(spell_id),
+            tostring(meta.is_spellforge == true),
+            tostring(reason)
+        ))
+    end)
+end
+
 local function classifyVariant(root_base_spell_id)
     local base = root_base_spell_id and core.magic.spells.records[root_base_spell_id] or nil
     local range = base and base.effects and base.effects[1] and base.effects[1].range or nil
@@ -301,10 +345,51 @@ local function registerSkillProgressionHandler()
         return
     end
 
-    progression.addSkillUsedHandler(function(params)
+    progression.addSkillUsedHandler(function(skillid, params)
+        log.info(string.format(
+            "SKILL_USED_RAW skillid=%s useType=%s",
+            tostring(skillid),
+            tostring(params and params.useType)
+        ))
+
+        local selected_spell = resolveSelectedSpell()
+        local selected_spell_id = selected_spell and selected_spell.id or state.last_selected_spell_id
+        local selected_meta = selected_spell_id and state.spell_metadata_cache[selected_spell_id] or nil
+        local selected_is_cached_spellforge = selected_meta and selected_meta.is_spellforge == true or false
+        local should_log_diag = state.pending_intercept_spell_id ~= nil
+            or state.intercept_spell_id ~= nil
+            or state.is_casting == true
+            or selected_is_cached_spellforge
+
+        if should_log_diag then
+            log.info(string.format(
+                "SPELLFORGE_SKILL_USE_DIAG skillid=%s useType=%s expectedSuccess=%s skill=%s source=%s actor=%s selected_spell_id=%s pending_spell_id=%s intercept_spell_id=%s is_casting=%s pending_cast_authorized=%s",
+                tostring(skillid),
+                tostring(params and params.useType),
+                tostring(spellcast_success),
+                tostring(params and params.skill),
+                tostring(params and params.source),
+                tostring(params and params.actor),
+                tostring(selected_spell_id),
+                tostring(state.pending_intercept_spell_id),
+                tostring(state.intercept_spell_id),
+                tostring(state.is_casting),
+                tostring(state.pending_cast_authorized)
+            ))
+        end
+
         if not params or params.useType ~= spellcast_success then
             return
         end
+
+        if selected_is_cached_spellforge and not state.is_casting and state.intercept_spell_id == nil and state.pending_intercept_spell_id == nil then
+            log.info(string.format(
+                "SPELLFORGE_SKILL_SUCCESS_OUTSIDE_INTERCEPT_WINDOW useType=%s selected_spell_id=%s",
+                tostring(params.useType),
+                tostring(selected_spell_id)
+            ))
+        end
+
         if state.is_casting then
             state.pending_cast_authorized = true
             log.info(string.format(
@@ -383,10 +468,17 @@ local function registerAnimationTextKeys()
             if spell_id and authorized then
                 dispatchInterceptCast(spell_id)
             else
+                local reason = authorized and "missing spell_id" or "no authorization"
                 log.info(string.format(
                     "intercept release suppressed spell_id=%s reason=%s",
                     tostring(spell_id),
-                    authorized and "missing spell_id" or "no authorization"
+                    reason
+                ))
+                log.info(string.format(
+                    "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=%s reason=%s",
+                    tostring(spell_id),
+                    tostring(authorized),
+                    tostring(reason)
                 ))
             end
             clearInterceptState()
@@ -415,26 +507,29 @@ local function onInputAction(action)
         return true
     end
 
-    querySpellMetadata(selected_spell_id, function(meta)
-        if not meta or meta.is_spellforge ~= true then
-            return
-        end
+    local meta = state.spell_metadata_cache[selected_spell_id]
+    if not meta then
+        refreshSpellMetadata(selected_spell_id, "input-miss")
+        return true
+    end
+    if meta.is_spellforge ~= true then
+        return true
+    end
 
-        if state.is_casting or state.pending_intercept_spell_id ~= nil then
-            return
-        end
+    if state.is_casting or state.pending_intercept_spell_id ~= nil then
+        return true
+    end
 
-        if not canAffordSpell(selected_spell_id) then
-            log.info(string.format("intercept skipped: insufficient magicka spell_id=%s", tostring(selected_spell_id)))
-            return
-        end
+    if not canAffordSpell(selected_spell_id) then
+        log.info(string.format("intercept skipped: insufficient magicka spell_id=%s", tostring(selected_spell_id)))
+        return true
+    end
 
-        local variant = classifyVariant(meta.root_base_spell_id)
-        state.pending_intercept_spell_id = selected_spell_id
-        state.pending_intercept_variant = variant
-        state.pending_cast_authorized = false
-        log.info(string.format("intercept pending spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
-    end)
+    local variant = classifyVariant(meta.root_base_spell_id)
+    state.pending_intercept_spell_id = selected_spell_id
+    state.pending_intercept_variant = variant
+    state.pending_cast_authorized = false
+    log.info(string.format("intercept pending spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
 
     return true
 end
@@ -458,6 +553,17 @@ return {
         onFrame = function()
             if state.backend == "INIT" then
                 requestBackend()
+                return
+            end
+            if state.backend ~= "READY" then
+                return
+            end
+
+            local selected = resolveSelectedSpell()
+            local selected_spell_id = selected and selected.id or nil
+            if selected_spell_id ~= state.last_selected_spell_id then
+                state.last_selected_spell_id = selected_spell_id
+                refreshSpellMetadata(selected_spell_id, "selected-changed")
             end
         end,
         onKeyPress = onKeyPress,
@@ -470,7 +576,6 @@ return {
             registerAnimationTextKeys()
         end,
         [events.BACKEND_UNAVAILABLE] = onBackendUnavailable,
-        [events.COMPILE_RESULT] = onCompileResult,
         [events.QUERY_SPELL_METADATA_RESULT] = function(payload)
             local request_id = payload and payload.request_id
             local cb = request_id and state.pending_spell_queries[request_id]
@@ -479,9 +584,26 @@ return {
                 cb(payload)
             end
         end,
+        [events.COMPILE_RESULT] = function(payload)
+            onCompileResult(payload)
+            if payload and payload.ok and payload.spell_id then
+                refreshSpellMetadata(payload.spell_id, "compile-result")
+            end
+        end,
         [events.INTERCEPT_DISPATCH_RESULT] = function(payload)
             if payload and payload.ok ~= true then
                 log.error(string.format("intercept dispatch failed spell_id=%s err=%s", tostring(payload.spell_id), tostring(payload.error)))
+                log.info(string.format(
+                    "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=unknown reason=%s",
+                    tostring(payload.spell_id),
+                    tostring(payload.error or "dispatch failed")
+                ))
+            elseif payload and payload.ok == true then
+                log.info(string.format(
+                    "SPELLFORGE_COMPILED_DISPATCH_OK spell_id=%s dispatch_count=%s",
+                    tostring(payload.spell_id),
+                    tostring(payload.dispatch_count)
+                ))
             end
         end,
     },
