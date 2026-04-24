@@ -2,6 +2,7 @@ local limits = require("scripts.spellforge.shared.limits")
 local parser = require("scripts.spellforge.global.parser")
 local canonicalize_effect_list = require("scripts.spellforge.global.canonicalize_effect_list")
 local emission_slots = require("scripts.spellforge.global.emission_slots")
+local helper_record_specs = require("scripts.spellforge.global.helper_record_specs")
 
 local plan_cache = {}
 
@@ -259,6 +260,44 @@ function plan_cache.attachEmissionSlots(recipe_id, opts)
         recipe_id = recipe_id,
         slot_count = allocated.slot_count,
         warnings = allocated.warnings,
+        plan = plan,
+    }
+end
+
+function plan_cache.attachHelperSpecs(recipe_id, opts)
+    local plan = plan_cache.get(recipe_id)
+    if not plan then
+        return {
+            ok = false,
+            errors = {
+                { path = "recipe_id", message = string.format("No cached plan for recipe_id=%s", tostring(recipe_id)) },
+            },
+            warnings = {},
+        }
+    end
+
+    if type(plan.emission_slots) ~= "table" or #plan.emission_slots == 0 then
+        local attached_slots = plan_cache.attachEmissionSlots(recipe_id, opts)
+        if not attached_slots.ok then
+            return attached_slots
+        end
+        plan = attached_slots.plan
+    end
+
+    local generated = helper_record_specs.generate(plan, plan.emission_slots, opts)
+    if not generated.ok then
+        return generated
+    end
+
+    plan.helper_specs = generated.specs
+    plan.helper_spec_count = generated.spec_count
+    plan.helper_spec_warnings = generated.warnings
+
+    return {
+        ok = true,
+        recipe_id = recipe_id,
+        spec_count = generated.spec_count,
+        warnings = generated.warnings,
         plan = plan,
     }
 end
