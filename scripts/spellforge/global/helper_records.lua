@@ -1,5 +1,7 @@
+local core = require("openmw.core")
 local limits = require("scripts.spellforge.shared.limits")
 local records = require("scripts.spellforge.global.records")
+local log = require("scripts.spellforge.shared.log").new("global.helper_records")
 
 local helper_records = {}
 
@@ -48,7 +50,7 @@ local function cloneEffects(effects)
 end
 
 local function buildDraft(spec)
-    return {
+    return core.magic.spells.createRecordDraft {
         id = spec.logical_id,
         name = spec.planned_name or string.format("Spellforge Helper %s", tostring(spec.slot_id)),
         cost = spec.cost or 0,
@@ -165,6 +167,26 @@ function helper_records.materialize(specs_or_result, opts)
             local draft = buildDraft(spec)
             local created_record, create_error = records.createRecord(draft)
             if create_error then
+                local first = spec.effects and spec.effects[1] or nil
+                local keys = {}
+                for k in pairs(draft or {}) do
+                    keys[#keys + 1] = tostring(k)
+                end
+                table.sort(keys)
+                log.error(string.format(
+                    "helper createRecord failed logical_id=%s slot_id=%s effect_count=%d first_effect={id=%s range=%s area=%s duration=%s min=%s max=%s} draft_keys=%s err=%s",
+                    tostring(spec.logical_id),
+                    tostring(spec.slot_id),
+                    #(spec.effects or {}),
+                    tostring(first and first.id),
+                    tostring(first and first.range),
+                    tostring(first and first.area),
+                    tostring(first and first.duration),
+                    tostring(first and first.magnitudeMin),
+                    tostring(first and first.magnitudeMax),
+                    table.concat(keys, ","),
+                    tostring(create_error)
+                ))
                 appendError(errors, string.format("specs[%d]", i), string.format("world.createRecord failed: %s", tostring(create_error)))
                 break
             end
