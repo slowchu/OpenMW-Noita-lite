@@ -1,10 +1,14 @@
 local opcodes = require("scripts.spellforge.shared.opcodes")
+local limits = require("scripts.spellforge.shared.limits")
 
 local validate = {}
 
 local DEFAULT_LIMITS = {
-    max_depth = 3,
-    max_emitters = 20,
+    max_depth = limits.MAX_RECURSION_DEPTH,
+    -- Transitional 2.2b/node-model cap used by current prototype validator.
+    -- TODO(2.2c): replace emitter-count heuristic with effect-list slot planning
+    -- and enforce MAX_PROJECTILES_PER_CAST across bound emitter groups/payloads.
+    max_emitters = limits.MAX_PROJECTILES_PER_CAST,
 }
 
 local function appendError(errors, path, message)
@@ -97,6 +101,9 @@ local function validateSequence(nodes, state, path, depth)
 end
 
 function validate.run(recipe, opts)
+    -- Transitional note:
+    -- This validator operates on prototype recipe "nodes"/payload shape from 2.2b.
+    -- TODO(2.2c): replace with ordered-effect-list parser/validator per ARCHITECTURE.md.
     local options = opts or {}
     local state = {
         limits = {
@@ -113,6 +120,9 @@ function validate.run(recipe, opts)
     end
 
     validateSequence(recipe.nodes, state, "recipe.nodes", 1)
+
+    -- TODO(2.2c): validate Burst/Spread prefix-chain rule:
+    -- any prefix chain containing Burst or Spread must also contain Multicast.
 
     if #state.errors > 0 then
         return { ok = false, errors = state.errors }

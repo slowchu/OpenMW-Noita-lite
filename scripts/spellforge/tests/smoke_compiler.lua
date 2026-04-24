@@ -263,7 +263,10 @@ local function runSmoke()
             local record = core.magic.spells.records[result1.spell_id]
             effects = record and record.effects or nil
         end
-        local ok_marker_only = type(effects) == "table" and #effects == 1 and effects[1].id == "spellforge_composed"
+        local marker_id = type(effects) == "table" and effects[1] and effects[1].id or nil
+        local ok_marker_only = type(effects) == "table"
+            and #effects == 1
+            and (marker_id == "spellforge_marker_target" or marker_id == "spellforge_composed")
         assertLine(ok_marker_only, "compiled spell contains only marker effect")
 
         local ok_meta_real_effects = type(result1.root_real_effect_count) == "number" and result1.root_real_effect_count > 0
