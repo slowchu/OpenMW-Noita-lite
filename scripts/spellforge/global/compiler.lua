@@ -9,7 +9,8 @@ local log = require("scripts.spellforge.shared.log").new("global.compiler")
 
 local compiler = {}
 
-local MARKER_EFFECT_ID = "spellforge_composed"
+local MARKER_EFFECT_ID_DEFAULT = "spellforge_composed"
+local MARKER_EFFECT_ID_TARGET = "spellforge_marker_target"
 
 local KNOWN_BASE_SPELL_IDS = {}
 for _, record in pairs(core.magic.spells.records) do
@@ -49,8 +50,15 @@ end
 
 local function createDraft(record_id, emitter, marker_range)
     local base = core.magic.spells.records[emitter.base_spell_id]
+    -- Target shell marker is intentionally inert (invisible/silent) so vanilla
+    -- target cast animation/text keys still happen while SFP launches the real
+    -- payload only after late Spellcast_Success authorization.
+    local marker_effect_id = MARKER_EFFECT_ID_DEFAULT
+    if marker_range == 2 or marker_range == "target" or marker_range == "Target" then
+        marker_effect_id = MARKER_EFFECT_ID_TARGET
+    end
     local marker_effect = {
-        id = MARKER_EFFECT_ID,
+        id = marker_effect_id,
         range = marker_range or "self",
         area = 0,
         duration = 0,
@@ -70,7 +78,7 @@ local function createDraft(record_id, emitter, marker_range)
         "createRecordDraft called id=%s effect_count=%d marker=%s marker_range=%s",
         tostring(record_id),
         #(draft.effects or {}),
-        MARKER_EFFECT_ID,
+        tostring(marker_effect.id),
         tostring(marker_effect.range)
     ))
     return draft
