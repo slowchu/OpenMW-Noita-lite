@@ -98,14 +98,14 @@ local function createDraft(record_id, emitter, marker_range)
         effects = { marker_effect },
     }
 
-    log.info(string.format(
+    log.debug(string.format(
         "createRecordDraft called id=%s effect_count=%d marker=%s marker_range=%s",
         tostring(record_id),
         #(draft.effects or {}),
         tostring(marker_effect.id),
         tostring(marker_effect.range)
     ))
-    log.info(string.format(
+    log.debug(string.format(
         "shell marker selected root_base=%s effect_raw=%s effect_norm=%s marker=%s presentation=%s range=%s",
         tostring(emitter and emitter.base_spell_id),
         tostring(base_effect_id_raw),

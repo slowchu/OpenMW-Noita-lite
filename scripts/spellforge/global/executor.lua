@@ -437,7 +437,7 @@ function executor.onUpdate()
 end
 
 function executor.onCastDiagSignal(payload)
-    log.info(string.format(
+    log.debug(string.format(
         "diagnostic cast signal group=%s key=%s selected_spell_id=%s sender=%s",
         tostring(payload and payload.groupname),
         tostring(payload and payload.key),

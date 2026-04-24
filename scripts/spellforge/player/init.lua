@@ -358,7 +358,7 @@ local function registerSkillProgressionHandler()
     end
 
     progression.addSkillUsedHandler(function(skillid, params)
-        log.info(string.format(
+        log.debug(string.format(
             "SKILL_USED_RAW skillid=%s useType=%s",
             tostring(skillid),
             tostring(params and params.useType)
@@ -374,7 +374,7 @@ local function registerSkillProgressionHandler()
             or selected_is_cached_spellforge
 
         if should_log_diag then
-            log.info(string.format(
+            log.debug(string.format(
                 "SPELLFORGE_SKILL_USE_DIAG skillid=%s useType=%s expectedSuccess=%s skill=%s source=%s actor=%s selected_spell_id=%s pending_spell_id=%s intercept_spell_id=%s is_casting=%s pending_cast_authorized=%s",
                 tostring(skillid),
                 tostring(params and params.useType),
