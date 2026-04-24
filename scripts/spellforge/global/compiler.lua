@@ -11,6 +11,7 @@ local compiler = {}
 
 local MARKER_EFFECT_ID_DEFAULT = "spellforge_composed"
 local MARKER_EFFECT_ID_TARGET = "spellforge_marker_target"
+local MARKER_EFFECT_ID_TARGET_DESTRUCTION = "spellforge_marker_target_destruction"
 
 local KNOWN_BASE_SPELL_IDS = {}
 for _, record in pairs(core.magic.spells.records) do
@@ -55,7 +56,15 @@ local function createDraft(record_id, emitter, marker_range)
     -- payload only after late Spellcast_Success authorization.
     local marker_effect_id = MARKER_EFFECT_ID_DEFAULT
     if marker_range == 2 or marker_range == "target" or marker_range == "Target" then
-        marker_effect_id = MARKER_EFFECT_ID_TARGET
+        local base_effect = base and base.effects and base.effects[1] or nil
+        local base_effect_id = base_effect and base_effect.id or nil
+        -- For fire/destruction target shells, borrow only cast-presentation flavor
+        -- from destruction marker variant; projectile/hit/area stays inert.
+        if base_effect_id == "fireDamage" then
+            marker_effect_id = MARKER_EFFECT_ID_TARGET_DESTRUCTION
+        else
+            marker_effect_id = MARKER_EFFECT_ID_TARGET
+        end
     end
     local marker_effect = {
         id = marker_effect_id,
