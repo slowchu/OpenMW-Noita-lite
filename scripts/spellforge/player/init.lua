@@ -152,6 +152,8 @@ local function resolveSelectedSpell()
 end
 
 local function querySpellMetadata(spell_id, callback)
+    -- TODO(2.2c): replace per-cast async metadata query with a player-side metadata cache
+    -- populated ahead of cast input to avoid query/animation-start race windows.
     local request_id = string.format("spell-query-%d", os.time() + math.random(1, 100000))
     state.pending_spell_queries[request_id] = callback
     core.sendGlobalEvent(events.QUERY_SPELL_METADATA, {
