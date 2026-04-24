@@ -3,6 +3,7 @@ local input = require("openmw.input")
 local parser = require("scripts.spellforge.global.parser")
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_parser")
+local dev = require("scripts.spellforge.shared.dev")
 
 local state = {
     ran = false,
@@ -35,6 +36,9 @@ local OP = {
 }
 
 local function run()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     local cases = {
         {
             label = "single emitter",

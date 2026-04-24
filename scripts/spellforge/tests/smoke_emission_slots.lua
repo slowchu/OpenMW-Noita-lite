@@ -1,6 +1,7 @@
 local emission_slots = require("scripts.spellforge.global.emission_slots")
 local plan_cache = require("scripts.spellforge.global.plan_cache")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_emission_slots")
+local dev = require("scripts.spellforge.shared.dev")
 
 local state = {
     ran = false,
@@ -33,6 +34,9 @@ local function countSlotsBy(slots, field, value)
 end
 
 local function run()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     plan_cache.clearForTests()
 
     local single_plan = compilePlan({

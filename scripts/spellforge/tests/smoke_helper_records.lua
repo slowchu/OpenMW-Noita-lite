@@ -5,6 +5,7 @@ local helper_specs = require("scripts.spellforge.global.helper_record_specs")
 local helper_records = require("scripts.spellforge.global.helper_records")
 local plan_cache = require("scripts.spellforge.global.plan_cache")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_helper_records")
+local dev = require("scripts.spellforge.shared.dev")
 
 local state = {
     ran = false,
@@ -67,6 +68,9 @@ local function spellbookHasAny(actor, engine_ids)
 end
 
 local function run(player)
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     plan_cache.clearForTests()
     helper_records.clearForTests()
 

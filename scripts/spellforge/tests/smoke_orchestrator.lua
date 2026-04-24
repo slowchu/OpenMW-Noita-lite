@@ -2,6 +2,7 @@ local orchestrator = require("scripts.spellforge.global.orchestrator")
 local plan_cache = require("scripts.spellforge.global.plan_cache")
 local helper_records = require("scripts.spellforge.global.helper_records")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_orchestrator")
+local dev = require("scripts.spellforge.shared.dev")
 
 local state = {
     ran = false,
@@ -16,6 +17,9 @@ local function assertLine(ok, label, detail)
 end
 
 local function run()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     orchestrator.clearForTests()
 
     local one = orchestrator.enqueue({ kind = "noop" })

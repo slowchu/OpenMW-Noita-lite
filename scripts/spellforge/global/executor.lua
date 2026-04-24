@@ -36,11 +36,11 @@ end
 local function logSpellRecord(label, spell_id)
     local record = spell_id and core.magic.spells.records[spell_id] or nil
     if not record then
-        log.info(string.format("%s spell_id=%s record=nil", label, tostring(spell_id)))
+        log.debug(string.format("%s spell_id=%s record=nil", label, tostring(spell_id)))
         return
     end
 
-    log.info(string.format(
+    log.debug(string.format(
         "%s spell_id=%s name=%s type=%s cost=%s isAutocalc=%s record=%s",
         label,
         tostring(spell_id),
@@ -53,11 +53,11 @@ local function logSpellRecord(label, spell_id)
 
     local effects = record.effects
     if type(effects) ~= "table" then
-        log.info(string.format("%s spell_id=%s effects=nil", label, tostring(spell_id)))
+        log.debug(string.format("%s spell_id=%s effects=nil", label, tostring(spell_id)))
         return
     end
     for i, effect in ipairs(effects) do
-        log.info(string.format(
+        log.debug(string.format(
             "%s effect[%d] id=%s range=%s area=%s duration=%s magnitudeMin=%s magnitudeMax=%s",
             label,
             i,
@@ -126,7 +126,7 @@ local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_o
         return false, "I.MagExp.launchSpell missing"
     end
 
-    log.info(string.format(
+    log.debug(string.format(
         "executor launchSpell params attacker=%s spellId=%s startPos=%s direction=%s isFree=true hitObject=%s",
         tostring(actor and actor.recordId),
         tostring(dispatch_spell_id),
@@ -148,7 +148,7 @@ local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_o
         return false, tostring(err)
     end
 
-    log.info(string.format("executor launchSpell dispatched spell_id=%s actor=%s", tostring(dispatch_spell_id), tostring(actor and actor.recordId)))
+    log.debug(string.format("executor launchSpell dispatched spell_id=%s actor=%s", tostring(dispatch_spell_id), tostring(actor and actor.recordId)))
     return true, nil
 end
 
@@ -171,7 +171,7 @@ function executor.onCastRequest(payload)
         return
     end
 
-    log.info(string.format(
+    log.debug(string.format(
         "cast request matched recipe_id=%s logical_id=%s engine_id=%s",
         tostring(recipe_id),
         tostring(entry.frontend_logical_id),
@@ -204,7 +204,7 @@ function executor.onInterceptCast(payload)
     -- Transitional 2.2b scaffolding:
     -- root-only real_effects dispatch proves intercept->launch path, not final 2.2c runtime.
     -- TODO(2.2c): move to compiled effect-list plan execution with bounded job orchestration.
-    log.info(string.format(
+    log.debug(string.format(
         "intercept metadata root recipe_id=%s spell_id=%s real_effect_count=%s real_effects=%s",
         tostring(recipe_id),
         tostring(engine_id),
@@ -272,7 +272,7 @@ function executor.onDebugLaunchVanillaFireball(payload)
         return
     end
 
-    log.info("debug launch requested: vanilla fireball via I.MagExp.launchSpell")
+    log.debug("debug launch requested: vanilla fireball via I.MagExp.launchSpell")
     logSpellRecord("vanilla fireball record", "fireball")
 
     local ok, launch_err = launchSpell(
@@ -329,11 +329,11 @@ function executor.onBeginObserve(payload)
         end
     end)
     sendResult(sender, request_id, true, nil)
-    log.info(string.format("registered cast observe actor=%s spell_id=%s timeout=%s", tostring(actor_id), tostring(engine_id), tostring(timeout_seconds)))
+    log.debug(string.format("registered cast observe actor=%s spell_id=%s timeout=%s", tostring(actor_id), tostring(engine_id), tostring(timeout_seconds)))
 end
 
 function executor.onMagicHit(payload)
-    log.info(string.format("MagExp_OnMagicHit payload=%s", stringifyValue(payload, 4)))
+    log.debug(string.format("MagExp_OnMagicHit payload=%s", stringifyValue(payload, 4)))
     -- TODO(2.2c): execute Trigger/Timer payloads once per emission via queued jobs.
 
     local attacker_id = payload and payload.attacker and payload.attacker.recordId or nil
@@ -343,7 +343,7 @@ function executor.onMagicHit(payload)
 
     local cookie = spell_id and launch_cookies[spell_id] or nil
     if cookie then
-        log.info(string.format(
+        log.debug(string.format(
             "Spellforge hit matched recipe_id=%s spell_id=%s attacker=%s victim=%s hit_pos=%s",
             tostring(cookie.recipe_id),
             tostring(spell_id),
@@ -419,7 +419,7 @@ function executor.onPlayerAdded(player)
     player_ref = player
     last_active_spell_ids = {}
     ensureTargetFilter()
-    log.info(string.format("diagnostic onPlayerAdded player=%s", tostring(player and player.recordId)))
+    log.debug(string.format("diagnostic onPlayerAdded player=%s", tostring(player and player.recordId)))
 end
 
 function executor.onUpdate()

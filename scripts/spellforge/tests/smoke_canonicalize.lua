@@ -3,6 +3,7 @@ local input = require("openmw.input")
 local canonicalize = require("scripts.spellforge.global.canonicalize_effect_list")
 local parser = require("scripts.spellforge.global.parser")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_canonicalize")
+local dev = require("scripts.spellforge.shared.dev")
 
 local state = {
     ran = false,
@@ -21,6 +22,9 @@ local function hashFor(effects, opts)
 end
 
 local function run()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     local base_effects = {
         { id = "firedamage", range = 2, magnitudeMin = 10, magnitudeMax = 20, area = 5, duration = 2 },
         { id = "spellforge_multicast", params = { count = 3 } },

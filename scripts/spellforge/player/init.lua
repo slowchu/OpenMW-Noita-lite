@@ -395,7 +395,7 @@ local function registerSkillProgressionHandler()
         end
 
         if selected_is_cached_spellforge and not state.is_casting and state.intercept_spell_id == nil and state.pending_intercept_spell_id == nil then
-            log.info(string.format(
+            log.debug(string.format(
                 "SPELLFORGE_SKILL_SUCCESS_OUTSIDE_INTERCEPT_WINDOW useType=%s selected_spell_id=%s",
                 tostring(params.useType),
                 tostring(selected_spell_id)
@@ -404,7 +404,7 @@ local function registerSkillProgressionHandler()
 
         if state.is_casting then
             state.pending_cast_authorized = true
-            log.info(string.format(
+            log.debug(string.format(
                 "cast authorization received useType=%s active_spell_id=%s",
                 tostring(params.useType),
                 tostring(state.intercept_spell_id)
@@ -412,7 +412,7 @@ local function registerSkillProgressionHandler()
         elseif state.pending_release_spell_id then
             local late_spell_id = state.pending_release_spell_id
             clearPendingReleaseState()
-            log.info(string.format(
+            log.debug(string.format(
                 "late cast authorization received after release spell_id=%s; dispatching now",
                 tostring(late_spell_id)
             ))
@@ -421,7 +421,7 @@ local function registerSkillProgressionHandler()
     end)
 
     state.skill_handler_registered = true
-    log.info("registered skill progression Spellcast_Success handler")
+    log.debug("registered skill progression Spellcast_Success handler")
 end
 
 local function registerAnimationTextKeys()
@@ -457,7 +457,7 @@ local function registerAnimationTextKeys()
                 state.intercept_variant = pending_variant
                 state.pending_intercept_spell_id = nil
                 state.pending_intercept_variant = nil
-                log.info(string.format(
+                log.debug(string.format(
                     "intercept armed spell_id=%s variant=%s alwaysSucceed=%s authorized_initial=%s",
                     tostring(state.intercept_spell_id),
                     tostring(state.intercept_variant),
@@ -476,11 +476,11 @@ local function registerAnimationTextKeys()
             if types.Actor.getStance(self) ~= types.Actor.STANCE.Spell then
                 clearInterceptState()
                 clearPendingReleaseState()
-                log.info("intercept release aborted: stance changed")
+                log.debug("intercept release aborted: stance changed")
                 return
             end
 
-            log.info(string.format(
+            log.debug(string.format(
                 "intercept release spell_id=%s variant=%s authorized=%s",
                 tostring(spell_id),
                 tostring(variant),
@@ -500,7 +500,7 @@ local function registerAnimationTextKeys()
                         end
                         local timeout_spell_id = state.pending_release_spell_id
                         clearPendingReleaseState()
-                        log.info(string.format(
+                        log.debug(string.format(
                             "intercept release suppressed spell_id=%s reason=late authorization timeout",
                             tostring(timeout_spell_id)
                         ))
@@ -509,13 +509,13 @@ local function registerAnimationTextKeys()
                             tostring(timeout_spell_id)
                         ))
                     end)
-                    log.info(string.format(
+                    log.debug(string.format(
                         "intercept release waiting for late authorization spell_id=%s window=0.35",
                         tostring(spell_id)
                     ))
                 else
                     clearPendingReleaseState()
-                    log.info(string.format(
+                    log.debug(string.format(
                         "intercept release suppressed spell_id=%s reason=%s",
                         tostring(spell_id),
                         reason
@@ -532,12 +532,12 @@ local function registerAnimationTextKeys()
         elseif key == (variant .. " stop") then
             clearInterceptState()
             clearPendingReleaseState()
-            log.info("intercept canceled on stop key")
+            log.debug("intercept canceled on stop key")
         end
     end)
 
     state.animation_diag_registered = true
-    log.info("registered spellcast text-key handler")
+    log.debug("registered spellcast text-key handler")
 end
 
 local function onInputAction(action)
@@ -569,7 +569,7 @@ local function onInputAction(action)
     end
 
     if not canAffordSpell(selected_spell_id) then
-        log.info(string.format("intercept skipped: insufficient magicka spell_id=%s", tostring(selected_spell_id)))
+        log.debug(string.format("intercept skipped: insufficient magicka spell_id=%s", tostring(selected_spell_id)))
         return true
     end
 
@@ -577,7 +577,7 @@ local function onInputAction(action)
     state.pending_intercept_spell_id = selected_spell_id
     state.pending_intercept_variant = variant
     state.pending_cast_authorized = false
-    log.info(string.format("intercept pending spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
+    log.debug(string.format("intercept pending spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
 
     return true
 end

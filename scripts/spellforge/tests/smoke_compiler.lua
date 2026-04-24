@@ -6,6 +6,7 @@ local types = require("openmw.types")
 
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_compiler")
+local dev = require("scripts.spellforge.shared.dev")
 
 local state = {
     backend = "INIT",
@@ -189,6 +190,9 @@ local function spellbookHasSpell(actor, spell_id)
 end
 
 local function runSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     if state.running then
         log.warn("smoke run already in progress")
         return
@@ -329,6 +333,9 @@ local function runSmoke()
 end
 
 local function requestBackend()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
     state.backend = "PENDING"
     core.sendGlobalEvent(events.CHECK_BACKEND, {
         sender = self.object,
@@ -342,6 +349,9 @@ local function requestBackend()
 end
 
 local function onKeyPress(key)
+    if not dev.smokeTestsEnabled() then
+        return true
+    end
     local symbol = key.symbol and string.lower(key.symbol) or ""
     if symbol == "u" or key.code == input.KEY.U then
         log.debug("handled smoke hotkey")
@@ -354,6 +364,9 @@ end
 return {
     engineHandlers = {
         onFrame = function()
+            if not dev.smokeTestsEnabled() then
+                return
+            end
             if state.backend == "INIT" then
                 requestBackend()
             end
@@ -367,7 +380,7 @@ return {
                 state.handshake_timer = nil
             end
             state.backend = "READY"
-            log.info("backend ready for smoke harness")
+            log.debug("backend ready for smoke harness")
         end,
         [events.BACKEND_UNAVAILABLE] = function(payload)
             if state.handshake_timer then
