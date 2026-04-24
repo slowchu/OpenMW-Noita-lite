@@ -1,6 +1,7 @@
 local limits = require("scripts.spellforge.shared.limits")
 local parser = require("scripts.spellforge.global.parser")
 local canonicalize_effect_list = require("scripts.spellforge.global.canonicalize_effect_list")
+local emission_slots = require("scripts.spellforge.global.emission_slots")
 
 local plan_cache = {}
 
@@ -229,6 +230,36 @@ function plan_cache.compileOrGet(effects, opts)
         canonical = canonical.canonical,
         plan = plan,
         warnings = cloneErrors(parse_result.warnings),
+    }
+end
+
+function plan_cache.attachEmissionSlots(recipe_id, opts)
+    local plan = plan_cache.get(recipe_id)
+    if not plan then
+        return {
+            ok = false,
+            errors = {
+                { path = "recipe_id", message = string.format("No cached plan for recipe_id=%s", tostring(recipe_id)) },
+            },
+            warnings = {},
+        }
+    end
+
+    local allocated = emission_slots.allocate(plan, opts)
+    if not allocated.ok then
+        return allocated
+    end
+
+    plan.emission_slots = allocated.slots
+    plan.slot_count = allocated.slot_count
+    plan.slot_warnings = allocated.warnings
+
+    return {
+        ok = true,
+        recipe_id = recipe_id,
+        slot_count = allocated.slot_count,
+        warnings = allocated.warnings,
+        plan = plan,
     }
 end
 
