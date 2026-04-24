@@ -1,3 +1,5 @@
+local limits = require("scripts.spellforge.shared.limits")
+
 local opcodes = {
     Multicast = {
         kind = "launch_modifier",
@@ -21,6 +23,8 @@ local opcodes = {
         description = "Emit spherical burst copies of the next emitter.",
         parameters = {
             count = { type = "integer", min = 2, max = 16 },
+            -- TODO(2.2c): validate Burst+Multicast combinations against MAX_PROJECTILES_PER_CAST
+            -- during effect-list compile planning. Keep vocab/range-only validation here.
         },
     },
     ["Speed+"] = {
@@ -44,7 +48,7 @@ local opcodes = {
         display_name = "Chain",
         description = "Redirect projectile on hit to nearest actor up to N hops.",
         parameters = {
-            hops = { type = "integer", min = 1, max = 5 },
+            hops = { type = "integer", min = 1, max = limits.MAX_CHAIN_HOPS },
         },
     },
     Trigger = {
@@ -58,7 +62,7 @@ local opcodes = {
         display_name = "Timer",
         description = "Open payload scope resolved after N seconds.",
         parameters = {
-            seconds = { type = "number", min = 0.05, max = 30 },
+            seconds = { type = "number", min = 0.5, max = 5.0 },
         },
     },
 }
