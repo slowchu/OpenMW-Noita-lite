@@ -348,9 +348,43 @@ local function registerSkillProgressionHandler()
     end
 
     progression.addSkillUsedHandler(function(params)
+        local selected_spell = resolveSelectedSpell()
+        local selected_spell_id = selected_spell and selected_spell.id or state.last_selected_spell_id
+        local selected_meta = selected_spell_id and state.spell_metadata_cache[selected_spell_id] or nil
+        local selected_is_cached_spellforge = selected_meta and selected_meta.is_spellforge == true or false
+        local should_log_diag = state.pending_intercept_spell_id ~= nil
+            or state.intercept_spell_id ~= nil
+            or state.is_casting == true
+            or selected_is_cached_spellforge
+
+        if should_log_diag then
+            log.info(string.format(
+                "SPELLFORGE_SKILL_USE_DIAG useType=%s expectedSuccess=%s skill=%s source=%s actor=%s selected_spell_id=%s pending_spell_id=%s intercept_spell_id=%s is_casting=%s pending_cast_authorized=%s",
+                tostring(params and params.useType),
+                tostring(spellcast_success),
+                tostring(params and params.skill),
+                tostring(params and params.source),
+                tostring(params and params.actor),
+                tostring(selected_spell_id),
+                tostring(state.pending_intercept_spell_id),
+                tostring(state.intercept_spell_id),
+                tostring(state.is_casting),
+                tostring(state.pending_cast_authorized)
+            ))
+        end
+
         if not params or params.useType ~= spellcast_success then
             return
         end
+
+        if selected_is_cached_spellforge and not state.is_casting and state.intercept_spell_id == nil and state.pending_intercept_spell_id == nil then
+            log.info(string.format(
+                "SPELLFORGE_SKILL_SUCCESS_OUTSIDE_INTERCEPT_WINDOW useType=%s selected_spell_id=%s",
+                tostring(params.useType),
+                tostring(selected_spell_id)
+            ))
+        end
+
         if state.is_casting then
             state.pending_cast_authorized = true
             log.info(string.format(
@@ -429,10 +463,17 @@ local function registerAnimationTextKeys()
             if spell_id and authorized then
                 dispatchInterceptCast(spell_id)
             else
+                local reason = authorized and "missing spell_id" or "no authorization"
                 log.info(string.format(
                     "intercept release suppressed spell_id=%s reason=%s",
                     tostring(spell_id),
-                    authorized and "missing spell_id" or "no authorization"
+                    reason
+                ))
+                log.info(string.format(
+                    "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=%s reason=%s",
+                    tostring(spell_id),
+                    tostring(authorized),
+                    tostring(reason)
                 ))
             end
             clearInterceptState()
@@ -547,6 +588,17 @@ return {
         [events.INTERCEPT_DISPATCH_RESULT] = function(payload)
             if payload and payload.ok ~= true then
                 log.error(string.format("intercept dispatch failed spell_id=%s err=%s", tostring(payload.spell_id), tostring(payload.error)))
+                log.info(string.format(
+                    "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=unknown reason=%s",
+                    tostring(payload.spell_id),
+                    tostring(payload.error or "dispatch failed")
+                ))
+            elseif payload and payload.ok == true then
+                log.info(string.format(
+                    "SPELLFORGE_COMPILED_DISPATCH_OK spell_id=%s dispatch_count=%s",
+                    tostring(payload.spell_id),
+                    tostring(payload.dispatch_count)
+                ))
             end
         end,
     },
