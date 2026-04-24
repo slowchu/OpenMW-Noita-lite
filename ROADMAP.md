@@ -6,7 +6,8 @@
   - Compiler pipeline validated by `smoke_compiler.lua`.
   - Recipe compile/cache/createRecord/add-to-spellbook path proven.
 - **Phase 2 (Executor): in progress**
-  - Current milestone: **2.1 First Cast**.
+  - Current working milestone foundation: **2.2b Intercept Dispatch**.
+  - Transition target: **2.2c Opcode Runtime** (effect-list parser + bounded runtime queue).
 
 ## What was deliberately not proven in Phase 1
 
