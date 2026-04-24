@@ -47,12 +47,50 @@ content.magicEffects.records.spellforge_marker_target = {
 
 local fire_reference = content.magicEffects.records.fireDamage
 local destruction_marker_school = fire_reference and fire_reference.school or "destruction"
-local destruction_marker_icon = fire_reference and fire_reference.icon or nil
 local destruction_cast_static = fire_reference and fire_reference.castStatic or nil
 local destruction_cast_sound = fire_reference and fire_reference.castSound or nil
 local destruction_particle = fire_reference and fire_reference.particle or nil
--- TODO(2.2b hardening): if fire reference fields are unavailable in some content
--- stacks, provide an explicit bundled Spellforge icon/cast fallback.
+
+local function isUsableIconPath(icon_value)
+    if type(icon_value) ~= "string" then
+        return false
+    end
+    local normalized = string.lower(icon_value)
+    if normalized == "" or normalized == "icons/" or normalized == "icons/b_" then
+        return false
+    end
+    if string.sub(normalized, 1, 6) ~= "icons/" then
+        return false
+    end
+    return #normalized > 8
+end
+
+local function resolveDestructionMarkerIcon()
+    local fire_icon = fire_reference and fire_reference.icon or nil
+    if isUsableIconPath(fire_icon) then
+        return fire_icon
+    end
+
+    for _, record in pairs(content.magicEffects.records or {}) do
+        local school = record and record.school
+        local icon = record and record.icon
+        if school == destruction_marker_school and isUsableIconPath(icon) then
+            return icon
+        end
+    end
+
+    local open_reference = content.magicEffects.records.open
+    local open_icon = open_reference and open_reference.icon or nil
+    if isUsableIconPath(open_icon) then
+        return open_icon
+    end
+
+    -- TODO(2.2b hardening): if no usable icon can be resolved from runtime records,
+    -- add a bundled Spellforge icon asset and reference it explicitly here.
+    return nil
+end
+
+local destruction_marker_icon = resolveDestructionMarkerIcon()
 
 content.magicEffects.records.spellforge_marker_target_destruction = {
     name = "Spellforge Target Marker (Destruction)",

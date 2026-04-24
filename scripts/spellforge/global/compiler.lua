@@ -49,23 +49,38 @@ local function collectEmitters(nodes, out)
     end
 end
 
+local function normalizeEffectId(effect_id)
+    if effect_id == nil then
+        return nil
+    end
+    return string.lower(tostring(effect_id))
+end
+
+local function selectMarkerEffectId(base, marker_range)
+    local selected_marker = MARKER_EFFECT_ID_DEFAULT
+    local presentation = "default"
+    local base_effect = base and base.effects and base.effects[1] or nil
+    local base_effect_id_raw = base_effect and base_effect.id or nil
+    local base_effect_id_norm = normalizeEffectId(base_effect_id_raw)
+
+    if marker_range == 2 or marker_range == "target" or marker_range == "Target" then
+        selected_marker = MARKER_EFFECT_ID_TARGET
+        presentation = "target-generic"
+        if base_effect_id_norm == "firedamage" then
+            selected_marker = MARKER_EFFECT_ID_TARGET_DESTRUCTION
+            presentation = "destruction"
+        end
+    end
+
+    return selected_marker, presentation, base_effect_id_raw, base_effect_id_norm
+end
+
 local function createDraft(record_id, emitter, marker_range)
     local base = core.magic.spells.records[emitter.base_spell_id]
     -- Target shell marker is intentionally inert (invisible/silent) so vanilla
     -- target cast animation/text keys still happen while SFP launches the real
     -- payload only after late Spellcast_Success authorization.
-    local marker_effect_id = MARKER_EFFECT_ID_DEFAULT
-    if marker_range == 2 or marker_range == "target" or marker_range == "Target" then
-        local base_effect = base and base.effects and base.effects[1] or nil
-        local base_effect_id = base_effect and base_effect.id or nil
-        -- For fire/destruction target shells, borrow only cast-presentation flavor
-        -- from destruction marker variant; projectile/hit/area stays inert.
-        if base_effect_id == "fireDamage" then
-            marker_effect_id = MARKER_EFFECT_ID_TARGET_DESTRUCTION
-        else
-            marker_effect_id = MARKER_EFFECT_ID_TARGET
-        end
-    end
+    local marker_effect_id, presentation, base_effect_id_raw, base_effect_id_norm = selectMarkerEffectId(base, marker_range)
     local marker_effect = {
         id = marker_effect_id,
         range = marker_range or "self",
@@ -88,6 +103,15 @@ local function createDraft(record_id, emitter, marker_range)
         tostring(record_id),
         #(draft.effects or {}),
         tostring(marker_effect.id),
+        tostring(marker_effect.range)
+    ))
+    log.info(string.format(
+        "shell marker selected root_base=%s effect_raw=%s effect_norm=%s marker=%s presentation=%s range=%s",
+        tostring(emitter and emitter.base_spell_id),
+        tostring(base_effect_id_raw),
+        tostring(base_effect_id_norm),
+        tostring(marker_effect.id),
+        tostring(presentation),
         tostring(marker_effect.range)
     ))
     return draft
