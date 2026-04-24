@@ -9,7 +9,9 @@ local log = require("scripts.spellforge.shared.log").new("global.compiler")
 
 local compiler = {}
 
-local MARKER_EFFECT_ID = "spellforge_composed"
+local MARKER_EFFECT_ID_DEFAULT = "spellforge_composed"
+local MARKER_EFFECT_ID_TARGET = "spellforge_marker_target"
+local MARKER_EFFECT_ID_TARGET_DESTRUCTION = "spellforge_marker_target_destruction"
 
 local KNOWN_BASE_SPELL_IDS = {}
 for _, record in pairs(core.magic.spells.records) do
@@ -34,6 +36,9 @@ local function cloneEffects(effects)
 end
 
 local function collectEmitters(nodes, out)
+    -- Transitional 2.2b scaffolding:
+    -- this walks prototype node trees instead of parsing ordered effect lists.
+    -- TODO(2.2c): replace with effect-list parser + emitter-group binding.
     for _, node in ipairs(nodes or {}) do
         if node.kind == "emitter" then
             out[#out + 1] = node
@@ -44,10 +49,40 @@ local function collectEmitters(nodes, out)
     end
 end
 
+local function normalizeEffectId(effect_id)
+    if effect_id == nil then
+        return nil
+    end
+    return string.lower(tostring(effect_id))
+end
+
+local function selectMarkerEffectId(base, marker_range)
+    local selected_marker = MARKER_EFFECT_ID_DEFAULT
+    local presentation = "default"
+    local base_effect = base and base.effects and base.effects[1] or nil
+    local base_effect_id_raw = base_effect and base_effect.id or nil
+    local base_effect_id_norm = normalizeEffectId(base_effect_id_raw)
+
+    if marker_range == 2 or marker_range == "target" or marker_range == "Target" then
+        selected_marker = MARKER_EFFECT_ID_TARGET
+        presentation = "target-generic"
+        if base_effect_id_norm == "firedamage" then
+            selected_marker = MARKER_EFFECT_ID_TARGET_DESTRUCTION
+            presentation = "destruction"
+        end
+    end
+
+    return selected_marker, presentation, base_effect_id_raw, base_effect_id_norm
+end
+
 local function createDraft(record_id, emitter, marker_range)
     local base = core.magic.spells.records[emitter.base_spell_id]
+    -- Target shell marker is intentionally inert (invisible/silent) so vanilla
+    -- target cast animation/text keys still happen while SFP launches the real
+    -- payload only after late Spellcast_Success authorization.
+    local marker_effect_id, presentation, base_effect_id_raw, base_effect_id_norm = selectMarkerEffectId(base, marker_range)
     local marker_effect = {
-        id = MARKER_EFFECT_ID,
+        id = marker_effect_id,
         range = marker_range or "self",
         area = 0,
         duration = 0,
@@ -63,11 +98,20 @@ local function createDraft(record_id, emitter, marker_range)
         effects = { marker_effect },
     }
 
-    log.info(string.format(
+    log.debug(string.format(
         "createRecordDraft called id=%s effect_count=%d marker=%s marker_range=%s",
         tostring(record_id),
         #(draft.effects or {}),
-        MARKER_EFFECT_ID,
+        tostring(marker_effect.id),
+        tostring(marker_effect.range)
+    ))
+    log.debug(string.format(
+        "shell marker selected root_base=%s effect_raw=%s effect_norm=%s marker=%s presentation=%s range=%s",
+        tostring(emitter and emitter.base_spell_id),
+        tostring(base_effect_id_raw),
+        tostring(base_effect_id_norm),
+        tostring(marker_effect.id),
+        tostring(presentation),
         tostring(marker_effect.range)
     ))
     return draft
@@ -124,6 +168,8 @@ function compiler.compile(actor, recipe, request_id)
     log.info(string.format("validation passed node_count=%d", node_count))
 
     local canonical = canonicalize.run(recipe)
+    -- TODO(2.2c): cache compiled plans by canonical effect-list recipe hash/version,
+    -- distinct from this transitional generated-record metadata cache.
     local cached = nil
     if not debug_marker_range_from_root then
         cached = records.getByRecipeId(canonical.recipe_id)
@@ -165,6 +211,8 @@ function compiler.compile(actor, recipe, request_id)
     local generated_spell_ids = {}
     local generated_engine_spell_ids = {}
     local node_metadata = {}
+    -- TODO(2.2c): allocate per-emission helper records up to MAX_PROJECTILES_PER_CAST
+    -- as structural cookies for unambiguous hit routing.
 
     for idx, emitter in ipairs(emitters) do
         local logical_id = string.format("spellforge_%s_n%d", canonical.recipe_id, idx - 1)
