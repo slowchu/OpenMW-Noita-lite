@@ -1,0 +1,3 @@
+# Spellforge smoke helper specs harness
+LOAD: scripts/spellforge/context/effects.lua
+PLAYER: scripts/spellforge/tests/smoke_helper_specs.lua
