@@ -56,6 +56,10 @@ local function fnv1a32(input)
 end
 
 function canonicalize.run(recipe)
+    -- Transitional note:
+    -- Current canonicalization hashes prototype node tables from 2.2b scaffolding.
+    -- TODO(2.2c): canonicalize the ordered effect list including effect IDs, ranges,
+    -- magnitudes, area, duration, operator IDs, operator params, and compiler version.
     local canonical = serializeRecipe(recipe)
     return {
         canonical = canonical,

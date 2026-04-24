@@ -1,3 +1,4 @@
 # Spellforge main
+LOAD: scripts/spellforge/context/effects.lua
 GLOBAL: scripts/spellforge/global/init.lua
 PLAYER: scripts/spellforge/player/init.lua

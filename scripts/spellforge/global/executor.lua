@@ -201,6 +201,9 @@ function executor.onInterceptCast(payload)
     end
 
     local dispatched = 0
+    -- Transitional 2.2b scaffolding:
+    -- root-only real_effects dispatch proves intercept->launch path, not final 2.2c runtime.
+    -- TODO(2.2c): move to compiled effect-list plan execution with bounded job orchestration.
     log.info(string.format(
         "intercept metadata root recipe_id=%s spell_id=%s real_effect_count=%s real_effects=%s",
         tostring(recipe_id),
@@ -210,7 +213,7 @@ function executor.onInterceptCast(payload)
     ))
 
     for effect_index, effect in ipairs(root.real_effects or {}) do
-        log.info(string.format(
+        log.debug(string.format(
             "intercept real_effect[%d] id=%s range=%s area=%s duration=%s magnitudeMin=%s magnitudeMax=%s",
             effect_index,
             tostring(effect.id),
@@ -331,6 +334,7 @@ end
 
 function executor.onMagicHit(payload)
     log.info(string.format("MagExp_OnMagicHit payload=%s", stringifyValue(payload, 4)))
+    -- TODO(2.2c): execute Trigger/Timer payloads once per emission via queued jobs.
 
     local attacker_id = payload and payload.attacker and payload.attacker.recordId or nil
     local victim_id = payload and payload.target and payload.target.recordId or nil
@@ -391,16 +395,16 @@ local function ensureTargetFilter()
     interfaces.MagExp.setTargetFilter(function(target)
         local target_id = target and target.recordId or nil
         if target == nil then
-            log.info("target filter target=nil result=true")
+            log.debug("target filter target=nil result=true")
             return true
         end
         local health = types.Actor.stats.dynamic.health(target)
         if not health then
-            log.info(string.format("target filter target=%s health=nil result=true", tostring(target_id)))
+            log.debug(string.format("target filter target=%s health=nil result=true", tostring(target_id)))
             return true
         end
         local allow = (health.current or 0) > 0
-        log.info(string.format(
+        log.debug(string.format(
             "target filter target=%s health=%s result=%s",
             tostring(target_id),
             tostring(health.current),
@@ -408,6 +412,7 @@ local function ensureTargetFilter()
         ))
         return allow
     end)
+    -- TODO(2.2c): route launch/hit work through a central bounded job queue/orchestrator.
 end
 
 function executor.onPlayerAdded(player)
@@ -432,7 +437,7 @@ function executor.onUpdate()
 end
 
 function executor.onCastDiagSignal(payload)
-    log.info(string.format(
+    log.debug(string.format(
         "diagnostic cast signal group=%s key=%s selected_spell_id=%s sender=%s",
         tostring(payload and payload.groupname),
         tostring(payload and payload.key),
