@@ -3,6 +3,7 @@ local parser = require("scripts.spellforge.global.parser")
 local canonicalize_effect_list = require("scripts.spellforge.global.canonicalize_effect_list")
 local emission_slots = require("scripts.spellforge.global.emission_slots")
 local helper_record_specs = require("scripts.spellforge.global.helper_record_specs")
+local helper_records = require("scripts.spellforge.global.helper_records")
 
 local plan_cache = {}
 
@@ -298,6 +299,48 @@ function plan_cache.attachHelperSpecs(recipe_id, opts)
         recipe_id = recipe_id,
         spec_count = generated.spec_count,
         warnings = generated.warnings,
+        plan = plan,
+    }
+end
+
+function plan_cache.attachHelperRecords(recipe_id, opts)
+    local plan = plan_cache.get(recipe_id)
+    if not plan then
+        return {
+            ok = false,
+            errors = {
+                { path = "recipe_id", message = string.format("No cached plan for recipe_id=%s", tostring(recipe_id)) },
+            },
+            warnings = {},
+        }
+    end
+
+    if type(plan.helper_specs) ~= "table" or #plan.helper_specs == 0 then
+        local attached_specs = plan_cache.attachHelperSpecs(recipe_id, opts)
+        if not attached_specs.ok then
+            return attached_specs
+        end
+        plan = attached_specs.plan
+    end
+
+    local materialized = helper_records.materialize({
+        recipe_id = plan.recipe_id,
+        specs = plan.helper_specs,
+    }, opts)
+    if not materialized.ok then
+        return materialized
+    end
+
+    plan.helper_records = materialized.records
+    plan.helper_record_count = materialized.record_count
+    plan.helper_records_reused = materialized.reused
+
+    return {
+        ok = true,
+        recipe_id = recipe_id,
+        record_count = materialized.record_count,
+        reused = materialized.reused,
+        warnings = materialized.warnings,
         plan = plan,
     }
 end
