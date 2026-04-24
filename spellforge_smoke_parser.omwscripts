@@ -1,0 +1,3 @@
+# Spellforge smoke parser harness
+LOAD: scripts/spellforge/context/effects.lua
+PLAYER: scripts/spellforge/tests/smoke_parser.lua
