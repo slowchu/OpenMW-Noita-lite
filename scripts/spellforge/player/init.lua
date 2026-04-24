@@ -18,6 +18,9 @@ local state = {
     is_casting = false,
     animation_diag_registered = false,
     pending_spell_queries = {},
+    spell_metadata_cache = {},
+    pending_metadata_by_spell_id = {},
+    last_selected_spell_id = nil,
     pending_intercept_spell_id = nil,
     pending_intercept_variant = nil,
     intercept_spell_id = nil,
@@ -163,6 +166,47 @@ local function querySpellMetadata(spell_id, callback)
             state.pending_spell_queries[request_id] = nil
             cb({ is_spellforge = false, error = "metadata query timeout" })
         end
+    end)
+end
+
+local function refreshSpellMetadata(spell_id, reason)
+    if type(spell_id) ~= "string" or spell_id == "" then
+        return
+    end
+    if state.backend ~= "READY" then
+        return
+    end
+    if state.pending_metadata_by_spell_id[spell_id] then
+        return
+    end
+
+    state.pending_metadata_by_spell_id[spell_id] = true
+    querySpellMetadata(spell_id, function(meta)
+        state.pending_metadata_by_spell_id[spell_id] = nil
+        if type(meta) ~= "table" then
+            state.spell_metadata_cache[spell_id] = {
+                is_spellforge = false,
+                updated_at = os.time(),
+                error = "invalid metadata response",
+            }
+            return
+        end
+
+        state.spell_metadata_cache[spell_id] = {
+            is_spellforge = meta.is_spellforge == true,
+            recipe_id = meta.recipe_id,
+            root_base_spell_id = meta.root_base_spell_id,
+            frontend_spell_id = meta.frontend_spell_id,
+            updated_at = os.time(),
+            reason = reason,
+            error = meta.error,
+        }
+        log.debug(string.format(
+            "metadata cache updated spell_id=%s is_spellforge=%s reason=%s",
+            tostring(spell_id),
+            tostring(meta.is_spellforge == true),
+            tostring(reason)
+        ))
     end)
 end
 
@@ -417,26 +461,29 @@ local function onInputAction(action)
         return true
     end
 
-    querySpellMetadata(selected_spell_id, function(meta)
-        if not meta or meta.is_spellforge ~= true then
-            return
-        end
+    local meta = state.spell_metadata_cache[selected_spell_id]
+    if not meta then
+        refreshSpellMetadata(selected_spell_id, "input-miss")
+        return true
+    end
+    if meta.is_spellforge ~= true then
+        return true
+    end
 
-        if state.is_casting or state.pending_intercept_spell_id ~= nil then
-            return
-        end
+    if state.is_casting or state.pending_intercept_spell_id ~= nil then
+        return true
+    end
 
-        if not canAffordSpell(selected_spell_id) then
-            log.info(string.format("intercept skipped: insufficient magicka spell_id=%s", tostring(selected_spell_id)))
-            return
-        end
+    if not canAffordSpell(selected_spell_id) then
+        log.info(string.format("intercept skipped: insufficient magicka spell_id=%s", tostring(selected_spell_id)))
+        return true
+    end
 
-        local variant = classifyVariant(meta.root_base_spell_id)
-        state.pending_intercept_spell_id = selected_spell_id
-        state.pending_intercept_variant = variant
-        state.pending_cast_authorized = false
-        log.info(string.format("intercept pending spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
-    end)
+    local variant = classifyVariant(meta.root_base_spell_id)
+    state.pending_intercept_spell_id = selected_spell_id
+    state.pending_intercept_variant = variant
+    state.pending_cast_authorized = false
+    log.info(string.format("intercept pending spell_id=%s variant=%s", tostring(selected_spell_id), tostring(variant)))
 
     return true
 end
@@ -460,6 +507,17 @@ return {
         onFrame = function()
             if state.backend == "INIT" then
                 requestBackend()
+                return
+            end
+            if state.backend ~= "READY" then
+                return
+            end
+
+            local selected = resolveSelectedSpell()
+            local selected_spell_id = selected and selected.id or nil
+            if selected_spell_id ~= state.last_selected_spell_id then
+                state.last_selected_spell_id = selected_spell_id
+                refreshSpellMetadata(selected_spell_id, "selected-changed")
             end
         end,
         onKeyPress = onKeyPress,
@@ -472,13 +530,18 @@ return {
             registerAnimationTextKeys()
         end,
         [events.BACKEND_UNAVAILABLE] = onBackendUnavailable,
-        [events.COMPILE_RESULT] = onCompileResult,
         [events.QUERY_SPELL_METADATA_RESULT] = function(payload)
             local request_id = payload and payload.request_id
             local cb = request_id and state.pending_spell_queries[request_id]
             if cb then
                 state.pending_spell_queries[request_id] = nil
                 cb(payload)
+            end
+        end,
+        [events.COMPILE_RESULT] = function(payload)
+            onCompileResult(payload)
+            if payload and payload.ok and payload.spell_id then
+                refreshSpellMetadata(payload.spell_id, "compile-result")
             end
         end,
         [events.INTERCEPT_DISPATCH_RESULT] = function(payload)

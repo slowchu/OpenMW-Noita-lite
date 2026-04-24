@@ -16,7 +16,7 @@ This file tracks transitional implementation status.
 
 - Current compiler/executor code still includes prototype scaffolding for:
   - root-only `real_effects` dispatch
-  - metadata-query-driven intercept arming
+  - metadata query fallback when player cache misses
   - graph-oriented recipe-node assumptions in validator/canonicalization code paths
 - These are transitional and should not be treated as final 2.2c runtime architecture.
 
