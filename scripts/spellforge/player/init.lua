@@ -26,6 +26,8 @@ local state = {
     intercept_spell_id = nil,
     intercept_variant = nil,
     pending_cast_authorized = false,
+    pending_release_spell_id = nil,
+    pending_release_timer = nil,
     skill_handler_registered = false,
 }
 
@@ -314,6 +316,14 @@ local function clearInterceptState()
     state.pending_cast_authorized = false
 end
 
+local function clearPendingReleaseState()
+    if state.pending_release_timer then
+        state.pending_release_timer:cancel()
+        state.pending_release_timer = nil
+    end
+    state.pending_release_spell_id = nil
+end
+
 local function spellAlwaysSucceeds(spell_id)
     local spell_record = spell_id and core.magic.spells.records[spell_id] or nil
     if type(spell_record) ~= "table" then
@@ -399,6 +409,14 @@ local function registerSkillProgressionHandler()
                 tostring(params.useType),
                 tostring(state.intercept_spell_id)
             ))
+        elseif state.pending_release_spell_id then
+            local late_spell_id = state.pending_release_spell_id
+            clearPendingReleaseState()
+            log.info(string.format(
+                "late cast authorization received after release spell_id=%s; dispatching now",
+                tostring(late_spell_id)
+            ))
+            dispatchInterceptCast(late_spell_id)
         end
     end)
 
@@ -457,6 +475,7 @@ local function registerAnimationTextKeys()
 
             if types.Actor.getStance(self) ~= types.Actor.STANCE.Spell then
                 clearInterceptState()
+                clearPendingReleaseState()
                 log.info("intercept release aborted: stance changed")
                 return
             end
@@ -469,23 +488,50 @@ local function registerAnimationTextKeys()
             ))
             if spell_id and authorized then
                 dispatchInterceptCast(spell_id)
+                clearPendingReleaseState()
             else
                 local reason = authorized and "missing spell_id" or "no authorization"
-                log.info(string.format(
-                    "intercept release suppressed spell_id=%s reason=%s",
-                    tostring(spell_id),
-                    reason
-                ))
-                log.info(string.format(
-                    "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=%s reason=%s",
-                    tostring(spell_id),
-                    tostring(authorized),
-                    tostring(reason)
-                ))
+                if spell_id and not authorized then
+                    clearPendingReleaseState()
+                    state.pending_release_spell_id = spell_id
+                    state.pending_release_timer = async:newUnsavableSimulationTimer(0.35, function()
+                        if not state.pending_release_spell_id then
+                            return
+                        end
+                        local timeout_spell_id = state.pending_release_spell_id
+                        clearPendingReleaseState()
+                        log.info(string.format(
+                            "intercept release suppressed spell_id=%s reason=late authorization timeout",
+                            tostring(timeout_spell_id)
+                        ))
+                        log.info(string.format(
+                            "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=false reason=late authorization timeout",
+                            tostring(timeout_spell_id)
+                        ))
+                    end)
+                    log.info(string.format(
+                        "intercept release waiting for late authorization spell_id=%s window=0.35",
+                        tostring(spell_id)
+                    ))
+                else
+                    clearPendingReleaseState()
+                    log.info(string.format(
+                        "intercept release suppressed spell_id=%s reason=%s",
+                        tostring(spell_id),
+                        reason
+                    ))
+                    log.info(string.format(
+                        "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=%s reason=%s",
+                        tostring(spell_id),
+                        tostring(authorized),
+                        tostring(reason)
+                    ))
+                end
             end
             clearInterceptState()
         elseif key == (variant .. " stop") then
             clearInterceptState()
+            clearPendingReleaseState()
             log.info("intercept canceled on stop key")
         end
     end)
@@ -518,7 +564,7 @@ local function onInputAction(action)
         return true
     end
 
-    if state.is_casting or state.pending_intercept_spell_id ~= nil then
+    if state.is_casting or state.pending_intercept_spell_id ~= nil or state.pending_release_spell_id ~= nil then
         return true
     end
 
