@@ -27,4 +27,5 @@ This file tracks transitional implementation status.
 - No real opcode runtime is complete yet (no final Trigger/Timer/Multicast/Burst/Spread/Chain/Speed+/Size+ runtime behavior).
 - 2.2c.1 parser skeleton now exists for effect-list grouping/binding validation, but it is not wired into live 2.2b casting yet.
 - 2.2c.2 canonical effect-list hashing now exists (including operator params and compiler-version salt), but it is not wired into live 2.2b casting yet.
+- 2.2c.3 compiled effect-list plan cache shape now exists (staged-only in-memory, not wired into live 2.2b casting yet).
 - Existing node-graph compiler path remains transitional scaffolding until a later migration PR.
