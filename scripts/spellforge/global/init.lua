@@ -2,6 +2,7 @@ local core = require("openmw.core")
 local interfaces = require("openmw.interfaces")
 
 local compiler = require("scripts.spellforge.global.compiler")
+local dev_launch = require("scripts.spellforge.global.dev_launch")
 local executor = require("scripts.spellforge.global.executor")
 local events = require("scripts.spellforge.shared.events")
 local records = require("scripts.spellforge.global.records")
@@ -135,6 +136,13 @@ return {
         [events.CAST_REQUEST] = executor.onCastRequest,
         [events.INTERCEPT_CAST] = executor.onInterceptCast,
         [events.DEBUG_LAUNCH_VANILLA_FIREBALL] = executor.onDebugLaunchVanillaFireball,
+        [events.DEV_LAUNCH_SIMPLE_EMITTER] = dev_launch.onSimpleEmitterRequest,
+        [events.DEV_LAUNCH_MULTICAST_EMITTER] = dev_launch.onMulticastEmitterRequest,
+        [events.DEV_LAUNCH_SPREAD_EMITTER] = dev_launch.onSpreadEmitterRequest,
+        [events.DEV_LAUNCH_BURST_EMITTER] = dev_launch.onBurstEmitterRequest,
+        [events.DEV_LAUNCH_TIMER_EMITTER] = dev_launch.onTimerEmitterRequest,
+        [events.DEV_LAUNCH_TRIGGER_EMITTER] = dev_launch.onTriggerEmitterRequest,
+        [events.DEV_LAUNCH_PROBE_UNKNOWN_HELPER] = dev_launch.onProbeUnknownHelper,
         [events.BEGIN_CAST_OBSERVE] = executor.onBeginObserve,
         [events.CAST_DIAG_SIGNAL] = executor.onCastDiagSignal,
         MagExp_OnMagicHit = executor.onMagicHit,

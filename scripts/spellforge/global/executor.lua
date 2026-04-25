@@ -4,7 +4,10 @@ local interfaces = require("openmw.interfaces")
 local types = require("openmw.types")
 local util = require("openmw.util")
 
+local dev = require("scripts.spellforge.shared.dev")
 local events = require("scripts.spellforge.shared.events")
+local dev_launch = require("scripts.spellforge.global.dev_launch")
+local dev_runtime = require("scripts.spellforge.global.dev_runtime")
 local log = require("scripts.spellforge.shared.log").new("global.executor")
 local records = require("scripts.spellforge.global.records")
 
@@ -17,6 +20,8 @@ local launch_cookies = {}
 local player_ref = nil
 local last_active_spell_ids = {}
 local fireball_logged = false
+local DISPATCH_KIND_COMPILED = "compiled_spellforge"
+local DISPATCH_KIND_DEBUG_FIREBALL = "debug_vanilla_fireball"
 
 local function stringifyValue(value, depth)
     if depth <= 0 then
@@ -194,6 +199,7 @@ function executor.onInterceptCast(payload)
         log.error(string.format("intercept cast missing metadata for spell_id=%s", tostring(engine_id)))
         sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
             ok = false,
+            dispatch_kind = DISPATCH_KIND_COMPILED,
             spell_id = engine_id,
             error = "metadata not found",
         })
@@ -227,6 +233,7 @@ function executor.onInterceptCast(payload)
         if not dispatch_spell_id then
             sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
                 ok = false,
+                dispatch_kind = DISPATCH_KIND_COMPILED,
                 spell_id = engine_id,
                 error = dispatch_err,
             })
@@ -243,6 +250,7 @@ function executor.onInterceptCast(payload)
         if not ok then
             sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
                 ok = false,
+                dispatch_kind = DISPATCH_KIND_COMPILED,
                 spell_id = engine_id,
                 error = launch_err,
             })
@@ -259,6 +267,7 @@ function executor.onInterceptCast(payload)
 
     sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
         ok = dispatched > 0,
+        dispatch_kind = DISPATCH_KIND_COMPILED,
         spell_id = engine_id,
         recipe_id = recipe_id,
         dispatch_count = dispatched,
@@ -286,6 +295,7 @@ function executor.onDebugLaunchVanillaFireball(payload)
         if type(sender.sendEvent) == "function" then
             sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
                 ok = false,
+                dispatch_kind = DISPATCH_KIND_DEBUG_FIREBALL,
                 spell_id = "fireball",
                 error = launch_err,
             })
@@ -301,6 +311,7 @@ function executor.onDebugLaunchVanillaFireball(payload)
     if type(sender.sendEvent) == "function" then
         sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
             ok = true,
+            dispatch_kind = DISPATCH_KIND_DEBUG_FIREBALL,
             spell_id = "fireball",
             recipe_id = "debug_vanilla_fireball",
             dispatch_count = 1,
@@ -334,12 +345,17 @@ end
 
 function executor.onMagicHit(payload)
     log.debug(string.format("MagExp_OnMagicHit payload=%s", stringifyValue(payload, 4)))
-    -- TODO(2.2c): execute Trigger/Timer payloads once per emission via queued jobs.
+    -- Dev-only 2.2c helper hits route through dev_runtime; live 2.2b dispatch cookies stay unchanged.
 
     local attacker_id = payload and payload.attacker and payload.attacker.recordId or nil
     local victim_id = payload and payload.target and payload.target.recordId or nil
     local spell_id = payload and (payload.spellId or payload.spell_id) or nil
     local hit_pos = payload and payload.hitPos or nil
+    local helper_hit = dev.devLaunchEnabled() and type(spell_id) == "string" and dev_runtime.resolveHelperHit(payload) or nil
+    local helper_mapping = helper_hit and helper_hit.ok and helper_hit.mapping or nil
+    if helper_mapping then
+        dev_launch.onHelperHit(helper_hit)
+    end
 
     local cookie = spell_id and launch_cookies[spell_id] or nil
     if cookie then
@@ -356,6 +372,8 @@ function executor.onMagicHit(payload)
     local recipe_id = nil
     if cookie then
         recipe_id = cookie.recipe_id
+    elseif helper_mapping then
+        recipe_id = helper_mapping.recipe_id
     elseif type(spell_id) == "string" then
         recipe_id = select(1, findSpellforgeEntry(spell_id))
     end

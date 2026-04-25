@@ -22,4 +22,17 @@ events.INTERCEPT_CAST = "Spellforge_InterceptCast"
 events.INTERCEPT_DISPATCH_RESULT = "Spellforge_InterceptDispatchResult"
 events.DEBUG_LAUNCH_VANILLA_FIREBALL = "Spellforge_DebugLaunchVanillaFireball"
 
+events.DEV_LAUNCH_SIMPLE_EMITTER = "Spellforge_DevLaunchSimpleEmitter"
+events.DEV_LAUNCH_MULTICAST_EMITTER = "Spellforge_DevLaunchMulticastEmitter"
+events.DEV_LAUNCH_SPREAD_EMITTER = "Spellforge_DevLaunchSpreadEmitter"
+events.DEV_LAUNCH_BURST_EMITTER = "Spellforge_DevLaunchBurstEmitter"
+events.DEV_LAUNCH_TIMER_EMITTER = "Spellforge_DevLaunchTimerEmitter"
+events.DEV_LAUNCH_TRIGGER_EMITTER = "Spellforge_DevLaunchTriggerEmitter"
+events.DEV_LAUNCH_RESULT = "Spellforge_DevLaunchResult"
+events.DEV_LAUNCH_TIMER_RESULT = "Spellforge_DevLaunchTimerResult"
+events.DEV_LAUNCH_TRIGGER_RESULT = "Spellforge_DevLaunchTriggerResult"
+events.DEV_LAUNCH_HIT_OBSERVED = "Spellforge_DevLaunchHitObserved"
+events.DEV_LAUNCH_PROBE_UNKNOWN_HELPER = "Spellforge_DevLaunchProbeUnknownHelper"
+events.DEV_LAUNCH_LOOKUP_RESULT = "Spellforge_DevLaunchLookupResult"
+
 return events

@@ -184,6 +184,7 @@ function parser.parseEffectList(effects, opts)
         return group
     end
 
+    local stop_after_payload = false
     for index, effect in ipairs(effects) do
         if type(effect) ~= "table" then
             appendError(errors, index, "Effect must be a table")
@@ -218,6 +219,7 @@ function parser.parseEffectList(effects, opts)
                             effects = cloneEffectSlice(effects, index + 1),
                             note = "Trigger/Timer payload executes once per emission (runtime, not implemented in parser skeleton)",
                         }
+                        stop_after_payload = true
                     end
                 end
             else
@@ -226,6 +228,9 @@ function parser.parseEffectList(effects, opts)
                 end
                 flushEmitter(effect, index)
             end
+        end
+        if stop_after_payload then
+            break
         end
     end
 

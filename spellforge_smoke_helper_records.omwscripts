@@ -1,3 +1,2 @@
-# Spellforge smoke helper records harness
-LOAD: scripts/spellforge/context/effects.lua
+# Spellforge smoke helper records harness add-on; load with spellforge.omwscripts
 GLOBAL: scripts/spellforge/tests/smoke_helper_records.lua

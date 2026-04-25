@@ -112,6 +112,19 @@ local function run()
             end,
         },
         {
+            label = "pattern valid spread+multicast",
+            effects = {
+                { id = OP.spread, params = { preset = 2 } },
+                { id = OP.multicast, params = { count = 3 } },
+                { id = "firedamage", range = 2 },
+            },
+            expect_ok = true,
+            check = function(result)
+                local g = result.groups and result.groups[1]
+                return g and #g.prefix_ops == 2 and g.prefix_ops[1].opcode == "Spread" and g.prefix_ops[2].opcode == "Multicast"
+            end,
+        },
+        {
             label = "pattern invalid burst without multicast",
             effects = {
                 { id = OP.burst, params = { count = 4 } },
@@ -132,7 +145,8 @@ local function run()
             expect_ok = true,
             check = function(result)
                 local g = result.groups and result.groups[1]
-                return g and #g.postfix_ops == 1 and g.postfix_ops[1].opcode == "Trigger" and g.payload ~= nil
+                return g and #result.groups == 1 and #g.effects == 1
+                    and #g.postfix_ops == 1 and g.postfix_ops[1].opcode == "Trigger" and g.payload ~= nil
             end,
         },
         {
@@ -156,7 +170,8 @@ local function run()
             expect_ok = true,
             check = function(result)
                 local g = result.groups and result.groups[1]
-                return g and #g.postfix_ops == 1 and g.postfix_ops[1].opcode == "Timer"
+                return g and #result.groups == 1 and #g.effects == 1
+                    and #g.postfix_ops == 1 and g.postfix_ops[1].opcode == "Timer"
             end,
         },
         {

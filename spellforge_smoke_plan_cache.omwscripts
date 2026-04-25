@@ -1,3 +1,2 @@
-# Spellforge smoke plan cache harness
-LOAD: scripts/spellforge/context/effects.lua
+# Spellforge smoke plan cache harness add-on; load with spellforge.omwscripts
 GLOBAL: scripts/spellforge/tests/smoke_plan_cache.lua

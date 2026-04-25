@@ -49,6 +49,20 @@ local function cloneEffects(effects)
     return out
 end
 
+local function cloneOps(ops)
+    local out = {}
+    for i, op in ipairs(ops or {}) do
+        out[i] = {
+            opcode = op.opcode,
+            effect_id = op.effect_id,
+            params = cloneParams(op.params),
+            index = op.index,
+            payload_scope = op.payload_scope,
+        }
+    end
+    return out
+end
+
 local function buildDraft(spec)
     return core.magic.spells.createRecordDraft {
         id = spec.logical_id,
@@ -65,6 +79,7 @@ local function toMapping(spec, engine_id, reused)
         slot_id = spec.slot_id,
         group_index = spec.routing and spec.routing.group_index or nil,
         emission_index = spec.routing and spec.routing.emission_index or nil,
+        kind = spec.routing and spec.routing.kind or nil,
         parent_slot_id = spec.routing and spec.routing.parent_slot_id or nil,
         trigger_source_slot_id = spec.routing and spec.routing.trigger_source_slot_id or nil,
         timer_source_slot_id = spec.routing and spec.routing.timer_source_slot_id or nil,
@@ -75,6 +90,8 @@ local function toMapping(spec, engine_id, reused)
         visible_to_player = spec.visible_to_player == true,
         effects = cloneEffects(spec.effects),
         payload_bindings = spec.routing and spec.routing.payload_bindings or nil,
+        prefix_ops = cloneOps(spec.routing and spec.routing.prefix_ops),
+        postfix_ops = cloneOps(spec.routing and spec.routing.postfix_ops),
         reused = reused == true,
     }
 end

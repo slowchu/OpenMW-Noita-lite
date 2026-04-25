@@ -119,9 +119,20 @@ local function run()
     })
     local timer = emission_slots.allocate(timer_plan)
     local timer_payload_slots = countSlotsBy(timer.slots, "source_postfix_opcode", "Timer")
+    local timer_sources_clean = true
+    for _, slot in ipairs(timer.slots or {}) do
+        if slot.kind == "primary_emission" then
+            local first = slot.effects and slot.effects[1] or nil
+            if type(slot.effects) ~= "table" or #slot.effects ~= 1 or string.lower(tostring(first and first.id)) ~= "firedamage" then
+                timer_sources_clean = false
+                break
+            end
+        end
+    end
     assertLine(timer.ok == true, "6 timer allocation ok")
     assertLine(countSlotsBy(timer.slots, "kind", "primary_emission") == 2, "6 timer has 2 primary slots")
     assertLine(timer_payload_slots == 2, "6 timer has 2 payload slot executions")
+    assertLine(timer_sources_clean, "6 timer source slots exclude payload effects")
 
     local cap_plan = compilePlan({
         { id = "spellforge_multicast", params = { count = 8 } },
