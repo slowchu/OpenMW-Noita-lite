@@ -10,6 +10,9 @@ local util = require("openmw.util")
 
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("player.init")
+local dev = require("scripts.spellforge.shared.dev")
+
+local DEV_COMPILE_BASE_SPELL_ID = "fireball"
 
 local state = {
     backend = "INIT",
@@ -31,11 +34,9 @@ local state = {
     skill_handler_registered = false,
 }
 
-local function firstKnownSpellId()
-    for _, record in pairs(core.magic.spells.records) do
-        if record and type(record.id) == "string" and record.id ~= "" then
-            return record.id
-        end
+local function resolveDevCompileBaseSpellId()
+    if core.magic.spells.records[DEV_COMPILE_BASE_SPELL_ID] then
+        return DEV_COMPILE_BASE_SPELL_ID
     end
     return nil
 end
@@ -74,9 +75,12 @@ local function compileHardcodedRecipe()
         return
     end
 
-    local base_spell_id = firstKnownSpellId()
+    local base_spell_id = resolveDevCompileBaseSpellId()
     if not base_spell_id then
-        log.error("compile hotkey failed: no base spell IDs available")
+        log.error(string.format(
+            "dev compile hotkey refused: required fixture base spell missing id=%s",
+            DEV_COMPILE_BASE_SPELL_ID
+        ))
         return
     end
 
@@ -585,15 +589,83 @@ end
 local function onKeyPress(key)
     local symbol = key.symbol and string.lower(key.symbol) or ""
     if symbol == "k" or key.code == input.KEY.K then
+        if not dev.devHotkeysEnabled() then
+            return true
+        end
         log.debug("handled dev compile hotkey")
         compileHardcodedRecipe()
         return false
     end
     if symbol == "v" or key.code == input.KEY.V then
+        if not dev.debugLaunchEnabled() then
+            return true
+        end
         sendDebugVanillaFireball()
         return false
     end
     return true
+end
+
+local function classifyDispatchResult(payload)
+    if type(payload) ~= "table" then
+        return nil
+    end
+    if type(payload.dispatch_kind) == "string" then
+        return payload.dispatch_kind
+    end
+    if payload.recipe_id == "debug_vanilla_fireball" then
+        return "debug_vanilla_fireball"
+    end
+    if payload.recipe_id ~= nil then
+        return "compiled_spellforge"
+    end
+    return nil
+end
+
+local function onInterceptDispatchResult(payload)
+    if type(payload) ~= "table" then
+        return
+    end
+
+    local dispatch_kind = classifyDispatchResult(payload)
+    if payload.ok == true then
+        if dispatch_kind == "debug_vanilla_fireball" then
+            log.info(string.format(
+                "SPELLFORGE_DEBUG_FIREBALL_DISPATCH_OK spell_id=%s dispatch_count=%s",
+                tostring(payload.spell_id),
+                tostring(payload.dispatch_count)
+            ))
+        elseif dispatch_kind == "compiled_spellforge" then
+            log.info(string.format(
+                "SPELLFORGE_COMPILED_DISPATCH_OK spell_id=%s dispatch_count=%s",
+                tostring(payload.spell_id),
+                tostring(payload.dispatch_count)
+            ))
+        else
+            log.debug(string.format(
+                "intercept dispatch result ignored: unknown dispatch kind spell_id=%s",
+                tostring(payload.spell_id)
+            ))
+        end
+        return
+    end
+
+    if dispatch_kind == "debug_vanilla_fireball" then
+        log.error(string.format("debug vanilla fireball dispatch failed spell_id=%s err=%s", tostring(payload.spell_id), tostring(payload.error)))
+        log.info(string.format(
+            "SPELLFORGE_DEBUG_FIREBALL_DISPATCH_FAILED spell_id=%s reason=%s",
+            tostring(payload.spell_id),
+            tostring(payload.error or "dispatch failed")
+        ))
+        return
+    end
+
+    log.error(string.format("intercept dispatch failed spell_id=%s err=%s", tostring(payload.spell_id), tostring(payload.error)))
+    log.info(string.format(
+        "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=unknown reason=%s",
+        tostring(payload.spell_id),
+        tostring(payload.error or "dispatch failed")
+    ))
 end
 
 return {
@@ -638,21 +710,6 @@ return {
                 refreshSpellMetadata(payload.spell_id, "compile-result")
             end
         end,
-        [events.INTERCEPT_DISPATCH_RESULT] = function(payload)
-            if payload and payload.ok ~= true then
-                log.error(string.format("intercept dispatch failed spell_id=%s err=%s", tostring(payload.spell_id), tostring(payload.error)))
-                log.info(string.format(
-                    "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=unknown reason=%s",
-                    tostring(payload.spell_id),
-                    tostring(payload.error or "dispatch failed")
-                ))
-            elseif payload and payload.ok == true then
-                log.info(string.format(
-                    "SPELLFORGE_COMPILED_DISPATCH_OK spell_id=%s dispatch_count=%s",
-                    tostring(payload.spell_id),
-                    tostring(payload.dispatch_count)
-                ))
-            end
-        end,
+        [events.INTERCEPT_DISPATCH_RESULT] = onInterceptDispatchResult,
     },
 }

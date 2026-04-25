@@ -1,6 +1,10 @@
+local dev_runtime = require("scripts.spellforge.global.dev_runtime")
 local limits = require("scripts.spellforge.shared.limits")
 
 local orchestrator = {}
+orchestrator.DEV_LAUNCH_JOB_KIND = "dev_launch_helper"
+orchestrator.DEV_TIMER_PAYLOAD_JOB_KIND = "dev_timer_payload"
+orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND = "dev_trigger_payload"
 
 local queue = {}
 local jobs = {}
@@ -136,6 +140,12 @@ local function runHandler(job)
             not_before_tick = current_tick + 1,
         })
         return true, nil, child.job_id
+    elseif job.kind == orchestrator.DEV_LAUNCH_JOB_KIND then
+        return dev_runtime.runHelperLaunchJob(job, "dev_launch_helper")
+    elseif job.kind == orchestrator.DEV_TIMER_PAYLOAD_JOB_KIND then
+        return dev_runtime.runHelperLaunchJob(job, "dev_timer_payload")
+    elseif job.kind == orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND then
+        return dev_runtime.runHelperLaunchJob(job, "dev_trigger_payload")
     end
 
     return false, string.format("unsupported job kind: %s", tostring(job.kind)), nil
@@ -206,6 +216,10 @@ end
 
 function orchestrator.getJob(job_id)
     return cloneJob(jobs[job_id])
+end
+
+function orchestrator.currentTick()
+    return current_tick
 end
 
 function orchestrator.clearForTests()

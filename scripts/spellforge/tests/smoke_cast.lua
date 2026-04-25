@@ -227,6 +227,9 @@ return {
     },
     eventHandlers = {
         [events.BACKEND_READY] = function()
+            if not dev.smokeTestsEnabled() then
+                return
+            end
             if state.handshake_timer then
                 state.handshake_timer:stop()
                 state.handshake_timer = nil
@@ -235,6 +238,9 @@ return {
             log.debug("backend READY")
         end,
         [events.BACKEND_UNAVAILABLE] = function(payload)
+            if not dev.smokeTestsEnabled() then
+                return
+            end
             if state.handshake_timer then
                 state.handshake_timer:stop()
                 state.handshake_timer = nil
@@ -243,6 +249,9 @@ return {
             log.warn(string.format("backend unavailable: %s", tostring(payload and payload.reason)))
         end,
         [events.COMPILE_RESULT] = function(payload)
+            if not dev.smokeTestsEnabled() then
+                return
+            end
             local request_id = payload and payload.request_id
             local cb = request_id and state.pending_compile[request_id]
             if cb then
@@ -251,6 +260,9 @@ return {
             end
         end,
         [events.CAST_OBSERVE_RESULT] = function(payload)
+            if not dev.smokeTestsEnabled() then
+                return
+            end
             local request_id = payload and payload.request_id
             if request_id and state.pending_observe[request_id] and payload and payload.ok == false then
                 local cb = state.pending_observe[request_id]
@@ -259,6 +271,9 @@ return {
             end
         end,
         [events.CAST_HIT_OBSERVED] = function(payload)
+            if not dev.smokeTestsEnabled() then
+                return
+            end
             local request_id = payload and payload.request_id
             local cb = request_id and state.pending_observe[request_id]
             if cb then
@@ -267,6 +282,15 @@ return {
             end
         end,
         [events.INTERCEPT_DISPATCH_RESULT] = function(payload)
+            if not dev.smokeTestsEnabled() then
+                return
+            end
+            if not state.running or not state.last_spell_id then
+                return
+            end
+            if not payload or payload.spell_id ~= state.last_spell_id then
+                return
+            end
             if payload and payload.ok == true then
                 state.intercept_seen = true
                 log.info(string.format("intercept dispatch observed spell_id=%s count=%s", tostring(payload.spell_id), tostring(payload.dispatch_count)))

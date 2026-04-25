@@ -1,3 +1,2 @@
-# Spellforge smoke parser harness
-LOAD: scripts/spellforge/context/effects.lua
+# Spellforge smoke parser harness add-on; load with spellforge.omwscripts
 PLAYER: scripts/spellforge/tests/smoke_parser.lua

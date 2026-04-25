@@ -1,4 +1,2 @@
-# Spellforge smoke harness
-LOAD: scripts/spellforge/context/effects.lua
-GLOBAL: scripts/spellforge/global/init.lua
+# Spellforge smoke harness add-on; load with spellforge.omwscripts
 PLAYER: scripts/spellforge/tests/smoke_compiler.lua

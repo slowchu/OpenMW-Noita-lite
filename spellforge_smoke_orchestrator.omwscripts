@@ -1,3 +1,2 @@
-# Spellforge smoke orchestrator harness
-LOAD: scripts/spellforge/context/effects.lua
+# Spellforge smoke orchestrator harness add-on; load with spellforge.omwscripts
 GLOBAL: scripts/spellforge/tests/smoke_orchestrator.lua

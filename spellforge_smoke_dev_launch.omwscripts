@@ -1,0 +1,8 @@
+# Spellforge smoke dev launch harness add-on; load with spellforge.omwscripts
+GLOBAL: scripts/spellforge/tests/enable_dev_launch_flags.lua
+PLAYER: scripts/spellforge/tests/smoke_dev_launch.lua
+PLAYER: scripts/spellforge/tests/smoke_dev_multicast.lua
+PLAYER: scripts/spellforge/tests/smoke_dev_spread.lua
+PLAYER: scripts/spellforge/tests/smoke_dev_burst.lua
+PLAYER: scripts/spellforge/tests/smoke_dev_timer.lua
+PLAYER: scripts/spellforge/tests/smoke_dev_trigger.lua
