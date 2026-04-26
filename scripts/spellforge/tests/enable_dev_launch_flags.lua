@@ -32,6 +32,7 @@ local function apply()
         ensureInfoLogs()
         setDevTrue("enable_smoke_tests")
         setDevTrue("enable_dev_launch")
+        setDevTrue("enable_live_2_2c_simple_dispatch")
     end)
     if not ok then
         state.failed = true
@@ -40,7 +41,7 @@ local function apply()
     end
 
     state.applied = true
-    log.info("enabled SpellforgeDev.enable_smoke_tests and SpellforgeDev.enable_dev_launch")
+    log.info("enabled SpellforgeDev.enable_smoke_tests, SpellforgeDev.enable_dev_launch, and SpellforgeDev.enable_live_2_2c_simple_dispatch")
 end
 
 return {

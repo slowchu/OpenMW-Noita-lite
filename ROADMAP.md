@@ -62,4 +62,5 @@
 - Always include `sender` for P->G calls requiring G->P reply.
 - Use `async:newUnsavableSimulationTimer` for transient timers.
 - Keep logical IDs separate from engine `Generated:*` IDs.
+- Keep helper spell ID identity separate from SFP live projectile identity. SFP v1.7 Beta 2 exposes `launchSpell` projectile returns and live projectile state; Spellforge should continue using helper spell IDs as the stable fallback while future Homing/Bounce/Speed+/Chain work can use projectile IDs opportunistically.
 - Log `pcall` error strings before returning failure.

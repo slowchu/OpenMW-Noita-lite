@@ -1,16 +1,18 @@
 local core = require("openmw.core")
-local interfaces = require("openmw.interfaces")
 
 local compiler = require("scripts.spellforge.global.compiler")
 local dev_launch = require("scripts.spellforge.global.dev_launch")
 local executor = require("scripts.spellforge.global.executor")
 local events = require("scripts.spellforge.shared.events")
+local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
 local records = require("scripts.spellforge.global.records")
+local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
+local sfp_smoke = require("scripts.spellforge.global.sfp_smoke")
 local log = require("scripts.spellforge.shared.log").new("global.init")
 local did_records_probe = false
 
 local function isBackendReady()
-    return interfaces.MagExp ~= nil
+    return sfp_adapter.capabilities().has_interface == true
 end
 
 local function runSpellsRecordsProbe()
@@ -143,9 +145,15 @@ return {
         [events.DEV_LAUNCH_TIMER_EMITTER] = dev_launch.onTimerEmitterRequest,
         [events.DEV_LAUNCH_TRIGGER_EMITTER] = dev_launch.onTriggerEmitterRequest,
         [events.DEV_LAUNCH_PROBE_UNKNOWN_HELPER] = dev_launch.onProbeUnknownHelper,
+        [events.DEV_HELPER_HIT_IDEMPOTENCY_PROBE] = dev_launch.onHelperHitIdempotencyProbe,
+        [events.SFP_CAPABILITIES_REQUEST] = sfp_smoke.onCapabilitiesRequest,
+        [events.SFP_SPELL_STATE_REQUEST] = sfp_smoke.onSpellStateRequest,
+        [events.SFP_EMIT_OBJECT_PROBE_REQUEST] = sfp_smoke.onEmitObjectProbeRequest,
+        [events.LIVE_SIMPLE_DISPATCH_PROBE] = live_simple_dispatch.onProbe,
         [events.BEGIN_CAST_OBSERVE] = executor.onBeginObserve,
         [events.CAST_DIAG_SIGNAL] = executor.onCastDiagSignal,
         MagExp_OnMagicHit = executor.onMagicHit,
+        MagExp_SpellState = sfp_smoke.onSpellState,
     },
     engineHandlers = {
         -- OpenMW engine handlers docs (global scripts): onPlayerAdded/onUpdate are documented;

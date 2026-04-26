@@ -7,6 +7,7 @@ local log = require("scripts.spellforge.shared.log").new("global.dev_launch")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
 local patterns = require("scripts.spellforge.global.patterns")
 local plan_cache = require("scripts.spellforge.global.plan_cache")
+local projectile_registry = require("scripts.spellforge.global.projectile_registry")
 
 local dev_launch = {}
 
@@ -645,6 +646,32 @@ local function clearHitWatcher(request_id)
     end
 end
 
+local function payloadIdempotencyKey(kind, request_id, recipe_id, source_slot_id, helper_engine_id, projectile_id)
+    local identity_kind = "helper"
+    local identity_value = helper_engine_id
+    if projectile_id ~= nil then
+        identity_kind = "projectile"
+        identity_value = projectile_id
+    end
+    return string.format(
+        "%s:%s:%s:%s:%s:%s",
+        tostring(kind),
+        tostring(request_id),
+        tostring(recipe_id),
+        tostring(source_slot_id),
+        identity_kind,
+        tostring(identity_value)
+    )
+end
+
+local function projectileIdFromRouteOrPayload(route, payload)
+    if route and route.projectile_id ~= nil then
+        return route.projectile_id
+    end
+    local data = payload or {}
+    return data.projectile_id or data.projectileId or data.proj_id or data.projId
+end
+
 local function enqueueLaunchJobs(payload, built, helpers, opts)
     local launch_payload = payload or {}
     local options = opts or {}
@@ -972,6 +999,9 @@ local function enqueueTimerPayloadJobs(payload, built, source_jobs)
     local payload_helper_engine_ids = {}
     local payload_effect_ids = {}
     local timer_resolution_infos = {}
+    local timer_payload_key_set = {}
+    local timer_payload_idempotency_keys = {}
+    local timer_duplicate_skipped_count = 0
     local wake_tick = orchestrator.currentTick() + built.timer_delay_ticks
 
     for _, source_helper in ipairs(built.source_helpers or {}) do
@@ -992,6 +1022,24 @@ local function enqueueTimerPayloadJobs(payload, built, source_jobs)
         end
 
         local source_job = source_job_by_slot_id[source_helper.slot_id]
+        local idempotency_key = payloadIdempotencyKey(
+            "timer",
+            launch_payload.request_id,
+            built.recipe_id,
+            source_helper.slot_id,
+            source_helper.engine_id,
+            source_job and source_job.projectile_id or nil
+        )
+        local should_enqueue_timer_payload = false
+        if timer_payload_key_set[idempotency_key] then
+            timer_duplicate_skipped_count = timer_duplicate_skipped_count + 1
+            log.debug(string.format("duplicate Timer payload skipped key=%s", tostring(idempotency_key)))
+        else
+            timer_payload_key_set[idempotency_key] = true
+            timer_payload_idempotency_keys[#timer_payload_idempotency_keys + 1] = idempotency_key
+            should_enqueue_timer_payload = true
+        end
+        if should_enqueue_timer_payload then
         local enqueue = dev_runtime.enqueuePayloadLaunchJob(orchestrator, {
             job_kind = orchestrator.DEV_TIMER_PAYLOAD_JOB_KIND,
             recipe_id = built.recipe_id,
@@ -999,6 +1047,7 @@ local function enqueueTimerPayloadJobs(payload, built, source_jobs)
             source_slot_id = source_helper.slot_id,
             source_helper_engine_id = source_helper.engine_id,
             source_job = source_job,
+            idempotency_key = idempotency_key,
             depth = 1,
             not_before_tick = wake_tick,
             payload = {
@@ -1018,6 +1067,8 @@ local function enqueueTimerPayloadJobs(payload, built, source_jobs)
                 resolution_kind = resolution.resolution_kind,
                 timer_raycast_available = resolution.raycast_available,
                 timer_raycast_note = resolution.raycast_note,
+                source_projectile_id = source_job and source_job.projectile_id or nil,
+                payload_idempotency_key = idempotency_key,
             },
         })
         if not enqueue.ok then
@@ -1041,6 +1092,8 @@ local function enqueueTimerPayloadJobs(payload, built, source_jobs)
             slot_id = payload_helper.slot_id,
             helper_engine_id = payload_helper.engine_id,
             effect_id = firstEffectId(payload_helper),
+            idempotency_key = idempotency_key,
+            source_projectile_id = source_job and source_job.projectile_id or nil,
             not_before_tick = wake_tick,
             timer_seconds = built.timer_seconds,
             timer_delay_ticks = built.timer_delay_ticks,
@@ -1066,10 +1119,13 @@ local function enqueueTimerPayloadJobs(payload, built, source_jobs)
             resolution_kind = resolution.resolution_kind,
             timer_raycast_available = resolution.raycast_available,
             timer_raycast_note = resolution.raycast_note,
+            idempotency_key = idempotency_key,
+            source_projectile_id = source_job and source_job.projectile_id or nil,
         }
         payload_slot_ids[#payload_slot_ids + 1] = payload_helper.slot_id
         payload_helper_engine_ids[#payload_helper_engine_ids + 1] = payload_helper.engine_id
         payload_effect_ids[#payload_effect_ids + 1] = firstEffectId(payload_helper)
+        end
     end
 
     local first_resolution = timer_resolution_infos[1] or {}
@@ -1086,6 +1142,8 @@ local function enqueueTimerPayloadJobs(payload, built, source_jobs)
         timer_seconds = built.timer_seconds,
         timer_delay_ticks = built.timer_delay_ticks,
         timer_projectile_speed = first_resolution.timer_projectile_speed or DEFAULT_TIMER_PROJECTILE_SPEED,
+        timer_payload_idempotency_keys = timer_payload_idempotency_keys,
+        timer_duplicate_skipped_count = timer_duplicate_skipped_count,
     }
 end
 
@@ -1125,7 +1183,13 @@ local function collectJobResults(enqueued)
             not_before_tick = queued.not_before_tick or (job and job.not_before_tick or nil),
             source_job_id = job and job.source_job_id or nil,
             parent_job_id = job and job.parent_job_id or nil,
+            idempotency_key = job and job.idempotency_key or queued.idempotency_key,
+            source_projectile_id = queued.source_projectile_id or (job_payload and job_payload.source_projectile_id or nil),
             launch_accepted = launch_accepted,
+            launch_returned_projectile = job and job.launch_returned_projectile == true,
+            projectile_id = job and job.projectile_id or nil,
+            projectile_id_source = job and job.projectile_id_source or nil,
+            projectile_registered = job and job.projectile_registered == true,
             launch_start_pos = job and job.launch_start_pos or nil,
             launch_direction = job and job.launch_direction or queued.launch_direction,
             timer_start_pos = queued.timer_start_pos or (job_payload and job_payload.timer_start_pos or nil),
@@ -1235,6 +1299,10 @@ function dev_launch.runSimpleEmitterLaunch(payload)
         job_status = job_status,
         tick_processed_count = tick.processed_count,
         launch_accepted = job and job.launch_accepted == true,
+        launch_returned_projectile = job and job.launch_returned_projectile == true,
+        projectile_id = job and job.projectile_id or nil,
+        projectile_id_source = job and job.projectile_id_source or nil,
+        projectile_registered = job and job.projectile_registered == true,
     }
 end
 
@@ -1474,10 +1542,12 @@ function dev_launch.runTriggerEmitterLaunch(payload)
         source_job_by_slot_id = {},
         trigger_jobs = {},
         triggered_source_slot_set = {},
+        triggered_source_key_set = {},
         payload_hit_slot_set = {},
         source_hit_count = 0,
         payload_hit_count = 0,
         trigger_payload_job_count = 0,
+        duplicate_trigger_skipped_count = 0,
         payload_launch_accepted_count = 0,
         expected_source_count = #built.source_helpers,
         expected_payload_count = #built.trigger_payload_helpers,
@@ -1648,6 +1718,8 @@ function dev_launch.runTimerEmitterLaunch(payload)
         payload_helper_engine_ids = timer_enqueued.payload_helper_engine_ids,
         payload_effect_ids = timer_enqueued.payload_effect_ids,
         timer_resolution_infos = timer_enqueued.timer_resolution_infos,
+        timer_payload_idempotency_keys = timer_enqueued.timer_payload_idempotency_keys,
+        timer_duplicate_skipped_count = timer_enqueued.timer_duplicate_skipped_count,
         wake_tick = timer_enqueued.wake_tick,
     }
 
@@ -1676,6 +1748,8 @@ function dev_launch.runTimerEmitterLaunch(payload)
         timer_delay_ticks = timer_enqueued.timer_delay_ticks,
         timer_ticks_per_second = TIMER_TICKS_PER_SECOND,
         timer_projectile_speed = timer_enqueued.timer_projectile_speed,
+        timer_payload_idempotency_keys = timer_enqueued.timer_payload_idempotency_keys,
+        timer_duplicate_skipped_count = timer_enqueued.timer_duplicate_skipped_count,
         timer_wake_tick = timer_enqueued.wake_tick,
         pre_delay_tick_processed_count = pre_delay_tick.processed_count,
         timer_jobs_complete_before_delay = pre_delay_collected.complete_count,
@@ -1707,6 +1781,8 @@ completeTimerRun = function(request_id)
         timer_payload_helper_engine_ids = run.payload_helper_engine_ids,
         timer_payload_effect_ids = run.payload_effect_ids,
         timer_resolution_infos = run.timer_resolution_infos,
+        timer_payload_idempotency_keys = run.timer_payload_idempotency_keys,
+        timer_duplicate_skipped_count = run.timer_duplicate_skipped_count or 0,
         frost_payload_launch_accepted_count = collected.accepted_count,
         tick_processed_count = tick.processed_count,
         timer_wake_tick = run.wake_tick,
@@ -1739,13 +1815,16 @@ local function triggerPayloadResult(run, request_id, ok, fields)
     if not result.frost_payload_launch_accepted_count and run then
         result.frost_payload_launch_accepted_count = run.payload_launch_accepted_count
     end
+    if not result.duplicate_trigger_skipped_count and run then
+        result.duplicate_trigger_skipped_count = run.duplicate_trigger_skipped_count or 0
+    end
     if not result.trigger_jobs and run then
         result.trigger_jobs = collectTriggerJobResults(run.trigger_jobs).jobs
     end
     send(run and run.sender or nil, events.DEV_LAUNCH_TRIGGER_RESULT, result)
 end
 
-local function enqueueTriggerPayloadJob(request_id, run, hit_payload, source_mapping)
+local function enqueueTriggerPayloadJob(request_id, run, hit_payload, source_mapping, idempotency_key, source_projectile_id)
     if source_mapping == nil then
         return nil, "missing Trigger source metadata"
     end
@@ -1770,6 +1849,27 @@ local function enqueueTriggerPayloadJob(request_id, run, hit_payload, source_map
     local source_hit_normal = hit_payload and (hit_payload.hitNormal or hit_payload.hit_normal) or nil
     local target = hit_payload and hit_payload.target or nil
     local source_job = run.source_job_by_slot_id and run.source_job_by_slot_id[source_mapping.slot_id] or nil
+    if run.test_dry_run_payload_enqueue then
+        local job_entry = {
+            job_id = string.format("dry_run_trigger_%d", #run.trigger_jobs + 1),
+            job_kind = orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND,
+            status = "queued",
+            source_slot_id = source_mapping.slot_id,
+            source_helper_engine_id = source_mapping.engine_id,
+            slot_id = payload_helper.slot_id,
+            helper_engine_id = payload_helper.engine_id,
+            effect_id = firstEffectId(payload_helper),
+            source_hit_pos = source_hit_pos,
+            source_hit_normal = source_hit_normal,
+            source_hit_target_id = target and target.recordId or nil,
+            source_projectile_id = source_projectile_id,
+            idempotency_key = idempotency_key,
+        }
+        run.trigger_jobs[#run.trigger_jobs + 1] = job_entry
+        run.trigger_payload_job_count = run.trigger_payload_job_count + 1
+        return job_entry, nil
+    end
+
     local enqueue = dev_runtime.enqueuePayloadLaunchJob(orchestrator, {
         job_kind = orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND,
         recipe_id = run.recipe_id,
@@ -1777,6 +1877,7 @@ local function enqueueTriggerPayloadJob(request_id, run, hit_payload, source_map
         source_slot_id = source_mapping.slot_id,
         source_helper_engine_id = source_mapping.engine_id,
         source_job = source_job,
+        idempotency_key = idempotency_key,
         depth = 1,
         payload = {
             actor = actor,
@@ -1787,6 +1888,8 @@ local function enqueueTriggerPayloadJob(request_id, run, hit_payload, source_map
             source_hit_pos = source_hit_pos,
             source_hit_normal = source_hit_normal,
             source_hit_target_id = target and target.recordId or nil,
+            source_projectile_id = source_projectile_id,
+            payload_idempotency_key = idempotency_key,
         },
     })
     if not enqueue.ok then
@@ -1805,6 +1908,8 @@ local function enqueueTriggerPayloadJob(request_id, run, hit_payload, source_map
         source_hit_pos = source_hit_pos,
         source_hit_normal = source_hit_normal,
         source_hit_target_id = target and target.recordId or nil,
+        source_projectile_id = source_projectile_id,
+        idempotency_key = idempotency_key,
     }
     run.trigger_jobs[#run.trigger_jobs + 1] = job_entry
     run.trigger_payload_job_count = run.trigger_payload_job_count + 1
@@ -1835,7 +1940,10 @@ completeTriggerPayloadJob = function(request_id, job_entry)
         source_hit_pos = job_entry.source_hit_pos,
         source_hit_normal = job_entry.source_hit_normal,
         source_hit_target_id = job_entry.source_hit_target_id,
+        source_projectile_id = job_entry.source_projectile_id,
+        idempotency_key = job_entry.idempotency_key,
         trigger_payload_job_count = run.trigger_payload_job_count,
+        duplicate_trigger_skipped_count = run.duplicate_trigger_skipped_count or 0,
         frost_payload_launch_accepted_count = run.payload_launch_accepted_count,
         trigger_jobs = collected.jobs,
         tick_processed_count = tick.processed_count,
@@ -1856,24 +1964,45 @@ completeTriggerPayloadJob = function(request_id, job_entry)
     end
 end
 
-local function handleTriggerHit(hit_payload, mapping)
+local function handleTriggerHit(hit_payload, mapping, route, request_id_filter)
     for request_id, run in pairs(pending_trigger_runs) do
+        if request_id_filter == nil or request_id == request_id_filter then
         local source_helper = run.source_helpers_by_engine_id and run.source_helpers_by_engine_id[mapping.engine_id] or nil
         if source_helper then
-            if not run.triggered_source_slot_set[mapping.slot_id] then
-                run.triggered_source_slot_set[mapping.slot_id] = true
-                run.source_hit_count = run.source_hit_count + 1
-                local job_entry, err = enqueueTriggerPayloadJob(request_id, run, hit_payload, mapping)
+            local source_projectile_id = projectileIdFromRouteOrPayload(route, hit_payload)
+            local idempotency_key = payloadIdempotencyKey(
+                "trigger",
+                request_id,
+                run.recipe_id,
+                mapping.slot_id,
+                mapping.engine_id,
+                source_projectile_id
+            )
+            if run.triggered_source_key_set and run.triggered_source_key_set[idempotency_key] then
+                run.duplicate_trigger_skipped_count = (run.duplicate_trigger_skipped_count or 0) + 1
+                log.debug(string.format("duplicate Trigger payload skipped key=%s", tostring(idempotency_key)))
+            else
+                if run.triggered_source_key_set then
+                    run.triggered_source_key_set[idempotency_key] = true
+                end
+                if not run.triggered_source_slot_set[mapping.slot_id] then
+                    run.triggered_source_slot_set[mapping.slot_id] = true
+                    run.source_hit_count = run.source_hit_count + 1
+                end
+                local job_entry, err = enqueueTriggerPayloadJob(request_id, run, hit_payload, mapping, idempotency_key, source_projectile_id)
                 if not job_entry then
                     triggerPayloadResult(run, request_id, false, {
                         source_slot_id = mapping.slot_id,
                         source_helper_engine_id = mapping.engine_id,
+                        idempotency_key = idempotency_key,
                         error = err,
                     })
                 else
-                    async:newUnsavableSimulationTimer(TRIGGER_PAYLOAD_TICK_DELAY, function()
-                        completeTriggerPayloadJob(request_id, job_entry)
-                    end)
+                    if not run.test_no_auto_complete_payload then
+                        async:newUnsavableSimulationTimer(TRIGGER_PAYLOAD_TICK_DELAY, function()
+                            completeTriggerPayloadJob(request_id, job_entry)
+                        end)
+                    end
                 end
             end
         elseif run.payload_helpers_by_engine_id and run.payload_helpers_by_engine_id[mapping.engine_id] then
@@ -1885,7 +2014,232 @@ local function handleTriggerHit(hit_payload, mapping)
                 pending_trigger_runs[request_id] = nil
             end
         end
+        end
     end
+end
+
+local function createTriggerProbeRun(request_id, sender, actor, built, direction)
+    pending_trigger_runs[request_id] = {
+        sender = sender,
+        actor = actor,
+        recipe_id = built.recipe_id,
+        direction = direction,
+        source_helpers_by_engine_id = mapHelpersByEngineId(built.source_helpers),
+        payload_helpers_by_engine_id = mapHelpersByEngineId(built.trigger_payload_helpers),
+        payload_by_source_slot_id = built.trigger_payload_by_source_slot_id,
+        source_job_by_slot_id = {},
+        trigger_jobs = {},
+        triggered_source_slot_set = {},
+        triggered_source_key_set = {},
+        payload_hit_slot_set = {},
+        source_hit_count = 0,
+        payload_hit_count = 0,
+        trigger_payload_job_count = 0,
+        duplicate_trigger_skipped_count = 0,
+        payload_launch_accepted_count = 0,
+        expected_source_count = #built.source_helpers,
+        expected_payload_count = #built.trigger_payload_helpers,
+        test_dry_run_payload_enqueue = true,
+        test_no_auto_complete_payload = true,
+    }
+    return pending_trigger_runs[request_id]
+end
+
+local function simulateTriggerSourceHit(request_id, helper, hit_payload)
+    local route = dev_runtime.resolveHelperHit(hit_payload)
+    if not route.ok then
+        return {
+            ok = false,
+            request_id = request_id,
+            source_slot_id = helper and helper.slot_id or nil,
+            helper_engine_id = helper and helper.engine_id or nil,
+            error = route.error,
+        }
+    end
+    handleTriggerHit(hit_payload, route.mapping, route, request_id)
+    return {
+        ok = true,
+        request_id = request_id,
+        source_slot_id = route.slot_id,
+        helper_engine_id = route.helper_engine_id,
+        projectile_id = route.projectile_id,
+        hit_key = route.hit_key,
+        first_hit = route.first_hit,
+        previous_hit_key = route.hit_record and route.hit_record.previous and route.hit_record.previous.hit_key or nil,
+        effect_id = route.effect_id,
+    }
+end
+
+function dev_launch.runHelperHitIdempotencyProbe(payload)
+    local enabled, disabled_reason = ensureDevLaunchEnabled()
+    if not enabled then
+        return { ok = false, error = disabled_reason }
+    end
+
+    local probe_payload = payload or {}
+    local request_id = probe_payload.request_id or "helper-hit-idempotency-probe"
+    local sender = probe_payload.sender
+    local actor = probe_payload.actor or sender
+    local start_pos = probe_payload.start_pos
+    local direction = probe_payload.direction
+    if not actor then
+        return { ok = false, error = "missing actor for helper-hit idempotency probe" }
+    end
+    if start_pos == nil then
+        return { ok = false, error = "missing start_pos for helper-hit idempotency probe" }
+    end
+    if direction == nil then
+        return { ok = false, error = "missing direction for helper-hit idempotency probe" }
+    end
+
+    projectile_registry.clearHitMarksForTests()
+
+    local simple_built = dev_launch.buildTriggerEmitterPlan(false)
+    if not simple_built.ok then
+        return simple_built
+    end
+
+    local simple_request_id = request_id .. ":projectile"
+    local simple_run = createTriggerProbeRun(simple_request_id, sender, actor, simple_built, direction)
+    local simple_source = simple_built.source_helpers[1]
+    local simple_hit_payload = {
+        spellId = simple_source.engine_id,
+        projectileId = request_id .. ":same-projectile",
+        attacker = actor,
+        hitPos = start_pos,
+    }
+    local simple_first = simulateTriggerSourceHit(simple_request_id, simple_source, simple_hit_payload)
+    local simple_after_first_count = simple_run.trigger_payload_job_count
+    local simple_second = simulateTriggerSourceHit(simple_request_id, simple_source, simple_hit_payload)
+    local simple_after_duplicate_count = simple_run.trigger_payload_job_count
+    local simple_distinct = simulateTriggerSourceHit(simple_request_id, simple_source, {
+        spellId = simple_source.engine_id,
+        projectileId = request_id .. ":distinct-projectile",
+        attacker = actor,
+        hitPos = start_pos,
+    })
+    local simple_after_distinct_projectile_count = simple_run.trigger_payload_job_count
+    local simple_duplicate_skipped_count = simple_run.duplicate_trigger_skipped_count or 0
+    pending_trigger_runs[simple_request_id] = nil
+
+    local projectile_only_id = request_id .. ":projectile-only"
+    projectile_registry.registerLaunch({
+        ok = true,
+        projectile_id = projectile_only_id,
+        projectile_id_source = "probe",
+        launch_returns_projectile = true,
+    }, {
+        recipe_id = simple_built.recipe_id,
+        slot_id = simple_source.slot_id,
+        helper_engine_id = simple_source.engine_id,
+        job_kind = "idempotency_probe",
+    })
+    local projectile_only_route = dev_runtime.resolveHelperHit({
+        projectileId = projectile_only_id,
+        attacker = actor,
+        hitPos = start_pos,
+    })
+
+    local fallback_request_id = request_id .. ":fallback"
+    local fallback_run = createTriggerProbeRun(fallback_request_id, sender, actor, simple_built, direction)
+    local fallback_hit_payload = {
+        spellId = simple_source.engine_id,
+        attacker = actor,
+        hitPos = start_pos,
+    }
+    local fallback_first = simulateTriggerSourceHit(fallback_request_id, simple_source, fallback_hit_payload)
+    local fallback_after_first_count = fallback_run.trigger_payload_job_count
+    local fallback_second = simulateTriggerSourceHit(fallback_request_id, simple_source, fallback_hit_payload)
+    local fallback_after_duplicate_count = fallback_run.trigger_payload_job_count
+    local fallback_duplicate_skipped_count = fallback_run.duplicate_trigger_skipped_count or 0
+    pending_trigger_runs[fallback_request_id] = nil
+
+    local multicast_built = dev_launch.buildTriggerEmitterPlan(true)
+    if not multicast_built.ok then
+        return multicast_built
+    end
+
+    local multicast_request_id = request_id .. ":multicast"
+    local multicast_run = createTriggerProbeRun(multicast_request_id, sender, actor, multicast_built, direction)
+    local multicast_route_ok = true
+    for index, helper in ipairs(multicast_built.source_helpers or {}) do
+        local route = simulateTriggerSourceHit(multicast_request_id, helper, {
+            spellId = helper.engine_id,
+            attacker = actor,
+            hitPos = start_pos,
+        })
+        multicast_route_ok = multicast_route_ok and route.ok == true
+        if index >= 3 then
+            break
+        end
+    end
+    local multicast_distinct_count = multicast_run.trigger_payload_job_count
+    local multicast_duplicate_skipped_count = multicast_run.duplicate_trigger_skipped_count or 0
+    pending_trigger_runs[multicast_request_id] = nil
+
+    return {
+        ok = simple_first.ok == true
+            and simple_second.ok == true
+            and simple_distinct.ok == true
+            and projectile_only_route.ok == true
+            and projectile_only_route.helper_engine_id == simple_source.engine_id
+            and projectile_only_route.slot_id == simple_source.slot_id
+            and fallback_first.ok == true
+            and fallback_second.ok == true
+            and multicast_route_ok == true
+            and simple_first.first_hit == true
+            and simple_second.first_hit == false
+            and simple_second.hit_key == simple_first.hit_key
+            and simple_second.previous_hit_key == simple_first.hit_key
+            and simple_after_first_count == 1
+            and simple_after_duplicate_count == 1
+            and simple_after_distinct_projectile_count == 2
+            and simple_duplicate_skipped_count == 1
+            and fallback_first.first_hit == true
+            and fallback_second.first_hit == false
+            and fallback_second.hit_key == fallback_first.hit_key
+            and fallback_second.previous_hit_key == fallback_first.hit_key
+            and fallback_after_first_count == 1
+            and fallback_after_duplicate_count == 1
+            and fallback_duplicate_skipped_count == 1
+            and multicast_distinct_count == #(multicast_built.source_helpers or {})
+            and multicast_duplicate_skipped_count == 0,
+        request_id = request_id,
+        recipe_id = simple_built.recipe_id,
+        helper_spellid_routing_ok = simple_first.ok == true and simple_first.helper_engine_id == simple_source.engine_id,
+        projectile_routing_ok = simple_first.ok == true and simple_first.projectile_id ~= nil,
+        projectile_only_routing_ok = projectile_only_route.ok == true
+            and projectile_only_route.helper_engine_id == simple_source.engine_id
+            and projectile_only_route.slot_id == simple_source.slot_id,
+        projectile_duplicate_first_hit = simple_first.first_hit,
+        projectile_duplicate_second_first_hit = simple_second.first_hit,
+        projectile_duplicate_hit_key_stable = simple_second.hit_key == simple_first.hit_key,
+        projectile_duplicate_previous_hit_key_matches = simple_second.previous_hit_key == simple_first.hit_key,
+        projectile_trigger_after_first_count = simple_after_first_count,
+        projectile_trigger_after_duplicate_count = simple_after_duplicate_count,
+        projectile_trigger_after_distinct_projectile_count = simple_after_distinct_projectile_count,
+        projectile_duplicate_skipped_count = simple_duplicate_skipped_count,
+        fallback_routing_ok = fallback_first.ok == true and fallback_first.projectile_id == nil,
+        fallback_duplicate_first_hit = fallback_first.first_hit,
+        fallback_duplicate_second_first_hit = fallback_second.first_hit,
+        fallback_duplicate_hit_key_stable = fallback_second.hit_key == fallback_first.hit_key,
+        fallback_duplicate_previous_hit_key_matches = fallback_second.previous_hit_key == fallback_first.hit_key,
+        fallback_trigger_after_first_count = fallback_after_first_count,
+        fallback_trigger_after_duplicate_count = fallback_after_duplicate_count,
+        fallback_duplicate_skipped_count = fallback_duplicate_skipped_count,
+        multicast_distinct_count = multicast_distinct_count,
+        multicast_expected_count = #(multicast_built.source_helpers or {}),
+        multicast_duplicate_skipped_count = multicast_duplicate_skipped_count,
+        timer_hit_driven_payload_enqueue = false,
+        error = nil,
+    }
+end
+
+function dev_launch.onHelperHitIdempotencyProbe(payload)
+    local sender = payload and payload.sender
+    local result = dev_launch.runHelperHitIdempotencyProbe(payload or {})
+    result.request_id = payload and payload.request_id or nil
+    send(sender, events.DEV_HELPER_HIT_IDEMPOTENCY_RESULT, result)
 end
 
 function dev_launch.onSimpleEmitterRequest(payload)
@@ -2079,7 +2433,7 @@ function dev_launch.onHelperHit(route_or_payload, mapping_arg)
         tostring(route.effect_id)
     ))
 
-    handleTriggerHit(payload, mapping)
+    handleTriggerHit(payload, mapping, route)
 
     for request_id, watcher in pairs(pending_hits) do
         if watcher.helpers_by_engine_id and watcher.helpers_by_engine_id[mapping.engine_id] then
@@ -2103,6 +2457,20 @@ function dev_launch.onHelperHit(route_or_payload, mapping_arg)
                 expected_count = watcher.expected_count,
                 remaining_count = remaining_count,
                 spell_id = payload and (payload.spellId or payload.spell_id) or nil,
+                projectile_id = route.projectile_id,
+                projectile_id_source = route.projectile_id_source,
+                hit_key = route.hit_key,
+                first_hit = route.first_hit,
+                impactSpeed = route.telemetry and route.telemetry.impactSpeed or nil,
+                maxSpeed = route.telemetry and route.telemetry.maxSpeed or nil,
+                velocity = route.telemetry and route.telemetry.velocity or nil,
+                magMin = route.telemetry and route.telemetry.magMin or nil,
+                magMax = route.telemetry and route.telemetry.magMax or nil,
+                casterLinked = route.telemetry and route.telemetry.casterLinked or nil,
+                stackLimit = route.telemetry and route.telemetry.stackLimit or nil,
+                stackCount = route.telemetry and route.telemetry.stackCount or nil,
+                telemetry_present_count = route.telemetry and route.telemetry.present_count or 0,
+                telemetry_has_beta2_fields = route.telemetry and route.telemetry.has_any_beta2_fields or false,
                 hit_pos = route.hit_pos,
                 hit_normal = route.hit_normal,
                 attacker_id = route.attacker and route.attacker.recordId or nil,

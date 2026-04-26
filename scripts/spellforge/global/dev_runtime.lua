@@ -1,13 +1,14 @@
 local dev = require("scripts.spellforge.shared.dev")
 local helper_records = require("scripts.spellforge.global.helper_records")
-local interfaces = require("openmw.interfaces")
 local log = require("scripts.spellforge.shared.log").new("global.dev_runtime")
+local runtime_hits = require("scripts.spellforge.global.runtime_hits")
+local runtime_launch = require("scripts.spellforge.global.runtime_launch")
+local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
 
 local dev_runtime = {}
 
 function dev_runtime.firstEffectId(helper)
-    local first_effect = helper and helper.effects and helper.effects[1] or nil
-    return first_effect and first_effect.id or nil
+    return runtime_hits.firstEffectId(helper)
 end
 
 local function expectedPostfixForKind(job_kind)
@@ -23,10 +24,11 @@ function dev_runtime.validateHelperLaunchJob(job, expected_postfix_opcode)
     if not dev.devLaunchEnabled() then
         return nil, "dev launch disabled"
     end
-    if interfaces.MagExp == nil then
+    local capabilities = sfp_adapter.capabilities()
+    if not capabilities.has_interface then
         return nil, "I.MagExp missing"
     end
-    if type(interfaces.MagExp.launchSpell) ~= "function" then
+    if not capabilities.has_launchSpell then
         return nil, "I.MagExp.launchSpell missing"
     end
     if type(job.helper_engine_id) ~= "string" or job.helper_engine_id == "" then
@@ -78,32 +80,11 @@ function dev_runtime.launchContextForKind(job_kind, payload)
 end
 
 function dev_runtime.launchHelper(context)
-    local launch = context or {}
-    if interfaces.MagExp == nil then
-        return false, "I.MagExp missing"
+    local result = runtime_launch.launchHelper(context or {})
+    if not result.ok then
+        return false, tostring(result.error), result
     end
-    if type(interfaces.MagExp.launchSpell) ~= "function" then
-        return false, "I.MagExp.launchSpell missing"
-    end
-    if launch.actor == nil then
-        return false, "missing caster for dev launch"
-    end
-    if type(launch.helper_engine_id) ~= "string" or launch.helper_engine_id == "" then
-        return false, "helper_engine_id must be a non-empty string"
-    end
-
-    local ok, err = pcall(interfaces.MagExp.launchSpell, {
-        attacker = launch.actor,
-        spellId = launch.helper_engine_id,
-        startPos = launch.start_pos,
-        direction = launch.direction,
-        hitObject = launch.hit_object,
-        isFree = true,
-    })
-    if not ok then
-        return false, tostring(err)
-    end
-    return true, nil
+    return true, nil, result
 end
 
 function dev_runtime.runHelperLaunchJob(job, job_kind)
@@ -131,7 +112,7 @@ function dev_runtime.runHelperLaunchJob(job, job_kind)
         tostring(payload.source_hit_pos)
     ))
 
-    local ok, err = dev_runtime.launchHelper({
+    local ok, err, launch_result = dev_runtime.launchHelper({
         actor = launch_context.actor,
         helper_engine_id = job.helper_engine_id,
         start_pos = launch_context.start_pos,
@@ -140,6 +121,10 @@ function dev_runtime.runHelperLaunchJob(job, job_kind)
         recipe_id = job.recipe_id,
         slot_id = job.slot_id,
         kind = job_kind,
+        job_id = job.job_id,
+        job_kind = job_kind,
+        source_job_id = job.source_job_id,
+        parent_job_id = job.parent_job_id,
     })
     if not ok then
         return false, err, nil
@@ -147,6 +132,10 @@ function dev_runtime.runHelperLaunchJob(job, job_kind)
 
     job.launched_helper_engine_id = job.helper_engine_id
     job.launch_accepted = true
+    job.launch_returned_projectile = launch_result and launch_result.launch_returned_projectile == true
+    job.projectile_id = launch_result and launch_result.projectile_id or nil
+    job.projectile_id_source = launch_result and launch_result.projectile_id_source or nil
+    job.projectile_registered = launch_result and launch_result.projectile_registered == true
     job.launch_start_pos = launch_context.start_pos
     job.launch_direction = launch_context.direction
     job.timer_source_slot_id = payload.source_slot_id or mapping.timer_source_slot_id
@@ -164,34 +153,7 @@ function dev_runtime.resolveHelperHit(payload)
     if not dev.devLaunchEnabled() then
         return { ok = false, error = "dev launch disabled" }
     end
-
-    local engine_id = payload and (payload.spellId or payload.spell_id) or nil
-    if type(engine_id) ~= "string" or engine_id == "" then
-        return { ok = false, error = "hit payload missing spellId" }
-    end
-
-    local mapping = helper_records.getByEngineId(engine_id)
-    if not mapping then
-        return {
-            ok = false,
-            engine_id = engine_id,
-            error = string.format("helper record metadata not found for engine_id=%s", tostring(engine_id)),
-        }
-    end
-
-    return {
-        ok = true,
-        mapping = mapping,
-        recipe_id = mapping.recipe_id,
-        slot_id = mapping.slot_id,
-        helper_engine_id = mapping.engine_id,
-        effect_id = dev_runtime.firstEffectId(mapping),
-        hit_pos = payload and (payload.hitPos or payload.hit_pos) or nil,
-        hit_normal = payload and (payload.hitNormal or payload.hit_normal) or nil,
-        attacker = payload and payload.attacker or nil,
-        target = payload and payload.target or nil,
-        raw_payload = payload,
-    }
+    return runtime_hits.resolveHelperHit(payload)
 end
 
 function dev_runtime.enqueuePayloadLaunchJob(orchestrator, args)
@@ -215,6 +177,7 @@ function dev_runtime.enqueuePayloadLaunchJob(orchestrator, args)
         recipe_id = input.recipe_id,
         slot_id = input.payload_helper.slot_id,
         helper_engine_id = input.payload_helper.engine_id,
+        idempotency_key = input.idempotency_key,
         source_job_id = input.source_job and input.source_job.job_id or input.source_job_id,
         parent_job_id = input.source_job and input.source_job.job_id or input.parent_job_id,
         depth = input.depth or 1,
@@ -232,6 +195,7 @@ function dev_runtime.enqueuePayloadLaunchJob(orchestrator, args)
         job_kind = input.job_kind,
         source_slot_id = input.source_slot_id,
         source_helper_engine_id = input.source_helper_engine_id,
+        idempotency_key = input.idempotency_key,
         slot_id = input.payload_helper.slot_id,
         helper_engine_id = input.payload_helper.engine_id,
         effect_id = dev_runtime.firstEffectId(input.payload_helper),

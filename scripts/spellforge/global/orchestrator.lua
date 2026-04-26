@@ -1,10 +1,12 @@
 local dev_runtime = require("scripts.spellforge.global.dev_runtime")
 local limits = require("scripts.spellforge.shared.limits")
+local runtime_launch = require("scripts.spellforge.global.runtime_launch")
 
 local orchestrator = {}
 orchestrator.DEV_LAUNCH_JOB_KIND = "dev_launch_helper"
 orchestrator.DEV_TIMER_PAYLOAD_JOB_KIND = "dev_timer_payload"
 orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND = "dev_trigger_payload"
+orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND = "live_2_2c_simple_launch_helper"
 
 local queue = {}
 local jobs = {}
@@ -58,6 +60,7 @@ local function enqueueInternal(job)
         recipe_id = job.recipe_id,
         slot_id = job.slot_id,
         helper_engine_id = job.helper_engine_id,
+        idempotency_key = job.idempotency_key,
         parent_job_id = job.parent_job_id,
         source_job_id = job.source_job_id,
         depth = depth,
@@ -146,6 +149,8 @@ local function runHandler(job)
         return dev_runtime.runHelperLaunchJob(job, "dev_timer_payload")
     elseif job.kind == orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND then
         return dev_runtime.runHelperLaunchJob(job, "dev_trigger_payload")
+    elseif job.kind == orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND then
+        return runtime_launch.runHelperLaunchJob(job, orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND)
     end
 
     return false, string.format("unsupported job kind: %s", tostring(job.kind)), nil

@@ -1,6 +1,5 @@
 local async = require("openmw.async")
 local core = require("openmw.core")
-local interfaces = require("openmw.interfaces")
 local types = require("openmw.types")
 local util = require("openmw.util")
 
@@ -8,8 +7,11 @@ local dev = require("scripts.spellforge.shared.dev")
 local events = require("scripts.spellforge.shared.events")
 local dev_launch = require("scripts.spellforge.global.dev_launch")
 local dev_runtime = require("scripts.spellforge.global.dev_runtime")
+local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
 local log = require("scripts.spellforge.shared.log").new("global.executor")
 local records = require("scripts.spellforge.global.records")
+local runtime_hits = require("scripts.spellforge.global.runtime_hits")
+local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
 
 local executor = {}
 
@@ -20,6 +22,7 @@ local launch_cookies = {}
 local player_ref = nil
 local last_active_spell_ids = {}
 local fireball_logged = false
+local target_filter_registered = false
 local DISPATCH_KIND_COMPILED = "compiled_spellforge"
 local DISPATCH_KIND_DEBUG_FIREBALL = "debug_vanilla_fireball"
 
@@ -124,10 +127,11 @@ local function createDispatchSpellForEffect(recipe_id, effect_index, effect)
 end
 
 local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_object)
-    if interfaces.MagExp == nil then
+    local capabilities = sfp_adapter.capabilities()
+    if not capabilities.has_interface then
         return false, "I.MagExp missing"
     end
-    if type(interfaces.MagExp.launchSpell) ~= "function" then
+    if not capabilities.has_launchSpell then
         return false, "I.MagExp.launchSpell missing"
     end
 
@@ -140,7 +144,7 @@ local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_o
         tostring(hit_object and hit_object.recordId or hit_object)
     ))
 
-    local ok, err = pcall(interfaces.MagExp.launchSpell, {
+    local result = sfp_adapter.launchSpell({
         attacker = actor,
         spellId = dispatch_spell_id,
         startPos = start_pos,
@@ -148,12 +152,17 @@ local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_o
         hitObject = hit_object,
         isFree = true,
     })
-    if not ok then
-        log.error(string.format("executor launchSpell failed spell_id=%s err=%s", tostring(dispatch_spell_id), tostring(err)))
-        return false, tostring(err)
+    if not result.ok then
+        log.error(string.format("executor launchSpell failed spell_id=%s err=%s", tostring(dispatch_spell_id), tostring(result.error)))
+        return false, tostring(result.error)
     end
 
-    log.debug(string.format("executor launchSpell dispatched spell_id=%s actor=%s", tostring(dispatch_spell_id), tostring(actor and actor.recordId)))
+    log.debug(string.format(
+        "executor launchSpell dispatched spell_id=%s actor=%s projectile_id=%s",
+        tostring(dispatch_spell_id),
+        tostring(actor and actor.recordId),
+        tostring(result.projectile_id)
+    ))
     return true, nil
 end
 
@@ -217,6 +226,56 @@ function executor.onInterceptCast(payload)
         tostring(root.real_effects and #root.real_effects or 0),
         stringifyValue(root.real_effects, 3)
     ))
+
+    if dev.liveSimpleDispatchEnabled() then
+        local live_ok, live_result_or_err = pcall(live_simple_dispatch.tryDispatch, payload, entry, root, {
+            source_recipe_id = recipe_id,
+        })
+        local live_result = live_ok and live_result_or_err or {
+            ok = false,
+            used_live_2_2c = true,
+            error = tostring(live_result_or_err),
+        }
+        if live_result.ok and live_result.used_live_2_2c then
+            launch_cookies[live_result.helper_engine_id] = {
+                recipe_id = recipe_id,
+                plan_recipe_id = live_result.plan_recipe_id,
+                slot_id = live_result.slot_id,
+                source_actor = sender,
+                live_2_2c = true,
+            }
+            sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
+                ok = true,
+                dispatch_kind = DISPATCH_KIND_COMPILED,
+                spell_id = engine_id,
+                recipe_id = recipe_id,
+                live_2_2c = true,
+                live_2_2c_plan_recipe_id = live_result.plan_recipe_id,
+                slot_id = live_result.slot_id,
+                helper_engine_id = live_result.helper_engine_id,
+                projectile_id = live_result.projectile_id,
+                projectile_registered = live_result.projectile_registered == true,
+                job_id = live_result.job_id,
+                dispatch_count = 1,
+            })
+            return
+        end
+        if live_result.used_live_2_2c then
+            log.warn(string.format(
+                "SPELLFORGE_LIVE_2_2C_SIMPLE_DISPATCH_ERR spell_id=%s recipe_id=%s err=%s; falling back to 2.2b",
+                tostring(engine_id),
+                tostring(recipe_id),
+                tostring(live_result.error or live_result.fallback_reason or "unknown")
+            ))
+        else
+            log.debug(string.format(
+                "SPELLFORGE_LIVE_2_2C_SIMPLE_DISPATCH_FALLBACK spell_id=%s recipe_id=%s reason=%s",
+                tostring(engine_id),
+                tostring(recipe_id),
+                tostring(live_result.fallback_reason or "not_qualified")
+            ))
+        end
+    end
 
     for effect_index, effect in ipairs(root.real_effects or {}) do
         log.debug(string.format(
@@ -345,19 +404,28 @@ end
 
 function executor.onMagicHit(payload)
     log.debug(string.format("MagExp_OnMagicHit payload=%s", stringifyValue(payload, 4)))
-    -- Dev-only 2.2c helper hits route through dev_runtime; live 2.2b dispatch cookies stay unchanged.
+    -- 2.2c helper hits use shared routing only when a dev/live 2.2c gate is enabled;
+    -- live 2.2b dispatch cookies stay unchanged.
 
     local attacker_id = payload and payload.attacker and payload.attacker.recordId or nil
     local victim_id = payload and payload.target and payload.target.recordId or nil
     local spell_id = payload and (payload.spellId or payload.spell_id) or nil
     local hit_pos = payload and payload.hitPos or nil
-    local helper_hit = dev.devLaunchEnabled() and type(spell_id) == "string" and dev_runtime.resolveHelperHit(payload) or nil
+    local helper_hit = nil
+    if dev.devLaunchEnabled() then
+        helper_hit = dev_runtime.resolveHelperHit(payload)
+    elseif dev.liveSimpleDispatchEnabled() then
+        helper_hit = runtime_hits.resolveHelperHit(payload)
+    end
     local helper_mapping = helper_hit and helper_hit.ok and helper_hit.mapping or nil
-    if helper_mapping then
+    if helper_mapping and dev.devLaunchEnabled() then
         dev_launch.onHelperHit(helper_hit)
     end
 
     local cookie = spell_id and launch_cookies[spell_id] or nil
+    if not cookie and helper_mapping then
+        cookie = launch_cookies[helper_mapping.engine_id]
+    end
     if cookie then
         log.debug(string.format(
             "Spellforge hit matched recipe_id=%s spell_id=%s attacker=%s victim=%s hit_pos=%s",
@@ -389,6 +457,11 @@ function executor.onMagicHit(payload)
                     attacker_id = attacker_id,
                     victim_id = victim_id,
                     recipe_id = recipe_id,
+                    live_2_2c = cookie and cookie.live_2_2c == true or false,
+                    live_2_2c_plan_recipe_id = cookie and cookie.plan_recipe_id or nil,
+                    slot_id = helper_mapping and helper_mapping.slot_id or (cookie and cookie.slot_id or nil),
+                    helper_engine_id = helper_mapping and helper_mapping.engine_id or nil,
+                    projectile_id = helper_hit and helper_hit.projectile_id or nil,
                 })
                 watchers[actor_id] = nil
             end
@@ -407,10 +480,17 @@ local function buildActiveSpellIdSet(actor)
 end
 
 local function ensureTargetFilter()
-    if interfaces.MagExp == nil or type(interfaces.MagExp.setTargetFilter) ~= "function" then
+    if target_filter_registered then
         return
     end
-    interfaces.MagExp.setTargetFilter(function(target)
+    local capabilities = sfp_adapter.capabilities()
+    if not capabilities.has_interface then
+        return
+    end
+    if not capabilities.has_addTargetFilter and not capabilities.has_setTargetFilter then
+        return
+    end
+    local registered = sfp_adapter.registerTargetFilter(function(target)
         local target_id = target and target.recordId or nil
         if target == nil then
             log.debug("target filter target=nil result=true")
@@ -430,6 +510,7 @@ local function ensureTargetFilter()
         ))
         return allow
     end)
+    target_filter_registered = registered.ok == true
     -- TODO(2.2c): route launch/hit work through a central bounded job queue/orchestrator.
 end
 

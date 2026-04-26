@@ -6,3 +6,6 @@ PLAYER: scripts/spellforge/tests/smoke_dev_spread.lua
 PLAYER: scripts/spellforge/tests/smoke_dev_burst.lua
 PLAYER: scripts/spellforge/tests/smoke_dev_timer.lua
 PLAYER: scripts/spellforge/tests/smoke_dev_trigger.lua
+PLAYER: scripts/spellforge/tests/smoke_sfp_projectile_state.lua
+PLAYER: scripts/spellforge/tests/smoke_helper_hit_idempotency.lua
+PLAYER: scripts/spellforge/tests/smoke_live_simple_dispatch.lua

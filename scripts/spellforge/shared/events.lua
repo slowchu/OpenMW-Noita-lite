@@ -34,5 +34,17 @@ events.DEV_LAUNCH_TRIGGER_RESULT = "Spellforge_DevLaunchTriggerResult"
 events.DEV_LAUNCH_HIT_OBSERVED = "Spellforge_DevLaunchHitObserved"
 events.DEV_LAUNCH_PROBE_UNKNOWN_HELPER = "Spellforge_DevLaunchProbeUnknownHelper"
 events.DEV_LAUNCH_LOOKUP_RESULT = "Spellforge_DevLaunchLookupResult"
+events.DEV_HELPER_HIT_IDEMPOTENCY_PROBE = "Spellforge_DevHelperHitIdempotencyProbe"
+events.DEV_HELPER_HIT_IDEMPOTENCY_RESULT = "Spellforge_DevHelperHitIdempotencyResult"
+
+events.SFP_CAPABILITIES_REQUEST = "Spellforge_SfpCapabilitiesRequest"
+events.SFP_CAPABILITIES_RESULT = "Spellforge_SfpCapabilitiesResult"
+events.SFP_SPELL_STATE_REQUEST = "Spellforge_SfpSpellStateRequest"
+events.SFP_SPELL_STATE_RESULT = "Spellforge_SfpSpellStateResult"
+events.SFP_EMIT_OBJECT_PROBE_REQUEST = "Spellforge_SfpEmitObjectProbeRequest"
+events.SFP_EMIT_OBJECT_PROBE_RESULT = "Spellforge_SfpEmitObjectProbeResult"
+
+events.LIVE_SIMPLE_DISPATCH_PROBE = "Spellforge_LiveSimpleDispatchProbe"
+events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT = "Spellforge_LiveSimpleDispatchProbeResult"
 
 return events
