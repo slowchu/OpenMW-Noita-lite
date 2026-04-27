@@ -8,6 +8,7 @@ local orchestrator = require("scripts.spellforge.global.orchestrator")
 local patterns = require("scripts.spellforge.global.patterns")
 local plan_cache = require("scripts.spellforge.global.plan_cache")
 local projectile_registry = require("scripts.spellforge.global.projectile_registry")
+local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
 
 local dev_launch = {}
 
@@ -62,6 +63,17 @@ local TRIGGER_MULTICAST_FIRE_FROST_TARGET = {
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
 
+local PERFORMANCE_STRESS_TARGET = {
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 10, magnitudeMax = 10 },
+    { id = "spellforge_timer", params = { seconds = 1.0 } },
+    { id = "spellforge_multicast", params = { count = 8 } },
+    { id = "spellforge_burst", params = { count = 8 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 10, magnitudeMax = 10 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_multicast", params = { count = 2 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 10, magnitudeMax = 10 },
+}
+
 local function cloneParams(params)
     local out = {}
     local keys = {}
@@ -75,8 +87,16 @@ local function cloneParams(params)
     return out
 end
 
+local PRESENTATION_METADATA_FIELDS = {
+    "areaVfxRecId",
+    "areaVfxScale",
+    "vfxRecId",
+    "boltModel",
+    "hitModel",
+}
+
 local function cloneEffect(effect)
-    return {
+    local out = {
         id = effect.id,
         range = effect.range,
         area = effect.area,
@@ -85,6 +105,12 @@ local function cloneEffect(effect)
         magnitudeMax = effect.magnitudeMax,
         params = cloneParams(effect.params),
     }
+    for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+        if effect[field] ~= nil then
+            out[field] = effect[field]
+        end
+    end
+    return out
 end
 
 local function cloneEffects(effects)
@@ -592,6 +618,113 @@ function dev_launch.buildTriggerEmitterPlan(multicast)
         return buildTriggerEmitterPlan(TRIGGER_MULTICAST_FIRE_FROST_TARGET, 3)
     end
     return buildTriggerEmitterPlan(TRIGGER_FIRE_FROST_TARGET, 1)
+end
+
+local function classifyPerformanceStressHelpers(helpers)
+    local source_helpers = {}
+    local timer_payload_helpers = {}
+    local trigger_payload_helpers = {}
+    local by_slot_id = {}
+    for _, helper in ipairs(helpers or {}) do
+        if type(helper) == "table" then
+            by_slot_id[helper.slot_id] = helper
+            local effect_id = normalizeEffectId(firstEffectId(helper))
+            if helper.source_postfix_opcode == "Timer" then
+                timer_payload_helpers[#timer_payload_helpers + 1] = helper
+            elseif helper.source_postfix_opcode == "Trigger" then
+                trigger_payload_helpers[#trigger_payload_helpers + 1] = helper
+            elseif helper.parent_slot_id == nil and effect_id == "firedamage" then
+                source_helpers[#source_helpers + 1] = helper
+            end
+        end
+    end
+    return source_helpers, timer_payload_helpers, trigger_payload_helpers, by_slot_id
+end
+
+function dev_launch.buildPerformanceStressPlan()
+    local built = buildEmitterPlan(PERFORMANCE_STRESS_TARGET, 25)
+    if not built.ok then
+        return built
+    end
+
+    local source_helpers, timer_payload_helpers, trigger_payload_helpers, by_slot_id = classifyPerformanceStressHelpers(built.helpers)
+    if #source_helpers ~= 1 then
+        return {
+            ok = false,
+            stage = "performance_stress_plan",
+            recipe_id = built.recipe_id,
+            error = string.format("expected 1 source Fireball helper, got %d", #source_helpers),
+        }
+    end
+    if #timer_payload_helpers ~= 8 then
+        return {
+            ok = false,
+            stage = "performance_stress_plan",
+            recipe_id = built.recipe_id,
+            error = string.format("expected 8 Timer Frostball helpers, got %d", #timer_payload_helpers),
+        }
+    end
+    if #trigger_payload_helpers ~= 16 then
+        return {
+            ok = false,
+            stage = "performance_stress_plan",
+            recipe_id = built.recipe_id,
+            error = string.format("expected 16 Trigger Fire Damage helpers, got %d", #trigger_payload_helpers),
+        }
+    end
+
+    for _, helper in ipairs(timer_payload_helpers) do
+        if normalizeEffectId(firstEffectId(helper)) ~= "frostdamage" then
+            return {
+                ok = false,
+                stage = "performance_stress_plan",
+                recipe_id = built.recipe_id,
+                error = string.format("Timer payload helper slot_id=%s is not Frost Damage", tostring(helper.slot_id)),
+            }
+        end
+    end
+    for _, helper in ipairs(trigger_payload_helpers) do
+        if normalizeEffectId(firstEffectId(helper)) ~= "firedamage" then
+            return {
+                ok = false,
+                stage = "performance_stress_plan",
+                recipe_id = built.recipe_id,
+                error = string.format("Trigger payload helper slot_id=%s is not Fire Damage", tostring(helper.slot_id)),
+            }
+        end
+        if not by_slot_id[helper.trigger_source_slot_id] then
+            return {
+                ok = false,
+                stage = "performance_stress_plan",
+                recipe_id = built.recipe_id,
+                error = string.format("missing Frost Trigger source for payload slot_id=%s", tostring(helper.slot_id)),
+            }
+        end
+    end
+
+    local timer_seconds = firstTimerSeconds(built.plan)
+    if timer_seconds == nil then
+        return {
+            ok = false,
+            stage = "performance_stress_plan",
+            recipe_id = built.recipe_id,
+            error = "Timer postfix metadata not found",
+        }
+    end
+
+    local burst_op = findPrefixOp(timer_payload_helpers[1] and timer_payload_helpers[1].prefix_ops, "Burst")
+    local multicast_op = findPrefixOp(timer_payload_helpers[1] and timer_payload_helpers[1].prefix_ops, "Multicast")
+    built.source_helpers = source_helpers
+    built.timer_payload_helpers = timer_payload_helpers
+    built.trigger_payload_helpers = trigger_payload_helpers
+    built.helpers_by_slot_id = by_slot_id
+    built.timer_seconds = timer_seconds
+    built.timer_delay_ticks = timerDelayTicks(timer_seconds)
+    built.burst_op = burst_op
+    built.multicast_op = multicast_op
+    built.burst_metadata_exists = burst_op ~= nil
+    built.multicast_metadata_exists = multicast_op ~= nil
+    return built
 end
 
 local function normalizeMappings(mappings)
@@ -1192,6 +1325,12 @@ local function collectJobResults(enqueued)
             projectile_registered = job and job.projectile_registered == true,
             launch_start_pos = job and job.launch_start_pos or nil,
             launch_direction = job and job.launch_direction or queued.launch_direction,
+            launch_user_data_present = job and type(job.launch_user_data) == "table" or false,
+            launch_user_data_schema = job and job.launch_user_data and job.launch_user_data.schema or nil,
+            launch_user_data_runtime = job and job.launch_user_data and job.launch_user_data.runtime or nil,
+            launch_user_data_recipe_id = job and job.launch_user_data and job.launch_user_data.recipe_id or nil,
+            launch_user_data_slot_id = job and job.launch_user_data and job.launch_user_data.slot_id or nil,
+            launch_user_data_helper_engine_id = job and job.launch_user_data and job.launch_user_data.helper_engine_id or nil,
             timer_start_pos = queued.timer_start_pos or (job_payload and job_payload.timer_start_pos or nil),
             timer_direction = queued.timer_direction or (job_payload and job_payload.timer_direction or nil),
             timer_endpoint = queued.timer_endpoint or (job_payload and job_payload.timer_endpoint or nil),
@@ -1303,6 +1442,12 @@ function dev_launch.runSimpleEmitterLaunch(payload)
         projectile_id = job and job.projectile_id or nil,
         projectile_id_source = job and job.projectile_id_source or nil,
         projectile_registered = job and job.projectile_registered == true,
+        launch_user_data_present = job and type(job.launch_user_data) == "table" or false,
+        launch_user_data_schema = job and job.launch_user_data and job.launch_user_data.schema or nil,
+        launch_user_data_runtime = job and job.launch_user_data and job.launch_user_data.runtime or nil,
+        launch_user_data_recipe_id = job and job.launch_user_data and job.launch_user_data.recipe_id or nil,
+        launch_user_data_slot_id = job and job.launch_user_data and job.launch_user_data.slot_id or nil,
+        launch_user_data_helper_engine_id = job and job.launch_user_data and job.launch_user_data.helper_engine_id or nil,
     }
 end
 
@@ -1488,6 +1633,245 @@ function dev_launch.runBurstEmitterLaunch(payload)
         trigger_job_count = 0,
         timer_job_count = 0,
         chain_job_count = 0,
+    }
+end
+
+local function helperBySlotId(helpers)
+    local out = {}
+    for _, helper in ipairs(helpers or {}) do
+        if helper.slot_id then
+            out[helper.slot_id] = helper
+        end
+    end
+    return out
+end
+
+local function enqueueStressPayloadJob(job_kind, built, helper, source_helper, payload_fields, opts)
+    local options = opts or {}
+    local payload = payload_fields or {}
+    return dev_runtime.enqueuePayloadLaunchJob(orchestrator, {
+        job_kind = job_kind,
+        recipe_id = built.recipe_id,
+        payload_helper = helper,
+        source_slot_id = source_helper and source_helper.slot_id or nil,
+        source_helper_engine_id = source_helper and source_helper.engine_id or nil,
+        source_job_id = options.source_job_id,
+        parent_job_id = options.parent_job_id,
+        not_before_tick = options.not_before_tick,
+        depth = options.depth,
+        idempotency_key = options.idempotency_key,
+        payload = payload,
+    })
+end
+
+function dev_launch.runPerformanceStressLaunch(payload)
+    local started_tick = orchestrator.currentTick()
+    local enabled, disabled_reason = ensureDevLaunchEnabled()
+    if not enabled then
+        return { ok = false, error = disabled_reason }
+    end
+
+    local launch_payload = payload or {}
+    local actor = launch_payload.actor or launch_payload.sender
+    if not actor then
+        return { ok = false, error = "missing caster for performance stress launch" }
+    end
+
+    local built = dev_launch.buildPerformanceStressPlan()
+    if not built.ok then
+        return built
+    end
+
+    local source_helper = built.source_helpers[1]
+    local source_enqueued = enqueueLaunchJobs(launch_payload, built, { source_helper })
+    if not source_enqueued.ok then
+        return source_enqueued
+    end
+
+    local source_tick = orchestrator.tick({ max_jobs_per_tick = source_enqueued.job_count })
+    local source_collected = collectJobResults(source_enqueued)
+    if source_collected.complete_count ~= source_enqueued.job_count
+        or source_collected.accepted_count ~= source_enqueued.job_count then
+        return {
+            ok = false,
+            stage = "performance_source_launch",
+            recipe_id = built.recipe_id,
+            source_job_count = source_enqueued.job_count,
+            source_jobs = source_collected.jobs,
+            error = source_collected.first_error or "performance source launch failed",
+        }
+    end
+
+    local resolution = computeTimerResolution(launch_payload, built, source_helper)
+    if not resolution.ok then
+        return resolution
+    end
+
+    local burst = patterns.computeBurstDirections(
+        launch_payload.direction,
+        #built.timer_payload_helpers,
+        built.burst_op and built.burst_op.params or nil
+    )
+    if not burst.ok then
+        return {
+            ok = false,
+            stage = "performance_burst_directions",
+            recipe_id = built.recipe_id,
+            error = burst.error,
+        }
+    end
+
+    local timer_direction_by_slot_id = {}
+    for index, helper in ipairs(built.timer_payload_helpers) do
+        timer_direction_by_slot_id[helper.slot_id] = burst.directions[index] or resolution.timer_direction
+    end
+
+    local source_job = source_collected.jobs and source_collected.jobs[1] or nil
+    local timer_due_tick = orchestrator.currentTick() + built.timer_delay_ticks
+    local timer_jobs = {}
+    for _, helper in ipairs(built.timer_payload_helpers) do
+        local timer_direction = timer_direction_by_slot_id[helper.slot_id] or resolution.timer_direction
+        local enqueue = enqueueStressPayloadJob(orchestrator.DEV_TIMER_PAYLOAD_JOB_KIND, built, helper, source_helper, {
+            actor = actor,
+            start_pos = resolution.timer_start_pos,
+            direction = timer_direction,
+            hit_object = resolution.resolution_hit_object or launch_payload.hit_object,
+            source_slot_id = source_helper.slot_id,
+            resolution_pos = resolution.resolution_pos,
+            resolution_kind = resolution.resolution_kind,
+            timer_seconds = built.timer_seconds,
+            timer_delay_ticks = built.timer_delay_ticks,
+            timer_start_pos = resolution.timer_start_pos,
+            timer_direction = timer_direction,
+            timer_endpoint = resolution.timer_endpoint,
+            timer_projectile_speed = resolution.timer_projectile_speed,
+            timer_travel_distance = resolution.timer_travel_distance,
+        }, {
+            source_job_id = source_job and source_job.job_id,
+            parent_job_id = source_job and source_job.job_id,
+            not_before_tick = timer_due_tick,
+            depth = 1,
+            idempotency_key = string.format("%s:perf_timer:%s", tostring(launch_payload.request_id or built.recipe_id), tostring(helper.slot_id)),
+        })
+        if not enqueue.ok then
+            return {
+                ok = false,
+                stage = "performance_timer_enqueue",
+                recipe_id = built.recipe_id,
+                slot_id = helper.slot_id,
+                error = enqueue.error,
+                timer_jobs = timer_jobs,
+            }
+        end
+        timer_jobs[#timer_jobs + 1] = enqueue
+    end
+
+    local timer_pre_tick = orchestrator.tick({ max_jobs_per_tick = #timer_jobs })
+    local timer_tick = nil
+    for _ = 1, built.timer_delay_ticks + 2 do
+        local collected = collectTimerJobResults(timer_jobs)
+        if collected.complete_count == #timer_jobs then
+            break
+        end
+        timer_tick = orchestrator.tick({ max_jobs_per_tick = #timer_jobs })
+    end
+    local timer_collected = collectTimerJobResults(timer_jobs)
+    if timer_collected.complete_count ~= #timer_jobs or timer_collected.accepted_count ~= #timer_jobs then
+        return {
+            ok = false,
+            stage = "performance_timer_launch",
+            recipe_id = built.recipe_id,
+            timer_payload_job_count = #timer_jobs,
+            timer_jobs = timer_collected.jobs,
+            timer_pre_tick = timer_pre_tick,
+            timer_tick = timer_tick,
+            error = timer_collected.first_error or "performance timer payload launch failed",
+        }
+    end
+
+    local timer_helper_by_slot_id = helperBySlotId(built.timer_payload_helpers)
+    local timer_job_by_slot_id = {}
+    for _, job in ipairs(timer_collected.jobs or {}) do
+        timer_job_by_slot_id[job.slot_id] = job
+    end
+
+    local trigger_jobs = {}
+    for _, helper in ipairs(built.trigger_payload_helpers) do
+        local trigger_source_slot_id = helper.trigger_source_slot_id
+        local trigger_source_helper = timer_helper_by_slot_id[trigger_source_slot_id]
+        local trigger_source_job = timer_job_by_slot_id[trigger_source_slot_id]
+        local direction = timer_direction_by_slot_id[trigger_source_slot_id] or resolution.timer_direction
+        local enqueue = enqueueStressPayloadJob(orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND, built, helper, trigger_source_helper, {
+            actor = actor,
+            start_pos = resolution.resolution_pos,
+            direction = direction,
+            hit_object = resolution.resolution_hit_object or launch_payload.hit_object,
+            source_slot_id = trigger_source_slot_id,
+            source_hit_pos = resolution.resolution_pos,
+            source_hit_target_id = resolution.resolution_hit_object and resolution.resolution_hit_object.recordId or nil,
+        }, {
+            source_job_id = trigger_source_job and trigger_source_job.job_id,
+            parent_job_id = trigger_source_job and trigger_source_job.job_id,
+            depth = 2,
+            idempotency_key = string.format("%s:perf_trigger:%s", tostring(launch_payload.request_id or built.recipe_id), tostring(helper.slot_id)),
+        })
+        if not enqueue.ok then
+            return {
+                ok = false,
+                stage = "performance_trigger_enqueue",
+                recipe_id = built.recipe_id,
+                slot_id = helper.slot_id,
+                error = enqueue.error,
+                trigger_jobs = trigger_jobs,
+            }
+        end
+        trigger_jobs[#trigger_jobs + 1] = enqueue
+    end
+
+    local trigger_tick = orchestrator.tick({ max_jobs_per_tick = #trigger_jobs })
+    local trigger_collected = collectTriggerJobResults(trigger_jobs)
+    local all_trigger_complete = trigger_collected.complete_count == #trigger_jobs
+    local all_trigger_accepted = trigger_collected.accepted_count == #trigger_jobs
+    local total_job_count = source_enqueued.job_count + #timer_jobs + #trigger_jobs
+    local accepted_count = source_collected.accepted_count + timer_collected.accepted_count + trigger_collected.accepted_count
+
+    return {
+        ok = all_trigger_complete and all_trigger_accepted,
+        stage = all_trigger_complete and all_trigger_accepted and nil or "performance_trigger_launch",
+        recipe_id = built.recipe_id,
+        slot_count = built.slot_count,
+        helper_record_count = built.helper_record_count,
+        source_job_count = source_enqueued.job_count,
+        timer_payload_job_count = #timer_jobs,
+        trigger_payload_job_count = #trigger_jobs,
+        total_job_count = total_job_count,
+        launch_accepted_count = accepted_count,
+        source_jobs = source_collected.jobs,
+        timer_jobs = timer_collected.jobs,
+        trigger_jobs = trigger_collected.jobs,
+        timer_seconds = built.timer_seconds,
+        timer_delay_ticks = built.timer_delay_ticks,
+        timer_due_tick = timer_due_tick,
+        timer_pre_tick = timer_pre_tick,
+        timer_tick = timer_tick,
+        source_tick = source_tick,
+        trigger_tick = trigger_tick,
+        burst_metadata_exists = built.burst_metadata_exists,
+        multicast_metadata_exists = built.multicast_metadata_exists,
+        burst_param_count = burst.burst_param_count,
+        burst_ring_angle_degrees = burst.ring_angle_degrees,
+        burst_direction_count = #(burst.direction_keys or {}),
+        burst_direction_keys = burst.direction_keys,
+        timer_resolution_kind = resolution.resolution_kind,
+        timer_projectile_speed = resolution.timer_projectile_speed,
+        timer_travel_distance = resolution.timer_travel_distance,
+        queue_drained = orchestrator.queueLength() == 0,
+        performance_shape = "Fireball Timer 1s -> Multicast 8 Burst Frostball Trigger -> Multicast 2 Fire Damage 10pt/10ft",
+        fast_forward_semantics = "logical_orchestrator_tick_fast_forward",
+        performance_stress_only = true,
+        real_delay_test = false,
+        elapsed_ticks = orchestrator.currentTick() - started_tick,
+        error = (all_trigger_complete and all_trigger_accepted) and nil or (trigger_collected.first_error or "performance trigger payload launch failed"),
     }
 end
 
@@ -2063,6 +2447,8 @@ local function simulateTriggerSourceHit(request_id, helper, hit_payload)
         source_slot_id = route.slot_id,
         helper_engine_id = route.helper_engine_id,
         projectile_id = route.projectile_id,
+        source = route.source,
+        user_data = route.user_data,
         hit_key = route.hit_key,
         first_hit = route.first_hit,
         previous_hit_key = route.hit_record and route.hit_record.previous and route.hit_record.previous.hit_key or nil,
@@ -2140,6 +2526,40 @@ function dev_launch.runHelperHitIdempotencyProbe(payload)
         hitPos = start_pos,
     })
 
+    local user_data_request_id = request_id .. ":userdata"
+    local user_data_run = createTriggerProbeRun(user_data_request_id, sender, actor, simple_built, direction)
+    local user_data_first = simulateTriggerSourceHit(user_data_request_id, simple_source, {
+        spellId = "spellforge_probe_wrong_spellid",
+        projectileId = request_id .. ":userdata-projectile",
+        userData = sfp_userdata.buildHelperUserData({
+            runtime = "2.2c_dev_helper",
+            recipe_id = simple_built.recipe_id,
+            slot_id = simple_source.slot_id,
+            helper_engine_id = simple_source.engine_id,
+            job_kind = "idempotency_probe",
+            job_id = request_id .. ":userdata-job",
+            depth = 0,
+        }),
+        attacker = actor,
+        hitPos = start_pos,
+    })
+    local user_data_trigger_count = user_data_run.trigger_payload_job_count
+    pending_trigger_runs[user_data_request_id] = nil
+
+    local mismatch_route = dev_runtime.resolveHelperHit({
+        spellId = simple_source.engine_id,
+        userData = {
+            spellforge = true,
+            schema = sfp_userdata.schema(),
+            runtime = "2.2c_dev_helper",
+            recipe_id = simple_built.recipe_id .. ":mismatch",
+            slot_id = simple_source.slot_id,
+            helper_engine_id = simple_source.engine_id,
+        },
+        attacker = actor,
+        hitPos = start_pos,
+    })
+
     local fallback_request_id = request_id .. ":fallback"
     local fallback_run = createTriggerProbeRun(fallback_request_id, sender, actor, simple_built, direction)
     local fallback_hit_payload = {
@@ -2184,6 +2604,13 @@ function dev_launch.runHelperHitIdempotencyProbe(payload)
             and projectile_only_route.ok == true
             and projectile_only_route.helper_engine_id == simple_source.engine_id
             and projectile_only_route.slot_id == simple_source.slot_id
+            and user_data_first.ok == true
+            and user_data_first.source == "userData"
+            and user_data_first.helper_engine_id == simple_source.engine_id
+            and user_data_first.source_slot_id == simple_source.slot_id
+            and user_data_trigger_count == 1
+            and mismatch_route.ok == false
+            and type(mismatch_route.error) == "string"
             and fallback_first.ok == true
             and fallback_second.ok == true
             and multicast_route_ok == true
@@ -2211,6 +2638,13 @@ function dev_launch.runHelperHitIdempotencyProbe(payload)
         projectile_only_routing_ok = projectile_only_route.ok == true
             and projectile_only_route.helper_engine_id == simple_source.engine_id
             and projectile_only_route.slot_id == simple_source.slot_id,
+        user_data_routing_ok = user_data_first.ok == true
+            and user_data_first.source == "userData"
+            and user_data_first.helper_engine_id == simple_source.engine_id
+            and user_data_first.source_slot_id == simple_source.slot_id
+            and user_data_trigger_count == 1,
+        user_data_mismatch_guard_ok = mismatch_route.ok == false and type(mismatch_route.error) == "string",
+        user_data_mismatch_error = mismatch_route.error,
         projectile_duplicate_first_hit = simple_first.first_hit,
         projectile_duplicate_second_first_hit = simple_second.first_hit,
         projectile_duplicate_hit_key_stable = simple_second.hit_key == simple_first.hit_key,
@@ -2359,6 +2793,33 @@ function dev_launch.onTriggerEmitterRequest(payload)
     end
 end
 
+function dev_launch.onPerformanceStressRequest(payload)
+    local sender = payload and payload.sender
+    local result = dev_launch.runPerformanceStressLaunch(payload or {})
+    result.request_id = payload and payload.request_id or nil
+    send(sender, events.DEV_LAUNCH_PERF_STRESS_RESULT, result)
+    if result.ok then
+        log.info(string.format(
+            "SPELLFORGE_DEV_PERF_STRESS_FAST_FORWARD_OK recipe_id=%s slots=%s total_jobs=%s accepted=%s source=%s timer_payloads=%s trigger_payloads=%s timer_delay_ticks=%s burst_dirs=%s elapsed_ticks=%s queue_drained=%s fast_forward=%s real_delay_test=%s",
+            tostring(result.recipe_id),
+            tostring(result.slot_count),
+            tostring(result.total_job_count),
+            tostring(result.launch_accepted_count),
+            tostring(result.source_job_count),
+            tostring(result.timer_payload_job_count),
+            tostring(result.trigger_payload_job_count),
+            tostring(result.timer_delay_ticks),
+            tostring(result.burst_direction_count),
+            tostring(result.elapsed_ticks),
+            tostring(result.queue_drained),
+            tostring(result.fast_forward_semantics),
+            tostring(result.real_delay_test)
+        ))
+    else
+        log.warn(string.format("dev performance stress failed stage=%s error=%s", tostring(result.stage), tostring(result.error)))
+    end
+end
+
 function dev_launch.onProbeUnknownHelper(payload)
     local sender = payload and payload.sender
     local request_id = payload and payload.request_id
@@ -2459,6 +2920,13 @@ function dev_launch.onHelperHit(route_or_payload, mapping_arg)
                 spell_id = payload and (payload.spellId or payload.spell_id) or nil,
                 projectile_id = route.projectile_id,
                 projectile_id_source = route.projectile_id_source,
+                route_source = route.source,
+                hit_user_data_present = type(route.user_data) == "table",
+                hit_user_data_schema = route.user_data and route.user_data.schema or nil,
+                hit_user_data_runtime = route.user_data and route.user_data.runtime or nil,
+                hit_user_data_recipe_id = route.user_data and route.user_data.recipe_id or nil,
+                hit_user_data_slot_id = route.user_data and route.user_data.slot_id or nil,
+                hit_user_data_helper_engine_id = route.user_data and route.user_data.helper_engine_id or nil,
                 hit_key = route.hit_key,
                 first_hit = route.first_hit,
                 impactSpeed = route.telemetry and route.telemetry.impactSpeed or nil,

@@ -1,6 +1,13 @@
 local limits = require("scripts.spellforge.shared.limits")
 
 local helper_record_specs = {}
+local PRESENTATION_METADATA_FIELDS = {
+    "areaVfxRecId",
+    "areaVfxScale",
+    "vfxRecId",
+    "boltModel",
+    "hitModel",
+}
 
 local ELEMENT_SCHOOL_BY_EFFECT_ID = {
     firedamage = { school = "destruction", element = "fire" },
@@ -45,7 +52,7 @@ end
 local function cloneEffects(effects)
     local out = {}
     for i, effect in ipairs(effects or {}) do
-        out[i] = {
+        local cloned = {
             id = effect.id,
             range = effect.range,
             area = effect.area,
@@ -54,6 +61,12 @@ local function cloneEffects(effects)
             magnitudeMax = effect.magnitudeMax,
             params = cloneParams(effect.params),
         }
+        for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+            if effect[field] ~= nil then
+                cloned[field] = effect[field]
+            end
+        end
+        out[i] = cloned
     end
     return out
 end
@@ -74,15 +87,43 @@ local function resolvePresentation(effects)
     local first = effects and effects[1]
     local normalized = normalizeEffectId(first and first.id)
     local mapped = normalized and ELEMENT_SCHOOL_BY_EFFECT_ID[normalized] or nil
-    if mapped then
+    local presentation = {
+        school = mapped and mapped.school or nil,
+        element = mapped and mapped.element or nil,
+    }
+    if type(first) == "table" then
+        for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+            if first[field] ~= nil then
+                presentation[field] = first[field]
+            end
+        end
+    end
+    -- Do not synthesize areaVfxRecId from vfxRecId or boltModel here.
+    -- Bolt presentation records are not guaranteed to be valid area statics.
+    return presentation
+end
+
+function helper_record_specs.auditPresentationMetadata(spec_or_effect)
+    local effect = spec_or_effect
+    if type(spec_or_effect) == "table" and spec_or_effect.presentation then
+        local p = spec_or_effect.presentation
         return {
-            school = mapped.school,
-            element = mapped.element,
+            has_areaVfxRecId = p.areaVfxRecId ~= nil,
+            has_areaVfxScale = p.areaVfxScale ~= nil,
+            has_vfxRecId = p.vfxRecId ~= nil,
+            has_boltModel = p.boltModel ~= nil,
+            has_hitModel = p.hitModel ~= nil,
+            spellforge_synthesizes_area_from_bolt = false,
         }
     end
+    local p = resolvePresentation({ effect })
     return {
-        school = nil,
-        element = nil,
+        has_areaVfxRecId = p.areaVfxRecId ~= nil,
+        has_areaVfxScale = p.areaVfxScale ~= nil,
+        has_vfxRecId = p.vfxRecId ~= nil,
+        has_boltModel = p.boltModel ~= nil,
+        has_hitModel = p.hitModel ~= nil,
+        spellforge_synthesizes_area_from_bolt = false,
     }
 end
 

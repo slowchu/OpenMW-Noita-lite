@@ -2,6 +2,13 @@ local limits = require("scripts.spellforge.shared.limits")
 local parser = require("scripts.spellforge.global.parser")
 
 local emission_slots = {}
+local PRESENTATION_METADATA_FIELDS = {
+    "areaVfxRecId",
+    "areaVfxScale",
+    "vfxRecId",
+    "boltModel",
+    "hitModel",
+}
 
 local function cloneParams(params)
     local out = {}
@@ -20,7 +27,7 @@ local function cloneEffect(effect)
     if type(effect) ~= "table" then
         return { id = tostring(effect) }
     end
-    return {
+    local out = {
         id = effect.id,
         range = effect.range,
         area = effect.area,
@@ -29,6 +36,12 @@ local function cloneEffect(effect)
         magnitudeMax = effect.magnitudeMax,
         params = cloneParams(effect.params),
     }
+    for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+        if effect[field] ~= nil then
+            out[field] = effect[field]
+        end
+    end
+    return out
 end
 
 local function cloneEffects(effects)

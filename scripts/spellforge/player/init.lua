@@ -275,6 +275,21 @@ local function dispatchInterceptCast(spell_id)
     log.info(string.format("intercept dispatch sent spell_id=%s", tostring(spell_id)))
 end
 
+local function recordCompiledDispatchSuppressed(spell_id, authorized, reason)
+    log.info(string.format(
+        "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=%s reason=%s",
+        tostring(spell_id),
+        tostring(authorized),
+        tostring(reason)
+    ))
+    core.sendGlobalEvent(events.INTERCEPT_DISPATCH_SUPPRESSED, {
+        sender = self.object,
+        spell_id = spell_id,
+        authorized = authorized,
+        reason = reason,
+    })
+end
+
 local function sendDebugVanillaFireball()
     local cp = -camera.getPitch()
     local cy = camera.getYaw()
@@ -508,10 +523,7 @@ local function registerAnimationTextKeys()
                             "intercept release suppressed spell_id=%s reason=late authorization timeout",
                             tostring(timeout_spell_id)
                         ))
-                        log.info(string.format(
-                            "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=false reason=late authorization timeout",
-                            tostring(timeout_spell_id)
-                        ))
+                        recordCompiledDispatchSuppressed(timeout_spell_id, false, "late authorization timeout")
                     end)
                     log.debug(string.format(
                         "intercept release waiting for late authorization spell_id=%s window=0.35",
@@ -524,12 +536,7 @@ local function registerAnimationTextKeys()
                         tostring(spell_id),
                         reason
                     ))
-                    log.info(string.format(
-                        "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=%s reason=%s",
-                        tostring(spell_id),
-                        tostring(authorized),
-                        tostring(reason)
-                    ))
+                    recordCompiledDispatchSuppressed(spell_id, authorized, reason)
                 end
             end
             clearInterceptState()
@@ -635,7 +642,7 @@ local function onInterceptDispatchResult(payload)
                 tostring(payload.spell_id),
                 tostring(payload.dispatch_count)
             ))
-        elseif dispatch_kind == "compiled_spellforge" then
+        elseif dispatch_kind == "compiled_spellforge" or dispatch_kind == "compiled_spellforge_2_2c_helper" then
             log.info(string.format(
                 "SPELLFORGE_COMPILED_DISPATCH_OK spell_id=%s dispatch_count=%s",
                 tostring(payload.spell_id),
@@ -661,11 +668,7 @@ local function onInterceptDispatchResult(payload)
     end
 
     log.error(string.format("intercept dispatch failed spell_id=%s err=%s", tostring(payload.spell_id), tostring(payload.error)))
-    log.info(string.format(
-        "SPELLFORGE_COMPILED_DISPATCH_SUPPRESSED spell_id=%s authorized=unknown reason=%s",
-        tostring(payload.spell_id),
-        tostring(payload.error or "dispatch failed")
-    ))
+    recordCompiledDispatchSuppressed(payload.spell_id, "unknown", payload.error or "dispatch failed")
 end
 
 return {

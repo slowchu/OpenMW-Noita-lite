@@ -4,10 +4,18 @@ local canonicalize_effect_list = require("scripts.spellforge.global.canonicalize
 local emission_slots = require("scripts.spellforge.global.emission_slots")
 local helper_record_specs = require("scripts.spellforge.global.helper_record_specs")
 local helper_records = require("scripts.spellforge.global.helper_records")
+local runtime_stats = require("scripts.spellforge.global.runtime_stats")
 
 local plan_cache = {}
 
 local CANONICAL_VERSION = "spellforge-effect-list-v1"
+local PRESENTATION_METADATA_FIELDS = {
+    "areaVfxRecId",
+    "areaVfxScale",
+    "vfxRecId",
+    "boltModel",
+    "hitModel",
+}
 
 local plans_by_recipe_id = {}
 
@@ -31,7 +39,7 @@ local function sanitizeEffect(effect)
         }
     end
 
-    return {
+    local out = {
         id = effect.id,
         range = effect.range,
         area = effect.area,
@@ -40,6 +48,12 @@ local function sanitizeEffect(effect)
         magnitudeMax = effect.magnitudeMax,
         params = cloneParams(effect.params),
     }
+    for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+        if effect[field] ~= nil then
+            out[field] = effect[field]
+        end
+    end
+    return out
 end
 
 local function sanitizeEffects(effects)
@@ -121,6 +135,8 @@ local function summarizeBounds(groups, effect_count)
         has_multicast = false,
         has_pattern = false,
         has_chain = false,
+        has_speed_plus = false,
+        has_size_plus = false,
         group_count = #(groups or {}),
         effect_count = effect_count or 0,
     }
@@ -135,6 +151,10 @@ local function summarizeBounds(groups, effect_count)
                 bounds.has_pattern = true
             elseif op.opcode == "Chain" then
                 bounds.has_chain = true
+            elseif op.opcode == "Speed+" then
+                bounds.has_speed_plus = true
+            elseif op.opcode == "Size+" then
+                bounds.has_size_plus = true
             end
         end
 
@@ -201,6 +221,7 @@ function plan_cache.compileOrGet(effects, opts)
     local canonical = canonicalize_effect_list.run(effects, opts)
     local cached = plan_cache.get(canonical.recipe_id)
     if cached then
+        runtime_stats.inc("plans_reused")
         return {
             ok = true,
             reused = true,
@@ -224,6 +245,7 @@ function plan_cache.compileOrGet(effects, opts)
 
     local plan = buildPlan(effects, parse_result, canonical)
     plan_cache.put(plan)
+    runtime_stats.inc("plans_compiled")
 
     return {
         ok = true,
@@ -238,6 +260,7 @@ end
 function plan_cache.attachEmissionSlots(recipe_id, opts)
     local plan = plan_cache.get(recipe_id)
     if not plan then
+        runtime_stats.inc("helper_records_attach_failed")
         return {
             ok = false,
             errors = {
@@ -318,6 +341,7 @@ function plan_cache.attachHelperRecords(recipe_id, opts)
     if type(plan.helper_specs) ~= "table" or #plan.helper_specs == 0 then
         local attached_specs = plan_cache.attachHelperSpecs(recipe_id, opts)
         if not attached_specs.ok then
+            runtime_stats.inc("helper_records_attach_failed")
             return attached_specs
         end
         plan = attached_specs.plan
@@ -328,12 +352,14 @@ function plan_cache.attachHelperRecords(recipe_id, opts)
         specs = plan.helper_specs,
     }, opts)
     if not materialized.ok then
+        runtime_stats.inc("helper_records_attach_failed")
         return materialized
     end
 
     plan.helper_records = materialized.records
     plan.helper_record_count = materialized.record_count
     plan.helper_records_reused = materialized.reused
+    runtime_stats.inc("helper_records_attached", materialized.record_count or 0)
 
     return {
         ok = true,

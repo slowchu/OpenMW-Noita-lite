@@ -1,7 +1,6 @@
 local async = require("openmw.async")
 local camera = require("openmw.camera")
 local core = require("openmw.core")
-local input = require("openmw.input")
 local nearby = require("openmw.nearby")
 local self = require("openmw.self")
 local util = require("openmw.util")
@@ -9,6 +8,7 @@ local util = require("openmw.util")
 local dev = require("scripts.spellforge.shared.dev")
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_dev_launch")
+local smoke_keys = require("scripts.spellforge.tests.smoke_keys")
 
 local state = {
     backend = "INIT",
@@ -19,6 +19,7 @@ local state = {
     pending_launch = {},
     pending_hit = {},
     pending_lookup = {},
+    pending_perf = {},
     expected_recipe_id = nil,
     expected_slot_id = nil,
     expected_helper_engine_id = nil,
@@ -172,12 +173,85 @@ local function runSmoke()
     })
 end
 
+local function runPerformanceSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
+    if not dev.devLaunchEnabled() then
+        log.info(string.format("SKIP smoke performance stress: enable %s", dev.devLaunchSettingKey()))
+        return
+    end
+    if state.running then
+        log.warn("smoke dev launch already in progress")
+        return
+    end
+    if state.backend ~= "READY" then
+        log.warn("smoke performance stress skipped: backend is not READY")
+        return
+    end
+
+    log.info("smoke performance stress logical fast-forward hotkey accepted; not a real Timer delay test")
+    state.running = true
+
+    local start_pos, direction, hit_object = currentLaunchAim()
+    local request_id = nextRequestId("smoke-perf-stress")
+    waitFor(state.pending_perf, request_id, 8, function(result)
+        assertLine(result and result.ok == true, "performance stress request ok", result and result.error)
+        if not result or result.ok ~= true then
+            state.running = false
+            return
+        end
+
+        assertLine(result.slot_count == 25, "performance stress plan has 25 slots")
+        assertLine(result.helper_record_count == 25, "performance stress plan has 25 helper records")
+        assertLine(result.source_job_count == 1, "performance stress launches one Fireball source")
+        assertLine(result.timer_payload_job_count == 8, "performance stress launches eight Timer/Burst Frostball payloads")
+        assertLine(result.trigger_payload_job_count == 16, "performance stress launches sixteen Trigger Fire payloads")
+        assertLine(result.total_job_count == 25, "performance stress enqueues 25 total jobs")
+        assertLine(result.launch_accepted_count == 25, "performance stress SFP accepts all 25 helper launches")
+        assertLine(tonumber(result.timer_seconds) == 1, "performance stress uses Timer 1s")
+        assertLine(tonumber(result.timer_delay_ticks) ~= nil and tonumber(result.timer_delay_ticks) > 0, "performance stress uses bounded Timer delay ticks")
+        assertLine(result.fast_forward_semantics == "logical_orchestrator_tick_fast_forward", "performance stress is labeled as logical orchestrator tick fast-forward")
+        assertLine(result.real_delay_test == false, "performance stress does not claim a real Timer delay test")
+        assertLine(result.burst_metadata_exists == true, "performance stress preserves Burst metadata")
+        assertLine(result.multicast_metadata_exists == true, "performance stress preserves Multicast metadata")
+        assertLine(result.burst_direction_count == 8, "performance stress computes eight Burst directions")
+        assertLine(result.queue_drained == true, "performance stress queue drains")
+
+        log.info(string.format(
+            "performance stress summary recipe_id=%s shape=%s total_jobs=%s accepted=%s timer_delay_ticks=%s burst_dirs=%s elapsed_ticks=%s fast_forward=%s real_delay_test=%s",
+            tostring(result.recipe_id),
+            tostring(result.performance_shape),
+            tostring(result.total_job_count),
+            tostring(result.launch_accepted_count),
+            tostring(result.timer_delay_ticks),
+            tostring(result.burst_direction_count),
+            tostring(result.elapsed_ticks),
+            tostring(result.fast_forward_semantics),
+            tostring(result.real_delay_test)
+        ))
+        state.running = false
+    end)
+
+    core.sendGlobalEvent(events.DEV_LAUNCH_PERF_STRESS, {
+        sender = self.object,
+        actor = self,
+        request_id = request_id,
+        start_pos = start_pos,
+        direction = direction,
+        hit_object = hit_object,
+    })
+end
+
 local function onKeyPress(key)
     if not dev.smokeTestsEnabled() then
         return true
     end
-    local symbol = key.symbol and string.lower(key.symbol) or ""
-    if symbol == "l" or key.code == input.KEY.L then
+    if smoke_keys.matches(key, "num0") then
+        runPerformanceSmoke()
+        return false
+    end
+    if smoke_keys.matches(key, "plus") then
         if not dev.devLaunchEnabled() then
             log.info(string.format("SKIP smoke dev launch: enable %s", dev.devLaunchSettingKey()))
             return true
@@ -205,7 +279,7 @@ return {
                 requestBackend()
             elseif state.backend == "READY" and not state.ready_logged then
                 state.ready_logged = true
-                log.info("smoke dev launch ready: aim at a valid target/surface and press L")
+                log.info("smoke dev launch ready: aim at a valid target/surface and press Numpad 0 for performance stress; press Numpad + for the single-helper dev launch")
             end
         end,
         onKeyPress = onKeyPress,
@@ -248,6 +322,14 @@ return {
             local cb = request_id and state.pending_lookup[request_id]
             if cb then
                 state.pending_lookup[request_id] = nil
+                cb(payload)
+            end
+        end,
+        [events.DEV_LAUNCH_PERF_STRESS_RESULT] = function(payload)
+            local request_id = payload and payload.request_id
+            local cb = request_id and state.pending_perf[request_id]
+            if cb then
+                state.pending_perf[request_id] = nil
                 cb(payload)
             end
         end,

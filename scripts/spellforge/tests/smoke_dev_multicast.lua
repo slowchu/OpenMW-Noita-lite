@@ -1,7 +1,6 @@
 local async = require("openmw.async")
 local camera = require("openmw.camera")
 local core = require("openmw.core")
-local input = require("openmw.input")
 local nearby = require("openmw.nearby")
 local self = require("openmw.self")
 local util = require("openmw.util")
@@ -9,6 +8,7 @@ local util = require("openmw.util")
 local dev = require("scripts.spellforge.shared.dev")
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_dev_multicast")
+local smoke_keys = require("scripts.spellforge.tests.smoke_keys")
 
 local state = {
     backend = "INIT",
@@ -281,8 +281,7 @@ local function onKeyPress(key)
     if not dev.smokeTestsEnabled() then
         return true
     end
-    local symbol = key.symbol and string.lower(key.symbol) or ""
-    if symbol == "m" or key.code == input.KEY.M then
+    if smoke_keys.matches(key, "num1") then
         if not dev.devLaunchEnabled() then
             log.info(string.format("SKIP smoke dev multicast: enable %s", dev.devLaunchSettingKey()))
             return true
@@ -310,7 +309,7 @@ return {
                 requestBackend()
             elseif state.backend == "READY" and not state.ready_logged then
                 state.ready_logged = true
-                log.info("smoke dev multicast ready: aim at a valid target/surface and press M")
+                log.info("smoke dev multicast ready: aim at a valid target/surface and press Numpad 1")
             end
         end,
         onKeyPress = onKeyPress,

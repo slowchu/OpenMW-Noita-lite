@@ -1,7 +1,6 @@
 local async = require("openmw.async")
 local camera = require("openmw.camera")
 local core = require("openmw.core")
-local input = require("openmw.input")
 local nearby = require("openmw.nearby")
 local self = require("openmw.self")
 local util = require("openmw.util")
@@ -9,6 +8,7 @@ local util = require("openmw.util")
 local dev = require("scripts.spellforge.shared.dev")
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_dev_timer")
+local smoke_keys = require("scripts.spellforge.tests.smoke_keys")
 
 local TIMER_RAYCAST_DISTANCE = 10000
 
@@ -389,8 +389,7 @@ local function onKeyPress(key)
     if not dev.smokeTestsEnabled() then
         return true
     end
-    local symbol = key.symbol and string.lower(key.symbol) or ""
-    if symbol == "t" or key.code == input.KEY.T then
+    if smoke_keys.matches(key, "num2") then
         if not dev.devLaunchEnabled() then
             log.info(string.format("SKIP smoke dev timer: enable %s", dev.devLaunchSettingKey()))
             return true
@@ -418,7 +417,7 @@ return {
                 requestBackend()
             elseif state.backend == "READY" and not state.ready_logged then
                 state.ready_logged = true
-                log.info("smoke dev timer ready: aim at a valid target/surface and press T")
+                log.info("smoke dev timer ready: aim at a valid target/surface and press Numpad 2")
             end
         end,
         onKeyPress = onKeyPress,

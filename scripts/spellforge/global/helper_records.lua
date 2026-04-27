@@ -1,9 +1,17 @@
 local core = require("openmw.core")
 local limits = require("scripts.spellforge.shared.limits")
 local records = require("scripts.spellforge.global.records")
+local runtime_stats = require("scripts.spellforge.global.runtime_stats")
 local log = require("scripts.spellforge.shared.log").new("global.helper_records")
 
 local helper_records = {}
+local PRESENTATION_METADATA_FIELDS = {
+    "areaVfxRecId",
+    "areaVfxScale",
+    "vfxRecId",
+    "boltModel",
+    "hitModel",
+}
 
 local by_logical_id = {}
 local by_engine_id = {}
@@ -33,10 +41,10 @@ local function cloneParams(params)
     return out
 end
 
-local function cloneEffects(effects)
+local function cloneEffects(effects, include_metadata)
     local out = {}
     for i, effect in ipairs(effects or {}) do
-        out[i] = {
+        local cloned = {
             id = effect.id,
             range = effect.range,
             area = effect.area,
@@ -45,6 +53,27 @@ local function cloneEffects(effects)
             magnitudeMax = effect.magnitudeMax,
             params = cloneParams(effect.params),
         }
+        if include_metadata then
+            for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+                if effect[field] ~= nil then
+                    cloned[field] = effect[field]
+                end
+            end
+        end
+        out[i] = cloned
+    end
+    return out
+end
+
+local function clonePresentation(presentation)
+    local out = {
+        school = presentation and presentation.school or nil,
+        element = presentation and presentation.element or nil,
+    }
+    for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+        if presentation and presentation[field] ~= nil then
+            out[field] = presentation[field]
+        end
     end
     return out
 end
@@ -69,7 +98,7 @@ local function buildDraft(spec)
         name = spec.planned_name or string.format("Spellforge Helper %s", tostring(spec.slot_id)),
         cost = spec.cost or 0,
         isAutocalc = spec.is_autocalc == true,
-        effects = cloneEffects(spec.effects),
+        effects = cloneEffects(spec.effects, false),
     }
 end
 
@@ -88,7 +117,8 @@ local function toMapping(spec, engine_id, reused)
         engine_id = engine_id,
         internal = spec.internal == true,
         visible_to_player = spec.visible_to_player == true,
-        effects = cloneEffects(spec.effects),
+        effects = cloneEffects(spec.effects, true),
+        presentation = clonePresentation(spec.presentation),
         payload_bindings = spec.routing and spec.routing.payload_bindings or nil,
         prefix_ops = cloneOps(spec.routing and spec.routing.prefix_ops),
         postfix_ops = cloneOps(spec.routing and spec.routing.postfix_ops),
@@ -180,6 +210,7 @@ function helper_records.materialize(specs_or_result, opts)
             local reused_mapping = toMapping(spec, existing.engine_id, true)
             putMapping(reused_mapping)
             materialized[#materialized + 1] = reused_mapping
+            runtime_stats.inc("helper_records_reused")
         else
             local draft = buildDraft(spec)
             local created_record, create_error = records.createRecord(draft)
@@ -217,6 +248,7 @@ function helper_records.materialize(specs_or_result, opts)
             putMapping(mapping)
             materialized[#materialized + 1] = mapping
             any_new = true
+            runtime_stats.inc("helper_records_created")
         end
     end
 

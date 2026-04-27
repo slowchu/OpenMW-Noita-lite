@@ -32,7 +32,13 @@ local function apply()
         ensureInfoLogs()
         setDevTrue("enable_smoke_tests")
         setDevTrue("enable_dev_launch")
-        setDevTrue("enable_live_2_2c_simple_dispatch")
+        setDevTrue("enable_live_2_2c_runtime")
+        setDevTrue("enable_live_multicast")
+        setDevTrue("enable_live_spread_burst")
+        setDevTrue("enable_live_trigger")
+        setDevTrue("enable_live_timer")
+        setDevTrue("enable_live_speed_plus")
+        setDevTrue("enable_live_size_plus")
     end)
     if not ok then
         state.failed = true
@@ -41,7 +47,7 @@ local function apply()
     end
 
     state.applied = true
-    log.info("enabled SpellforgeDev.enable_smoke_tests, SpellforgeDev.enable_dev_launch, and SpellforgeDev.enable_live_2_2c_simple_dispatch")
+    log.info("enabled SpellforgeDev.enable_smoke_tests, SpellforgeDev.enable_dev_launch, SpellforgeDev.enable_live_2_2c_runtime, SpellforgeDev.enable_live_multicast, SpellforgeDev.enable_live_spread_burst, SpellforgeDev.enable_live_trigger, SpellforgeDev.enable_live_timer, SpellforgeDev.enable_live_speed_plus, and SpellforgeDev.enable_live_size_plus")
 end
 
 return {

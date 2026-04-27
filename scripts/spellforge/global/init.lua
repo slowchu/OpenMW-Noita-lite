@@ -4,12 +4,15 @@ local compiler = require("scripts.spellforge.global.compiler")
 local dev_launch = require("scripts.spellforge.global.dev_launch")
 local executor = require("scripts.spellforge.global.executor")
 local events = require("scripts.spellforge.shared.events")
+local live_timer = require("scripts.spellforge.global.live_timer")
 local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
 local records = require("scripts.spellforge.global.records")
 local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
 local sfp_smoke = require("scripts.spellforge.global.sfp_smoke")
 local log = require("scripts.spellforge.shared.log").new("global.init")
 local did_records_probe = false
+
+live_timer.registerCallbacks()
 
 local function isBackendReady()
     return sfp_adapter.capabilities().has_interface == true
@@ -144,6 +147,7 @@ return {
         [events.DEV_LAUNCH_BURST_EMITTER] = dev_launch.onBurstEmitterRequest,
         [events.DEV_LAUNCH_TIMER_EMITTER] = dev_launch.onTimerEmitterRequest,
         [events.DEV_LAUNCH_TRIGGER_EMITTER] = dev_launch.onTriggerEmitterRequest,
+        [events.DEV_LAUNCH_PERF_STRESS] = dev_launch.onPerformanceStressRequest,
         [events.DEV_LAUNCH_PROBE_UNKNOWN_HELPER] = dev_launch.onProbeUnknownHelper,
         [events.DEV_HELPER_HIT_IDEMPOTENCY_PROBE] = dev_launch.onHelperHitIdempotencyProbe,
         [events.SFP_CAPABILITIES_REQUEST] = sfp_smoke.onCapabilitiesRequest,
@@ -152,6 +156,8 @@ return {
         [events.LIVE_SIMPLE_DISPATCH_PROBE] = live_simple_dispatch.onProbe,
         [events.BEGIN_CAST_OBSERVE] = executor.onBeginObserve,
         [events.CAST_DIAG_SIGNAL] = executor.onCastDiagSignal,
+        [events.INTERCEPT_DISPATCH_SUPPRESSED] = executor.onInterceptDispatchSuppressed,
+        [events.RUNTIME_STATS_REQUEST] = executor.onRuntimeStatsRequest,
         MagExp_OnMagicHit = executor.onMagicHit,
         MagExp_SpellState = sfp_smoke.onSpellState,
     },

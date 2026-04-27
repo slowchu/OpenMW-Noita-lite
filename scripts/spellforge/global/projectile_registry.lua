@@ -67,6 +67,7 @@ function projectile_registry.registerLaunch(launch_result, metadata)
         reason = input.reason or input.kind,
         start_pos = input.start_pos,
         direction = input.direction,
+        user_data = input.user_data,
         launch_result = compactLaunchResult(result),
         hit = false,
         hit_payload = nil,

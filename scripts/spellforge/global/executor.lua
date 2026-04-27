@@ -7,11 +7,17 @@ local dev = require("scripts.spellforge.shared.dev")
 local events = require("scripts.spellforge.shared.events")
 local dev_launch = require("scripts.spellforge.global.dev_launch")
 local dev_runtime = require("scripts.spellforge.global.dev_runtime")
+local limits = require("scripts.spellforge.shared.limits")
 local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
+local live_timer = require("scripts.spellforge.global.live_timer")
+local live_trigger = require("scripts.spellforge.global.live_trigger")
 local log = require("scripts.spellforge.shared.log").new("global.executor")
+local orchestrator = require("scripts.spellforge.global.orchestrator")
 local records = require("scripts.spellforge.global.records")
 local runtime_hits = require("scripts.spellforge.global.runtime_hits")
+local runtime_stats = require("scripts.spellforge.global.runtime_stats")
 local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
+local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
 
 local executor = {}
 
@@ -24,6 +30,7 @@ local last_active_spell_ids = {}
 local fireball_logged = false
 local target_filter_registered = false
 local DISPATCH_KIND_COMPILED = "compiled_spellforge"
+local DISPATCH_KIND_COMPILED_2_2C_HELPER = "compiled_spellforge_2_2c_helper"
 local DISPATCH_KIND_DEBUG_FIREBALL = "debug_vanilla_fireball"
 
 local function stringifyValue(value, depth)
@@ -126,12 +133,18 @@ local function createDispatchSpellForEffect(recipe_id, effect_index, effect)
     return dispatch_spell_id, nil
 end
 
-local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_object)
+local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_object, opts)
+    local options = opts or {}
+    runtime_stats.inc("sfp_launch_attempts")
     local capabilities = sfp_adapter.capabilities()
     if not capabilities.has_interface then
+        runtime_stats.inc("sfp_launch_missing_interface")
+        runtime_stats.inc("sfp_launch_failed")
         return false, "I.MagExp missing"
     end
     if not capabilities.has_launchSpell then
+        runtime_stats.inc("sfp_launch_missing_interface")
+        runtime_stats.inc("sfp_launch_failed")
         return false, "I.MagExp.launchSpell missing"
     end
 
@@ -144,17 +157,35 @@ local function launchSpell(actor, dispatch_spell_id, start_pos, direction, hit_o
         tostring(hit_object and hit_object.recordId or hit_object)
     ))
 
-    local result = sfp_adapter.launchSpell({
+    local launch_data = {
         attacker = actor,
         spellId = dispatch_spell_id,
         startPos = start_pos,
         direction = direction,
         hitObject = hit_object,
         isFree = true,
-    })
+    }
+    if type(options.userData) == "table" then
+        launch_data.userData = options.userData
+    end
+    if options.muteAudio ~= nil then
+        launch_data.muteAudio = options.muteAudio
+    end
+    if options.muteLight ~= nil then
+        launch_data.muteLight = options.muteLight
+    end
+
+    local result = sfp_adapter.launchSpell(launch_data)
     if not result.ok then
+        runtime_stats.inc("sfp_launch_failed")
         log.error(string.format("executor launchSpell failed spell_id=%s err=%s", tostring(dispatch_spell_id), tostring(result.error)))
         return false, tostring(result.error)
+    end
+    runtime_stats.inc("sfp_launch_ok")
+    if result.projectile_id ~= nil then
+        runtime_stats.inc("sfp_projectile_id_returned")
+    else
+        runtime_stats.inc("sfp_projectile_id_missing")
     end
 
     log.debug(string.format(
@@ -234,33 +265,89 @@ function executor.onInterceptCast(payload)
         local live_result = live_ok and live_result_or_err or {
             ok = false,
             used_live_2_2c = true,
+            fallback_allowed = false,
             error = tostring(live_result_or_err),
         }
+        if not live_ok then
+            runtime_stats.inc("live_2_2c_dispatch_failed")
+        end
         if live_result.ok and live_result.used_live_2_2c then
-            launch_cookies[live_result.helper_engine_id] = {
-                recipe_id = recipe_id,
-                plan_recipe_id = live_result.plan_recipe_id,
-                slot_id = live_result.slot_id,
-                source_actor = sender,
-                live_2_2c = true,
-            }
+            local helper_engine_ids = live_result.helper_engine_ids or { live_result.helper_engine_id }
+            local slot_ids = live_result.slot_ids or { live_result.slot_id }
+            for index, helper_engine_id in ipairs(helper_engine_ids) do
+                if type(helper_engine_id) == "string" and helper_engine_id ~= "" then
+                    launch_cookies[helper_engine_id] = {
+                        recipe_id = recipe_id,
+                        plan_recipe_id = live_result.plan_recipe_id,
+                        slot_id = slot_ids[index] or live_result.slot_id,
+                        source_actor = sender,
+                        live_2_2c = true,
+                        cast_id = live_result.cast_id,
+                    }
+                end
+            end
+            runtime_stats.inc("compiled_dispatch_ok")
             sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
                 ok = true,
-                dispatch_kind = DISPATCH_KIND_COMPILED,
+                dispatch_kind = DISPATCH_KIND_COMPILED_2_2C_HELPER,
+                runtime = "2.2c_live_helper",
                 spell_id = engine_id,
                 recipe_id = recipe_id,
                 live_2_2c = true,
                 live_2_2c_plan_recipe_id = live_result.plan_recipe_id,
                 slot_id = live_result.slot_id,
+                slot_ids = live_result.slot_ids,
                 helper_engine_id = live_result.helper_engine_id,
+                helper_engine_ids = live_result.helper_engine_ids,
                 projectile_id = live_result.projectile_id,
+                projectile_ids = live_result.projectile_ids,
                 projectile_registered = live_result.projectile_registered == true,
                 job_id = live_result.job_id,
-                dispatch_count = 1,
+                job_ids = live_result.job_ids,
+                cast_id = live_result.cast_id,
+                fanout_count = live_result.fanout_count,
+                live_mode = live_result.live_mode,
+                pattern_kind = live_result.pattern_kind,
+                pattern_count = live_result.pattern_count,
+                pattern_direction_keys = live_result.pattern_direction_keys,
+                trigger_payload_slot_id = live_result.trigger_payload_slot_id,
+                trigger_payload_helper_engine_id = live_result.trigger_payload_helper_engine_id,
+                timer_payload_slot_id = live_result.timer_payload_slot_id,
+                timer_payload_helper_engine_id = live_result.timer_payload_helper_engine_id,
+                timer_delay_ticks = live_result.timer_delay_ticks,
+                timer_job_id = live_result.timer_job_id,
+                dispatch_count = live_result.dispatch_count or 1,
+                fallback = false,
             })
             return
         end
         if live_result.used_live_2_2c then
+            if live_result.fallback_allowed == false then
+                runtime_stats.inc("fallback_after_enqueue_blocked")
+                runtime_stats.inc("duplicate_cast_or_dispatch_suppressed")
+                log.error(string.format(
+                    "SPELLFORGE_LIVE_2_2C_SIMPLE_DISPATCH_ERR spell_id=%s recipe_id=%s err=%s; fallback blocked after live attempt",
+                    tostring(engine_id),
+                    tostring(recipe_id),
+                    tostring(live_result.error or live_result.fallback_reason or "unknown")
+                ))
+                sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
+                    ok = false,
+                    dispatch_kind = DISPATCH_KIND_COMPILED_2_2C_HELPER,
+                    runtime = "2.2c_live_helper",
+                    spell_id = engine_id,
+                    recipe_id = recipe_id,
+                    error = live_result.error or live_result.fallback_reason or "live 2.2c helper dispatch failed",
+                    live_2_2c = true,
+                    live_2_2c_plan_recipe_id = live_result.plan_recipe_id,
+                    slot_id = live_result.slot_id,
+                    helper_engine_id = live_result.helper_engine_id,
+                    job_id = live_result.job_id,
+                    cast_id = live_result.cast_id,
+                    fallback = false,
+                })
+                return
+            end
             log.warn(string.format(
                 "SPELLFORGE_LIVE_2_2C_SIMPLE_DISPATCH_ERR spell_id=%s recipe_id=%s err=%s; falling back to 2.2b",
                 tostring(engine_id),
@@ -277,6 +364,9 @@ function executor.onInterceptCast(payload)
         end
     end
 
+    if #(root.real_effects or {}) > 0 then
+        runtime_stats.inc("legacy_fallback_used")
+    end
     for effect_index, effect in ipairs(root.real_effects or {}) do
         log.debug(string.format(
             "intercept real_effect[%d] id=%s range=%s area=%s duration=%s magnitudeMin=%s magnitudeMax=%s",
@@ -305,7 +395,14 @@ function executor.onInterceptCast(payload)
             logSpellRecord("vanilla fireball record", "fireball")
         end
 
-        local ok, launch_err = launchSpell(sender, dispatch_spell_id, payload.start_pos, payload.direction, payload.hit_object)
+        local ok, launch_err = launchSpell(sender, dispatch_spell_id, payload.start_pos, payload.direction, payload.hit_object, {
+            userData = sfp_userdata.buildLegacyDispatchUserData({
+                recipe_id = recipe_id,
+                source_spell_id = engine_id,
+                dispatch_spell_id = dispatch_spell_id,
+                effect_index = effect_index,
+            }),
+        })
         if not ok then
             sender:sendEvent(events.INTERCEPT_DISPATCH_RESULT, {
                 ok = false,
@@ -331,6 +428,9 @@ function executor.onInterceptCast(payload)
         recipe_id = recipe_id,
         dispatch_count = dispatched,
     })
+    if dispatched > 0 then
+        runtime_stats.inc("compiled_dispatch_ok")
+    end
 end
 
 function executor.onDebugLaunchVanillaFireball(payload)
@@ -403,14 +503,29 @@ function executor.onBeginObserve(payload)
 end
 
 function executor.onMagicHit(payload)
-    log.debug(string.format("MagExp_OnMagicHit payload=%s", stringifyValue(payload, 4)))
     -- 2.2c helper hits use shared routing only when a dev/live 2.2c gate is enabled;
     -- live 2.2b dispatch cookies stay unchanged.
+    runtime_stats.inc("hits_seen")
 
     local attacker_id = payload and payload.attacker and payload.attacker.recordId or nil
     local victim_id = payload and payload.target and payload.target.recordId or nil
     local spell_id = payload and (payload.spellId or payload.spell_id) or nil
     local hit_pos = payload and payload.hitPos or nil
+    local hit_user_data = sfp_userdata.extract(payload)
+    local spellforge_hit_user_data = sfp_userdata.isSpellforgeUserData(hit_user_data) and hit_user_data or nil
+    log.debug(string.format(
+        "MagExp_OnMagicHit spell_id=%s attacker=%s victim=%s has_user_data=%s recipe_id=%s slot_id=%s",
+        tostring(spell_id),
+        tostring(attacker_id),
+        tostring(victim_id),
+        tostring(spellforge_hit_user_data ~= nil),
+        tostring(spellforge_hit_user_data and spellforge_hit_user_data.recipe_id or nil),
+        tostring(spellforge_hit_user_data and spellforge_hit_user_data.slot_id or nil)
+    ))
+    if spellforge_hit_user_data and spellforge_hit_user_data.runtime == "2.2b_live_dispatch" then
+        runtime_stats.inc("hits_legacy_seen")
+    end
+
     local helper_hit = nil
     if dev.devLaunchEnabled() then
         helper_hit = dev_runtime.resolveHelperHit(payload)
@@ -420,6 +535,10 @@ function executor.onMagicHit(payload)
     local helper_mapping = helper_hit and helper_hit.ok and helper_hit.mapping or nil
     if helper_mapping and dev.devLaunchEnabled() then
         dev_launch.onHelperHit(helper_hit)
+    end
+    local trigger_result = nil
+    if helper_mapping and dev.liveSimpleDispatchEnabled() then
+        trigger_result = live_trigger.handleResolvedHit(helper_hit)
     end
 
     local cookie = spell_id and launch_cookies[spell_id] or nil
@@ -442,6 +561,8 @@ function executor.onMagicHit(payload)
         recipe_id = cookie.recipe_id
     elseif helper_mapping then
         recipe_id = helper_mapping.recipe_id
+    elseif spellforge_hit_user_data and spellforge_hit_user_data.recipe_id then
+        recipe_id = spellforge_hit_user_data.recipe_id
     elseif type(spell_id) == "string" then
         recipe_id = select(1, findSpellforgeEntry(spell_id))
     end
@@ -459,6 +580,14 @@ function executor.onMagicHit(payload)
                     recipe_id = recipe_id,
                     live_2_2c = cookie and cookie.live_2_2c == true or false,
                     live_2_2c_plan_recipe_id = cookie and cookie.plan_recipe_id or nil,
+                    cast_id = cookie and cookie.cast_id or nil,
+                    pattern_kind = spellforge_hit_user_data and spellforge_hit_user_data.pattern_kind or nil,
+                    pattern_index = spellforge_hit_user_data and spellforge_hit_user_data.pattern_index or nil,
+                    pattern_count = spellforge_hit_user_data and spellforge_hit_user_data.pattern_count or nil,
+                    trigger_payload_job_id = trigger_result and trigger_result.job_id or nil,
+                    trigger_payload_slot_id = trigger_result and trigger_result.payload_slot_id or nil,
+                    trigger_payload_helper_engine_id = trigger_result and trigger_result.payload_helper_engine_id or nil,
+                    trigger_payload_launched = trigger_result and trigger_result.ok == true or false,
                     slot_id = helper_mapping and helper_mapping.slot_id or (cookie and cookie.slot_id or nil),
                     helper_engine_id = helper_mapping and helper_mapping.engine_id or nil,
                     projectile_id = helper_hit and helper_hit.projectile_id or nil,
@@ -521,7 +650,7 @@ function executor.onPlayerAdded(player)
     log.debug(string.format("diagnostic onPlayerAdded player=%s", tostring(player and player.recordId)))
 end
 
-function executor.onUpdate()
+function executor.onUpdate(dt)
     if not player_ref then
         return
     end
@@ -533,6 +662,13 @@ function executor.onUpdate()
         end
     end
     last_active_spell_ids = current_ids
+
+    if orchestrator.queueLength() > 0 then
+        orchestrator.tick({
+            max_jobs_per_tick = limits.MAX_JOBS_PER_TICK,
+            dt_seconds = dt,
+        })
+    end
 end
 
 function executor.onCastDiagSignal(payload)
@@ -543,6 +679,31 @@ function executor.onCastDiagSignal(payload)
         tostring(payload and payload.selected_spell_id),
         tostring(payload and payload.sender and payload.sender.recordId)
     ))
+end
+
+function executor.onInterceptDispatchSuppressed(payload)
+    runtime_stats.inc("compiled_dispatch_suppressed")
+    if payload and payload.authorized == false then
+        runtime_stats.inc("live_2_2c_suppressed_unauthorized")
+    end
+end
+
+function executor.onRuntimeStatsRequest(payload)
+    local sender = payload and payload.sender
+    if not sender or type(sender.sendEvent) ~= "function" then
+        return
+    end
+    if payload and payload.reset_before == true then
+        runtime_stats.reset()
+        live_timer.clearForTests()
+        live_trigger.clearForTests()
+    end
+    sender:sendEvent(events.RUNTIME_STATS_RESULT, {
+        request_id = payload and payload.request_id,
+        ok = true,
+        snapshot = runtime_stats.snapshot(),
+        summary_lines = runtime_stats.summaryLines(),
+    })
 end
 
 return executor

@@ -5,6 +5,13 @@ local canonicalize_effect_list = {}
 local FNV_OFFSET_32 = 2166136261
 local FNV_PRIME_32 = 16777619
 local DEFAULT_COMPILER_VERSION = "2.2c.2"
+local PRESENTATION_METADATA_FIELDS = {
+    "areaVfxRecId",
+    "areaVfxScale",
+    "vfxRecId",
+    "boltModel",
+    "hitModel",
+}
 
 local function sortedKeys(tbl)
     local keys = {}
@@ -68,6 +75,9 @@ local function serializeEffect(effect)
         "duration=" .. serializeScalar(e.duration),
         "params=" .. serializeParams(e.params),
     }
+    for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+        pieces[#pieces + 1] = tostring(field) .. "=" .. serializeScalar(e[field])
+    end
     return "(" .. table.concat(pieces, "|") .. ")"
 end
 

@@ -1,17 +1,22 @@
 local dev_runtime = require("scripts.spellforge.global.dev_runtime")
 local limits = require("scripts.spellforge.shared.limits")
+local log = require("scripts.spellforge.shared.log").new("global.orchestrator")
 local runtime_launch = require("scripts.spellforge.global.runtime_launch")
+local runtime_stats = require("scripts.spellforge.global.runtime_stats")
 
 local orchestrator = {}
 orchestrator.DEV_LAUNCH_JOB_KIND = "dev_launch_helper"
 orchestrator.DEV_TIMER_PAYLOAD_JOB_KIND = "dev_timer_payload"
 orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND = "dev_trigger_payload"
 orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND = "live_2_2c_simple_launch_helper"
+orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND = "live_trigger_payload_launch"
+orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND = "live_timer_payload_launch"
 
 local queue = {}
 local jobs = {}
 local next_job_index = 1
 local current_tick = 0
+local elapsed_seconds = 0
 
 local function cloneJob(job)
     if type(job) ~= "table" then
@@ -42,8 +47,44 @@ local function validateDepth(depth)
     return true, nil
 end
 
+local function firstNonNil(...)
+    for i = 1, select("#", ...) do
+        local value = select(i, ...)
+        if value ~= nil then
+            return value
+        end
+    end
+    return nil
+end
+
+local function finiteNonNegative(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge or n < 0 then
+        return nil
+    end
+    return n
+end
+
 local function isExpired(job)
-    return job.expires_at_tick ~= nil and current_tick >= job.expires_at_tick
+    local tick_expired = job.expires_at_tick ~= nil and current_tick >= job.expires_at_tick
+    local time_expired = job.expires_at_seconds ~= nil and elapsed_seconds >= job.expires_at_seconds
+    return tick_expired or time_expired
+end
+
+local function notReady(job)
+    local tick_not_ready = job.not_before_tick ~= nil and current_tick < job.not_before_tick
+    local time_not_ready = job.not_before_seconds ~= nil and elapsed_seconds + 0.0001 < job.not_before_seconds
+    return tick_not_ready or time_not_ready, tick_not_ready, time_not_ready
+end
+
+local function isLiveHelperJob(kind)
+    return kind == orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND
+        or kind == orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND
+        or kind == orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND
+end
+
+local function isLiveTimerPayloadJob(kind)
+    return kind == orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND
 end
 
 local function enqueueInternal(job)
@@ -52,6 +93,7 @@ local function enqueueInternal(job)
 
     local depth = tonumber(job.depth) or 0
     local ttl_ticks = tonumber(job.ttl_ticks)
+    local ttl_seconds = finiteNonNegative(job.ttl_seconds)
 
     local normalized = {
         job_id = job_id,
@@ -64,11 +106,39 @@ local function enqueueInternal(job)
         parent_job_id = job.parent_job_id,
         source_job_id = job.source_job_id,
         depth = depth,
+        cast_id = job.cast_id,
+        emission_index = job.emission_index,
+        group_index = job.group_index,
+        fanout_count = job.fanout_count,
+        pattern_kind = job.pattern_kind,
+        pattern_index = job.pattern_index,
+        pattern_count = job.pattern_count,
+        pattern_direction_key = job.pattern_direction_key,
         created_tick = current_tick,
+        created_seconds = elapsed_seconds,
         expires_at_tick = job.expires_at_tick,
+        expires_at_seconds = finiteNonNegative(job.expires_at_seconds),
         ttl_ticks = ttl_ticks,
+        ttl_seconds = ttl_seconds,
         payload = job.payload,
         not_before_tick = job.not_before_tick,
+        not_before_seconds = finiteNonNegative(job.not_before_seconds),
+        source_slot_id = job.source_slot_id,
+        source_helper_engine_id = job.source_helper_engine_id,
+        source_postfix_opcode = job.source_postfix_opcode,
+        payload_slot_id = job.payload_slot_id,
+        timer_source_slot_id = job.timer_source_slot_id,
+        timer_payload_slot_id = job.timer_payload_slot_id,
+        timer_id = job.timer_id,
+        timer_async = job.timer_async == true,
+        timer_delay_ticks = job.timer_delay_ticks,
+        timer_delay_seconds = job.timer_delay_seconds,
+        timer_scheduled_tick = job.timer_scheduled_tick,
+        timer_due_tick = job.timer_due_tick,
+        timer_scheduled_seconds = job.timer_scheduled_seconds,
+        timer_due_seconds = job.timer_due_seconds,
+        timer_delay_semantics = job.timer_delay_semantics,
+        timer_duplicate_key = job.timer_duplicate_key,
         error = nil,
         trace = {},
     }
@@ -76,9 +146,17 @@ local function enqueueInternal(job)
     if ttl_ticks ~= nil then
         normalized.expires_at_tick = current_tick + ttl_ticks
     end
+    if ttl_seconds ~= nil then
+        normalized.expires_at_seconds = elapsed_seconds + ttl_seconds
+    end
 
     jobs[job_id] = normalized
     queue[#queue + 1] = job_id
+    runtime_stats.inc("jobs_enqueued")
+    if isLiveHelperJob(normalized.kind) then
+        runtime_stats.inc("live_helper_jobs_enqueued")
+    end
+    runtime_stats.max("max_queue_depth", #queue)
 
     return normalized
 end
@@ -151,6 +229,14 @@ local function runHandler(job)
         return dev_runtime.runHelperLaunchJob(job, "dev_trigger_payload")
     elseif job.kind == orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND then
         return runtime_launch.runHelperLaunchJob(job, orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND)
+    elseif job.kind == orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND then
+        return runtime_launch.runHelperLaunchJob(job, orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND, {
+            expected_postfix_opcode = "Trigger",
+        })
+    elseif job.kind == orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND then
+        return runtime_launch.runHelperLaunchJob(job, orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND, {
+            expected_postfix_opcode = "Timer",
+        })
     end
 
     return false, string.format("unsupported job kind: %s", tostring(job.kind)), nil
@@ -158,6 +244,15 @@ end
 
 function orchestrator.tick(opts)
     local options = opts or {}
+    local delta_seconds = finiteNonNegative(firstNonNil(
+        options.dt_seconds,
+        options.delta_seconds,
+        options.elapsed_seconds_delta,
+        options.dt
+    ))
+    if delta_seconds ~= nil then
+        elapsed_seconds = elapsed_seconds + delta_seconds
+    end
     current_tick = current_tick + 1
 
     local max_jobs = options.max_jobs_per_tick or limits.MAX_JOBS_PER_TICK
@@ -177,18 +272,48 @@ function orchestrator.tick(opts)
         local job = jobs[job_id]
 
         if job and job.status == "queued" then
-            if job.not_before_tick ~= nil and current_tick < job.not_before_tick then
+            local waiting, _, time_not_ready = notReady(job)
+            if waiting then
                 queue[#queue + 1] = job_id
+                runtime_stats.inc("jobs_skipped_not_ready")
+                if isLiveTimerPayloadJob(job.kind) then
+                    runtime_stats.inc("live_timer_wait_jobs_not_ready")
+                    if time_not_ready then
+                        runtime_stats.inc("live_timer_real_delay_not_ready")
+                    end
+                end
+                runtime_stats.max("max_queue_depth", #queue)
             elseif isExpired(job) then
                 job.status = "expired"
                 processed_count = processed_count + 1
                 expired_count = expired_count + 1
                 processed_order[#processed_order + 1] = job_id
+                runtime_stats.inc("jobs_processed")
+                runtime_stats.inc("jobs_expired")
+                if isLiveTimerPayloadJob(job.kind) then
+                    runtime_stats.inc("live_timer_wait_jobs_expired")
+                end
+                if isLiveHelperJob(job.kind) then
+                    runtime_stats.inc("live_helper_jobs_processed")
+                end
             else
                 job.status = "running"
+                if isLiveTimerPayloadJob(job.kind) and job.not_before_seconds ~= nil then
+                    runtime_stats.inc("live_timer_real_delay_matured")
+                end
                 local ok, err, child_job_id = runHandler(job)
                 processed_count = processed_count + 1
                 processed_order[#processed_order + 1] = job_id
+                runtime_stats.inc("jobs_processed")
+                if isLiveHelperJob(job.kind) then
+                    runtime_stats.inc("live_helper_jobs_processed")
+                end
+                if isLiveTimerPayloadJob(job.kind) then
+                    if job.timer_async ~= true then
+                        runtime_stats.inc("live_timer_wait_jobs_processed")
+                    end
+                    runtime_stats.inc("live_timer_payload_jobs_processed")
+                end
 
                 if ok then
                     job.status = "complete"
@@ -196,15 +321,49 @@ function orchestrator.tick(opts)
                         job.child_job_id = child_job_id
                     end
                     completed_count = completed_count + 1
+                    if isLiveTimerPayloadJob(job.kind) then
+                        runtime_stats.inc("live_timer_payload_launch_ok")
+                        if job.not_before_seconds ~= nil or job.timer_async == true then
+                            runtime_stats.inc("live_timer_real_delay_payload_ok")
+                        end
+                        if job.timer_async == true then
+                            runtime_stats.inc("live_timer_async_payload_ok")
+                        end
+                        log.info(string.format(
+                            "SPELLFORGE_LIVE_TIMER_PAYLOAD_OK timer_id=%s recipe_id=%s cast_id=%s source_slot_id=%s payload_slot_id=%s helper_engine_id=%s projectile_id=%s due_tick=%s due_seconds=%s elapsed_seconds=%s",
+                            tostring(job.timer_id),
+                            tostring(job.recipe_id),
+                            tostring(job.cast_id),
+                            tostring(job.source_slot_id),
+                            tostring(job.payload_slot_id or job.slot_id),
+                            tostring(job.helper_engine_id),
+                            tostring(job.projectile_id),
+                            tostring(job.timer_due_tick),
+                            tostring(job.timer_due_seconds or job.not_before_seconds),
+                            tostring(elapsed_seconds)
+                        ))
+                    end
                 else
                     job.status = "failed"
                     job.error = tostring(err)
                     failed_count = failed_count + 1
+                    runtime_stats.inc("jobs_failed")
+                    if isLiveHelperJob(job.kind) then
+                        runtime_stats.inc("live_helper_jobs_failed")
+                    end
+                    if isLiveTimerPayloadJob(job.kind) then
+                        runtime_stats.inc("live_timer_payload_launch_failed")
+                        runtime_stats.inc("live_timer_payload_route_failed")
+                    end
                 end
             end
         elseif job and job.status == "canceled" then
             canceled_count = canceled_count + 1
         end
+    end
+
+    if #queue == 0 then
+        runtime_stats.inc("queue_drained_observed")
     end
 
     return {
@@ -216,6 +375,8 @@ function orchestrator.tick(opts)
         canceled_count = canceled_count,
         remaining_count = #queue,
         processed_order = processed_order,
+        elapsed_seconds = elapsed_seconds,
+        delta_seconds = delta_seconds or 0,
     }
 end
 
@@ -227,11 +388,37 @@ function orchestrator.currentTick()
     return current_tick
 end
 
+function orchestrator.currentTimeSeconds()
+    return elapsed_seconds
+end
+
+function orchestrator.advanceTime(seconds)
+    local delta_seconds = finiteNonNegative(seconds)
+    if delta_seconds == nil then
+        return {
+            ok = false,
+            error = "seconds must be a finite non-negative number",
+            elapsed_seconds = elapsed_seconds,
+        }
+    end
+    elapsed_seconds = elapsed_seconds + delta_seconds
+    return {
+        ok = true,
+        elapsed_seconds = elapsed_seconds,
+        delta_seconds = delta_seconds,
+    }
+end
+
+function orchestrator.queueLength()
+    return #queue
+end
+
 function orchestrator.clearForTests()
     queue = {}
     jobs = {}
     next_job_index = 1
     current_tick = 0
+    elapsed_seconds = 0
 end
 
 return orchestrator

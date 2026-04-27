@@ -120,11 +120,22 @@ function dev_runtime.runHelperLaunchJob(job, job_kind)
         hit_object = launch_context.hit_object,
         recipe_id = job.recipe_id,
         slot_id = job.slot_id,
+        runtime = "2.2c_dev_helper",
         kind = job_kind,
         job_id = job.job_id,
         job_kind = job_kind,
         source_job_id = job.source_job_id,
         parent_job_id = job.parent_job_id,
+        depth = job.depth,
+        source_slot_id = payload.source_slot_id or mapping.trigger_source_slot_id or mapping.timer_source_slot_id,
+        source_postfix_opcode = payload.source_postfix_opcode or mapping.source_postfix_opcode,
+        userData = payload.userData or payload.user_data,
+        muteAudio = payload.muteAudio,
+        mute_audio = payload.mute_audio,
+        muteLight = payload.muteLight,
+        mute_light = payload.mute_light,
+        emission_index = mapping.emission_index,
+        group_index = mapping.group_index,
     })
     if not ok then
         return false, err, nil
@@ -136,6 +147,7 @@ function dev_runtime.runHelperLaunchJob(job, job_kind)
     job.projectile_id = launch_result and launch_result.projectile_id or nil
     job.projectile_id_source = launch_result and launch_result.projectile_id_source or nil
     job.projectile_registered = launch_result and launch_result.projectile_registered == true
+    job.launch_user_data = launch_result and launch_result.user_data or nil
     job.launch_start_pos = launch_context.start_pos
     job.launch_direction = launch_context.direction
     job.timer_source_slot_id = payload.source_slot_id or mapping.timer_source_slot_id

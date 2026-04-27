@@ -190,12 +190,21 @@ local function requestSpellState(projectile_id)
 end
 
 local function checkTelemetry(hit)
-    assertLine(hit and hit.ok == true, "helper spellId routing still works", hit and hit.error)
+    assertLine(hit and hit.ok == true, "helper hit routing still works", hit and hit.error)
     local mapped = hit and hit.ok == true
         and hit.recipe_id == state.expected_recipe_id
         and hit.slot_id == state.expected_slot_id
         and hit.helper_engine_id == state.expected_helper_engine_id
     assertLine(mapped, "helper hit routes to expected recipe_id + slot_id")
+    if hit.hit_user_data_present == true then
+        assertLine(hit.route_source == "userData", "helper hit routing preferred SFP userData")
+        assertLine(hit.hit_user_data_schema == "spellforge_sfp_userdata_v1", "hit userData schema is Spellforge v1")
+        assertLine(hit.hit_user_data_recipe_id == state.expected_recipe_id, "hit userData carries expected recipe_id")
+        assertLine(hit.hit_user_data_slot_id == state.expected_slot_id, "hit userData carries expected slot_id")
+        assertLine(hit.hit_user_data_helper_engine_id == state.expected_helper_engine_id, "hit userData carries expected helper_engine_id")
+    else
+        skipLine("helper hit routing preferred SFP userData", "SFP did not echo userData; spellId fallback was used")
+    end
 
     if not hit or hit.telemetry_has_beta2_fields ~= true then
         skipLine("MagicHit telemetry captured", "Beta2 telemetry fields absent")
@@ -259,6 +268,11 @@ local function runSmoke()
         state.expected_recipe_id = result.recipe_id
         state.expected_slot_id = result.slot_id
         state.expected_helper_engine_id = result.helper_engine_id
+        assertLine(result.launch_user_data_present == true, "helper launch attached Spellforge userData")
+        assertLine(result.launch_user_data_schema == "spellforge_sfp_userdata_v1", "launch userData schema is Spellforge v1")
+        assertLine(result.launch_user_data_recipe_id == result.recipe_id, "launch userData carries recipe_id")
+        assertLine(result.launch_user_data_slot_id == result.slot_id, "launch userData carries slot_id")
+        assertLine(result.launch_user_data_helper_engine_id == result.helper_engine_id, "launch userData carries helper_engine_id")
 
         if result.launch_returned_projectile == true then
             assertLine(true, "SFP launch returned projectile handle")

@@ -1,6 +1,8 @@
 local helper_records = require("scripts.spellforge.global.helper_records")
 local projectile_registry = require("scripts.spellforge.global.projectile_registry")
+local runtime_stats = require("scripts.spellforge.global.runtime_stats")
 local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
+local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
 
 local runtime_hits = {}
 
@@ -14,9 +16,16 @@ function runtime_hits.resolveHelperHit(payload)
     local projectile, projectile_id, projectile_id_source = sfp_adapter.extractProjectileFromHit(payload)
     local telemetry = sfp_adapter.magicHitTelemetry(payload)
     local registry_entry = projectile_id and projectile_registry.getByProjectileId(projectile_id) or nil
+    local user_data = sfp_userdata.extract(payload)
+    local spellforge_user_data = sfp_userdata.isSpellforgeUserData(user_data) and user_data or nil
+    local source = spellforge_user_data and "userData" or "spellId"
 
     local mapping = nil
-    if type(engine_id) == "string" and engine_id ~= "" then
+    if spellforge_user_data and type(spellforge_user_data.helper_engine_id) == "string" and spellforge_user_data.helper_engine_id ~= "" then
+        mapping = helper_records.getByEngineId(spellforge_user_data.helper_engine_id)
+        engine_id = spellforge_user_data.helper_engine_id
+    end
+    if not mapping and type(engine_id) == "string" and engine_id ~= "" then
         mapping = helper_records.getByEngineId(engine_id)
     end
     if not mapping and registry_entry then
@@ -24,16 +33,20 @@ function runtime_hits.resolveHelperHit(payload)
         engine_id = registry_entry.helper_engine_id
     end
     if type(engine_id) ~= "string" or engine_id == "" then
+        runtime_stats.inc("hits_unresolved")
         return {
             ok = false,
             projectile = projectile,
             projectile_id = projectile_id,
             projectile_id_source = projectile_id_source,
             telemetry = telemetry,
+            user_data = spellforge_user_data,
+            source = source,
             error = "hit payload missing spellId",
         }
     end
     if not mapping then
+        runtime_stats.inc("hits_unresolved")
         return {
             ok = false,
             engine_id = engine_id,
@@ -41,15 +54,74 @@ function runtime_hits.resolveHelperHit(payload)
             projectile_id = projectile_id,
             projectile_id_source = projectile_id_source,
             telemetry = telemetry,
+            user_data = spellforge_user_data,
+            source = source,
             error = string.format("helper record metadata not found for engine_id=%s", tostring(engine_id)),
         }
     end
 
+    if spellforge_user_data then
+        if spellforge_user_data.recipe_id ~= nil and spellforge_user_data.recipe_id ~= mapping.recipe_id then
+            runtime_stats.inc("hits_userdata_mismatch")
+            runtime_stats.inc("hits_unresolved")
+            return {
+                ok = false,
+                engine_id = engine_id,
+                projectile = projectile,
+                projectile_id = projectile_id,
+                projectile_id_source = projectile_id_source,
+                telemetry = telemetry,
+                user_data = spellforge_user_data,
+                source = "userData",
+                mapping = mapping,
+                error = string.format(
+                    "userData recipe_id mismatch userData=%s mapping=%s",
+                    tostring(spellforge_user_data.recipe_id),
+                    tostring(mapping.recipe_id)
+                ),
+            }
+        end
+        if spellforge_user_data.slot_id ~= nil and spellforge_user_data.slot_id ~= mapping.slot_id then
+            runtime_stats.inc("hits_userdata_mismatch")
+            runtime_stats.inc("hits_unresolved")
+            return {
+                ok = false,
+                engine_id = engine_id,
+                projectile = projectile,
+                projectile_id = projectile_id,
+                projectile_id_source = projectile_id_source,
+                telemetry = telemetry,
+                user_data = spellforge_user_data,
+                source = "userData",
+                mapping = mapping,
+                error = string.format(
+                    "userData slot_id mismatch userData=%s mapping=%s",
+                    tostring(spellforge_user_data.slot_id),
+                    tostring(mapping.slot_id)
+                ),
+            }
+        end
+    end
+
     local hit_record = projectile_registry.markHit(projectile_id, mapping.engine_id, payload, telemetry, {
-        recipe_id = mapping.recipe_id,
-        slot_id = mapping.slot_id,
+        recipe_id = spellforge_user_data and spellforge_user_data.recipe_id or mapping.recipe_id,
+        slot_id = spellforge_user_data and spellforge_user_data.slot_id or mapping.slot_id,
     })
     registry_entry = (hit_record and hit_record.entry) or registry_entry
+
+    if source == "userData" then
+        runtime_stats.inc("hits_userdata_routed")
+    else
+        runtime_stats.inc("hits_spellid_fallback_routed")
+    end
+    local runtime = spellforge_user_data and spellforge_user_data.runtime or nil
+    if runtime == "2.2c_live_helper" then
+        runtime_stats.inc("hits_live_helper_seen")
+    elseif runtime == "2.2c_dev_helper" then
+        runtime_stats.inc("hits_dev_helper_seen")
+    elseif runtime == "2.2b_live_dispatch" then
+        runtime_stats.inc("hits_legacy_seen")
+    end
 
     return {
         ok = true,
@@ -58,10 +130,12 @@ function runtime_hits.resolveHelperHit(payload)
         first_hit = hit_record and hit_record.first_hit or false,
         hit_key = hit_record and hit_record.hit_key or nil,
         previous = hit_record and hit_record.previous or nil,
+        source = source,
+        user_data = spellforge_user_data,
         mapping = mapping,
-        recipe_id = mapping.recipe_id,
-        slot_id = mapping.slot_id,
-        helper_engine_id = mapping.engine_id,
+        recipe_id = spellforge_user_data and spellforge_user_data.recipe_id or mapping.recipe_id,
+        slot_id = spellforge_user_data and spellforge_user_data.slot_id or mapping.slot_id,
+        helper_engine_id = spellforge_user_data and spellforge_user_data.helper_engine_id or mapping.engine_id,
         effect_id = runtime_hits.firstEffectId(mapping),
         projectile = projectile,
         projectile_id = projectile_id,
