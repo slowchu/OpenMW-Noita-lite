@@ -17,6 +17,7 @@ local SYMBOLS = {
     multiply = { "*", "kp*", "kp_multiply", "num_multiply", "numpadmultiply", "numpad_multiply", "keypadmultiply", "keypad_multiply" },
     minus = { "-", "kp-", "kp_minus", "num_minus", "numpadminus", "numpad_minus", "keypadminus", "keypad_minus" },
     plus = { "+", "kp+", "kp_plus", "num_plus", "numpadplus", "numpad_plus", "keypadplus", "keypad_plus" },
+    decimal = { ".", "kp.", "kp_decimal", "num_decimal", "numpaddecimal", "numpad_decimal", "keypaddecimal", "keypad_decimal" },
 }
 
 local KEY_NAMES = {
@@ -34,6 +35,7 @@ local KEY_NAMES = {
     multiply = { "KP_MULTIPLY", "NUM_MULTIPLY", "NUMPAD_MULTIPLY" },
     minus = { "KP_MINUS", "NUM_MINUS", "NUMPAD_MINUS" },
     plus = { "KP_PLUS", "NUM_PLUS", "NUMPAD_PLUS", "KP_ADD", "NUM_ADD", "NUMPAD_ADD" },
+    decimal = { "KP_DECIMAL", "NUM_DECIMAL", "NUMPAD_DECIMAL", "KP_PERIOD", "NUM_PERIOD", "NUMPAD_PERIOD" },
 }
 
 local LABELS = {
@@ -51,6 +53,7 @@ local LABELS = {
     multiply = "Numpad *",
     minus = "Numpad -",
     plus = "Numpad +",
+    decimal = "Numpad .",
 }
 
 local function matchesSymbol(symbol, accepted)

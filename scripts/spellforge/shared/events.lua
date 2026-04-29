@@ -51,5 +51,7 @@ events.SFP_EMIT_OBJECT_PROBE_RESULT = "Spellforge_SfpEmitObjectProbeResult"
 
 events.LIVE_SIMPLE_DISPATCH_PROBE = "Spellforge_LiveSimpleDispatchProbe"
 events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT = "Spellforge_LiveSimpleDispatchProbeResult"
+events.CHAIN_LOS_REQUEST = "Spellforge_ChainLosRequest"
+events.CHAIN_LOS_RESULT = "Spellforge_ChainLosResult"
 
 return events

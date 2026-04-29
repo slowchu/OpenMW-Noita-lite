@@ -80,6 +80,10 @@ function live_speed_plus.launchMaxSpeedField()
     return SUPPORTED_LAUNCH_MAX_SPEED_FIELD
 end
 
+function live_speed_plus.computeMutation(op)
+    return computeSpeedMutation(op)
+end
+
 function live_speed_plus.selectV1Plan(plan)
     if type(plan) ~= "table" then
         return nil, "missing_plan", nil

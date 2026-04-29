@@ -11,12 +11,14 @@ orchestrator.DEV_TRIGGER_PAYLOAD_JOB_KIND = "dev_trigger_payload"
 orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND = "live_2_2c_simple_launch_helper"
 orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND = "live_trigger_payload_launch"
 orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND = "live_timer_payload_launch"
+orchestrator.LIVE_CHAIN_PAYLOAD_JOB_KIND = "live_chain_payload_launch"
 
 local queue = {}
 local jobs = {}
 local next_job_index = 1
 local current_tick = 0
 local elapsed_seconds = 0
+local live_launches_this_update = 0
 
 local function cloneJob(job)
     if type(job) ~= "table" then
@@ -81,6 +83,7 @@ local function isLiveHelperJob(kind)
     return kind == orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND
         or kind == orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND
         or kind == orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND
+        or kind == orchestrator.LIVE_CHAIN_PAYLOAD_JOB_KIND
 end
 
 local function isLiveTimerPayloadJob(kind)
@@ -110,10 +113,24 @@ local function enqueueInternal(job)
         emission_index = job.emission_index,
         group_index = job.group_index,
         fanout_count = job.fanout_count,
+        max_live_launches_per_tick = job.max_live_launches_per_tick,
+        max_live_launches_per_update = job.max_live_launches_per_update,
+        chaos_budget_profile = job.chaos_budget_profile,
         pattern_kind = job.pattern_kind,
         pattern_index = job.pattern_index,
         pattern_count = job.pattern_count,
         pattern_direction_key = job.pattern_direction_key,
+        chain_runtime = job.chain_runtime == true,
+        chain_role = job.chain_role,
+        chain_id = job.chain_id,
+        chain_hop_index = job.chain_hop_index,
+        chain_max_hops = job.chain_max_hops,
+        chain_targeting_mode = job.chain_targeting_mode,
+        chain_target_provider = job.chain_target_provider,
+        current_hit_target_id = job.current_hit_target_id,
+        selected_target_id = job.selected_target_id,
+        previous_projectile_id = job.previous_projectile_id,
+        payload_modifier_kind = job.payload_modifier_kind,
         created_tick = current_tick,
         created_seconds = elapsed_seconds,
         expires_at_tick = job.expires_at_tick,
@@ -237,6 +254,8 @@ local function runHandler(job)
         return runtime_launch.runHelperLaunchJob(job, orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND, {
             expected_postfix_opcode = "Timer",
         })
+    elseif job.kind == orchestrator.LIVE_CHAIN_PAYLOAD_JOB_KIND then
+        return runtime_launch.runHelperLaunchJob(job, orchestrator.LIVE_CHAIN_PAYLOAD_JOB_KIND)
     end
 
     return false, string.format("unsupported job kind: %s", tostring(job.kind)), nil
@@ -252,15 +271,25 @@ function orchestrator.tick(opts)
     ))
     if delta_seconds ~= nil then
         elapsed_seconds = elapsed_seconds + delta_seconds
+        live_launches_this_update = 0
     end
     current_tick = current_tick + 1
 
-    local max_jobs = options.max_jobs_per_tick or limits.MAX_JOBS_PER_TICK
+    local max_jobs = tonumber(options.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK
+    local max_live_launches = tonumber(firstNonNil(
+        options.max_live_launches_per_tick,
+        options.max_live_launches_per_update
+    )) or limits.MAX_LIVE_LAUNCHES_PER_TICK
+    max_jobs = math.max(1, math.floor(max_jobs))
+    max_live_launches = math.max(1, math.floor(max_live_launches))
     local processed_count = 0
     local completed_count = 0
     local failed_count = 0
     local expired_count = 0
     local canceled_count = 0
+    local live_launch_count = 0
+    local live_launch_throttled_count = 0
+    local effective_live_launch_cap = max_live_launches
     local processed_order = {}
 
     local iterations = 0
@@ -272,6 +301,15 @@ function orchestrator.tick(opts)
         local job = jobs[job_id]
 
         if job and job.status == "queued" then
+            local job_live_launch_cap = max_live_launches
+            if isLiveHelperJob(job.kind) then
+                job_live_launch_cap = tonumber(firstNonNil(
+                    job.max_live_launches_per_tick,
+                    job.max_live_launches_per_update
+                )) or max_live_launches
+                job_live_launch_cap = math.max(1, math.floor(math.min(max_live_launches, job_live_launch_cap)))
+                effective_live_launch_cap = math.min(effective_live_launch_cap, job_live_launch_cap)
+            end
             local waiting, _, time_not_ready = notReady(job)
             if waiting then
                 queue[#queue + 1] = job_id
@@ -296,6 +334,12 @@ function orchestrator.tick(opts)
                 if isLiveHelperJob(job.kind) then
                     runtime_stats.inc("live_helper_jobs_processed")
                 end
+            elseif isLiveHelperJob(job.kind) and live_launches_this_update >= job_live_launch_cap then
+                queue[#queue + 1] = job_id
+                live_launch_throttled_count = live_launch_throttled_count + 1
+                runtime_stats.inc("live_launch_density_throttled")
+                runtime_stats.inc("chaos_budget_launch_density_throttle")
+                runtime_stats.max("max_queue_depth", #queue)
             else
                 job.status = "running"
                 if isLiveTimerPayloadJob(job.kind) and job.not_before_seconds ~= nil then
@@ -306,7 +350,10 @@ function orchestrator.tick(opts)
                 processed_order[#processed_order + 1] = job_id
                 runtime_stats.inc("jobs_processed")
                 if isLiveHelperJob(job.kind) then
+                    live_launch_count = live_launch_count + 1
+                    live_launches_this_update = live_launches_this_update + 1
                     runtime_stats.inc("live_helper_jobs_processed")
+                    runtime_stats.max("chaos_budget_max_live_launches_per_tick_observed", live_launches_this_update)
                 end
                 if isLiveTimerPayloadJob(job.kind) then
                     if job.timer_async ~= true then
@@ -366,6 +413,16 @@ function orchestrator.tick(opts)
         runtime_stats.inc("queue_drained_observed")
     end
 
+    if live_launch_throttled_count > 0 then
+        log.info(string.format(
+            "SPELLFORGE_LIVE_LAUNCH_DENSITY_THROTTLED tick=%s cap=%d throttled=%d remaining=%d",
+            tostring(current_tick),
+            effective_live_launch_cap,
+            live_launch_throttled_count,
+            #queue
+        ))
+    end
+
     return {
         tick = current_tick,
         processed_count = processed_count,
@@ -377,6 +434,10 @@ function orchestrator.tick(opts)
         processed_order = processed_order,
         elapsed_seconds = elapsed_seconds,
         delta_seconds = delta_seconds or 0,
+        live_launch_count = live_launch_count,
+        live_launches_this_update = live_launches_this_update,
+        max_live_launches_per_tick = effective_live_launch_cap,
+        live_launch_throttled_count = live_launch_throttled_count,
     }
 end
 
@@ -399,13 +460,16 @@ function orchestrator.advanceTime(seconds)
             ok = false,
             error = "seconds must be a finite non-negative number",
             elapsed_seconds = elapsed_seconds,
+            live_launches_this_update = live_launches_this_update,
         }
     end
     elapsed_seconds = elapsed_seconds + delta_seconds
+    live_launches_this_update = 0
     return {
         ok = true,
         elapsed_seconds = elapsed_seconds,
         delta_seconds = delta_seconds,
+        live_launches_this_update = live_launches_this_update,
     }
 end
 
@@ -419,6 +483,7 @@ function orchestrator.clearForTests()
     next_job_index = 1
     current_tick = 0
     elapsed_seconds = 0
+    live_launches_this_update = 0
 end
 
 return orchestrator

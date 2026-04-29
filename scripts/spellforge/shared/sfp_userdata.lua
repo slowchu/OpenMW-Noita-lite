@@ -64,6 +64,16 @@ function sfp_userdata.buildHelperUserData(args)
     setScalar(out, "parent_job_id", input.parent_job_id)
     setScalar(out, "source_job_id", input.source_job_id)
     setScalar(out, "depth", input.depth)
+    setScalar(out, "root_source_slot_id", input.root_source_slot_id)
+    setScalar(out, "current_source_slot_id", input.current_source_slot_id)
+    setScalar(out, "parent_slot_id", input.parent_slot_id)
+    setScalar(out, "payload_depth", input.payload_depth)
+    setScalar(out, "nested_stage_kind", input.nested_stage_kind)
+    setScalar(out, "nested_stage_index", input.nested_stage_index)
+    setScalar(out, "nested_final_fanout", input.nested_final_fanout)
+    setScalar(out, "nested_final_fanout_kind", input.nested_final_fanout_kind)
+    setScalar(out, "final_fanout_count", input.final_fanout_count)
+    setScalar(out, "final_fanout_index", input.final_fanout_index)
     setScalar(out, "source_slot_id", firstNonNil(input.source_slot_id, mappingField(mapping, "trigger_source_slot_id"), mappingField(mapping, "timer_source_slot_id")))
     setScalar(out, "source_postfix_opcode", firstNonNil(input.source_postfix_opcode, mappingField(mapping, "source_postfix_opcode")))
     setScalar(out, "payload_slot_id", input.payload_slot_id)
@@ -92,6 +102,18 @@ function sfp_userdata.buildHelperUserData(args)
     setScalar(out, "pattern_kind", input.pattern_kind)
     setScalar(out, "pattern_index", input.pattern_index)
     setScalar(out, "pattern_count", input.pattern_count)
+    setScalar(out, "pattern_direction_key", input.pattern_direction_key)
+    setScalar(out, "chain_runtime", input.chain_runtime)
+    setScalar(out, "chain_role", input.chain_role)
+    setScalar(out, "chain_id", input.chain_id)
+    setScalar(out, "chain_hop_index", input.chain_hop_index)
+    setScalar(out, "chain_max_hops", input.chain_max_hops)
+    setScalar(out, "chain_targeting_mode", input.chain_targeting_mode)
+    setScalar(out, "chain_target_provider", input.chain_target_provider)
+    setScalar(out, "current_hit_target_id", input.current_hit_target_id)
+    setScalar(out, "selected_target_id", input.selected_target_id)
+    setScalar(out, "previous_projectile_id", input.previous_projectile_id)
+    setScalar(out, "payload_modifier_kind", input.payload_modifier_kind)
     setScalar(out, "speed_plus", input.speed_plus)
     setScalar(out, "speed_plus_mode", input.speed_plus_mode)
     setScalar(out, "speed_plus_value", input.speed_plus_value)
@@ -143,6 +165,16 @@ function sfp_userdata.compactSpellforgeUserData(user_data)
         "parent_job_id",
         "source_job_id",
         "depth",
+        "root_source_slot_id",
+        "current_source_slot_id",
+        "parent_slot_id",
+        "payload_depth",
+        "nested_stage_kind",
+        "nested_stage_index",
+        "nested_final_fanout",
+        "nested_final_fanout_kind",
+        "final_fanout_count",
+        "final_fanout_index",
         "source_slot_id",
         "source_postfix_opcode",
         "payload_slot_id",
@@ -171,6 +203,18 @@ function sfp_userdata.compactSpellforgeUserData(user_data)
         "pattern_kind",
         "pattern_index",
         "pattern_count",
+        "pattern_direction_key",
+        "chain_runtime",
+        "chain_role",
+        "chain_id",
+        "chain_hop_index",
+        "chain_max_hops",
+        "chain_targeting_mode",
+        "chain_target_provider",
+        "current_hit_target_id",
+        "selected_target_id",
+        "previous_projectile_id",
+        "payload_modifier_kind",
         "speed_plus",
         "speed_plus_mode",
         "speed_plus_value",

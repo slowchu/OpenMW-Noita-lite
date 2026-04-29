@@ -14,6 +14,13 @@ local KEY_ENABLE_LIVE_TRIGGER = "enable_live_trigger"
 local KEY_ENABLE_LIVE_TIMER = "enable_live_timer"
 local KEY_ENABLE_LIVE_SPEED_PLUS = "enable_live_speed_plus"
 local KEY_ENABLE_LIVE_SIZE_PLUS = "enable_live_size_plus"
+local KEY_ENABLE_LIVE_PAYLOAD_MULTICAST = "enable_live_payload_multicast_v0"
+local KEY_ENABLE_LIVE_PAYLOAD_PATTERN = "enable_live_payload_pattern_v0"
+local KEY_ENABLE_LIVE_NESTED_TRIGGER_TIMER = "enable_live_nested_trigger_timer_v1"
+local KEY_ENABLE_LIVE_NESTED_FINAL_FANOUT = "enable_live_nested_final_fanout_v0"
+local KEY_ENABLE_LIVE_CHAIN_AUDIT = "enable_live_chain_audit_v0"
+local KEY_ENABLE_LIVE_CHAIN_RUNTIME = "enable_live_chain_runtime_v0"
+local KEY_ENABLE_CHAOS_BUDGET = "enable_chaos_budget_v0"
 
 local DEFAULT_ENABLE_SMOKE_TESTS = false
 local DEFAULT_ENABLE_DEV_HOTKEYS = false
@@ -26,6 +33,13 @@ local DEFAULT_ENABLE_LIVE_TRIGGER = false
 local DEFAULT_ENABLE_LIVE_TIMER = false
 local DEFAULT_ENABLE_LIVE_SPEED_PLUS = false
 local DEFAULT_ENABLE_LIVE_SIZE_PLUS = false
+local DEFAULT_ENABLE_LIVE_PAYLOAD_MULTICAST = false
+local DEFAULT_ENABLE_LIVE_PAYLOAD_PATTERN = false
+local DEFAULT_ENABLE_LIVE_NESTED_TRIGGER_TIMER = false
+local DEFAULT_ENABLE_LIVE_NESTED_FINAL_FANOUT = false
+local DEFAULT_ENABLE_LIVE_CHAIN_AUDIT = false
+local DEFAULT_ENABLE_LIVE_CHAIN_RUNTIME = false
+local DEFAULT_ENABLE_CHAOS_BUDGET = false
 
 local function readBoolean(key, default_value)
     local value = section:get(key)
@@ -79,6 +93,34 @@ function dev.liveSizePlusEnabled()
     return readBoolean(KEY_ENABLE_LIVE_SIZE_PLUS, DEFAULT_ENABLE_LIVE_SIZE_PLUS)
 end
 
+function dev.livePayloadMulticastEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_PAYLOAD_MULTICAST, DEFAULT_ENABLE_LIVE_PAYLOAD_MULTICAST)
+end
+
+function dev.livePayloadPatternEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_PAYLOAD_PATTERN, DEFAULT_ENABLE_LIVE_PAYLOAD_PATTERN)
+end
+
+function dev.liveNestedTriggerTimerEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_NESTED_TRIGGER_TIMER, DEFAULT_ENABLE_LIVE_NESTED_TRIGGER_TIMER)
+end
+
+function dev.liveNestedFinalFanoutEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_NESTED_FINAL_FANOUT, DEFAULT_ENABLE_LIVE_NESTED_FINAL_FANOUT)
+end
+
+function dev.liveChainAuditEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_CHAIN_AUDIT, DEFAULT_ENABLE_LIVE_CHAIN_AUDIT)
+end
+
+function dev.liveChainRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_CHAIN_RUNTIME, DEFAULT_ENABLE_LIVE_CHAIN_RUNTIME)
+end
+
+function dev.chaosBudgetEnabled()
+    return readBoolean(KEY_ENABLE_CHAOS_BUDGET, DEFAULT_ENABLE_CHAOS_BUDGET)
+end
+
 function dev.smokeTestsSettingKey()
     return "SpellforgeDev.enable_smoke_tests"
 end
@@ -121,6 +163,34 @@ end
 
 function dev.liveSizePlusSettingKey()
     return "SpellforgeDev.enable_live_size_plus"
+end
+
+function dev.livePayloadMulticastSettingKey()
+    return "SpellforgeDev.enable_live_payload_multicast_v0"
+end
+
+function dev.livePayloadPatternSettingKey()
+    return "SpellforgeDev.enable_live_payload_pattern_v0"
+end
+
+function dev.liveNestedTriggerTimerSettingKey()
+    return "SpellforgeDev.enable_live_nested_trigger_timer_v1"
+end
+
+function dev.liveNestedFinalFanoutSettingKey()
+    return "SpellforgeDev.enable_live_nested_final_fanout_v0"
+end
+
+function dev.liveChainAuditSettingKey()
+    return "SpellforgeDev.enable_live_chain_audit_v0"
+end
+
+function dev.liveChainRuntimeSettingKey()
+    return "SpellforgeDev.enable_live_chain_runtime_v0"
+end
+
+function dev.chaosBudgetSettingKey()
+    return "SpellforgeDev.enable_chaos_budget_v0"
 end
 
 return dev

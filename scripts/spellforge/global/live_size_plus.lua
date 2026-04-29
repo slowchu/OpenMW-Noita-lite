@@ -154,7 +154,7 @@ function live_size_plus.selectV0Plan(plan)
     }, nil, nil
 end
 
-function live_size_plus.applyToHelperSpecs(plan, mutation)
+local function applyToHelperSpecsWhere(plan, mutation, predicate)
     if type(plan) ~= "table" or type(plan.helper_specs) ~= "table" then
         return nil, "helper_specs_missing"
     end
@@ -170,10 +170,7 @@ function live_size_plus.applyToHelperSpecs(plan, mutation)
 
     for _, spec in ipairs(plan.helper_specs) do
         local routing = spec.routing or {}
-        local is_primary = routing.kind == "primary_emission"
-            and routing.parent_slot_id == nil
-            and routing.source_postfix_opcode == nil
-        if is_primary then
+        if predicate(spec, routing) then
             local spec_mutated = false
             for _, effect in ipairs(spec.effects or {}) do
                 local base_area = tonumber(effect._spellforge_size_plus_base_area or effect.area)
@@ -219,6 +216,27 @@ function live_size_plus.applyToHelperSpecs(plan, mutation)
         size_plus_area = first_mutated_area,
         size_plus_capped = area_capped,
     }, nil
+end
+
+function live_size_plus.computeMutation(op)
+    return computeSizeMutation(op)
+end
+
+function live_size_plus.applyToHelperSpecs(plan, mutation)
+    return applyToHelperSpecsWhere(plan, mutation, function(_, routing)
+        return routing.kind == "primary_emission"
+            and routing.parent_slot_id == nil
+            and routing.source_postfix_opcode == nil
+    end)
+end
+
+function live_size_plus.applyToPayloadSlotHelperSpecs(plan, slot_id, mutation)
+    if type(slot_id) ~= "string" or slot_id == "" then
+        return nil, "payload_slot_id_missing"
+    end
+    return applyToHelperSpecsWhere(plan, mutation, function(spec)
+        return spec and spec.slot_id == slot_id
+    end)
 end
 
 function live_size_plus.firstHelperArea(helper)

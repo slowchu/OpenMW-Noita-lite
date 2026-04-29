@@ -6,7 +6,7 @@ local opcodes = {
         display_name = "Multicast",
         description = "Emit multiple copies of the next emitter.",
         parameters = {
-            count = { type = "integer", min = 2, max = 8 },
+            count = { type = "integer", min = 2, max = limits.MAX_PAYLOAD_FANOUT_HARD },
         },
     },
     Spread = {

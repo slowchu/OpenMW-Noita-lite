@@ -6,6 +6,7 @@ local executor = require("scripts.spellforge.global.executor")
 local events = require("scripts.spellforge.shared.events")
 local live_timer = require("scripts.spellforge.global.live_timer")
 local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
+local live_chain = require("scripts.spellforge.global.live_chain")
 local records = require("scripts.spellforge.global.records")
 local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
 local sfp_smoke = require("scripts.spellforge.global.sfp_smoke")
@@ -158,6 +159,7 @@ return {
         [events.CAST_DIAG_SIGNAL] = executor.onCastDiagSignal,
         [events.INTERCEPT_DISPATCH_SUPPRESSED] = executor.onInterceptDispatchSuppressed,
         [events.RUNTIME_STATS_REQUEST] = executor.onRuntimeStatsRequest,
+        [events.CHAIN_LOS_RESULT] = live_chain.onLosResult,
         MagExp_OnMagicHit = executor.onMagicHit,
         MagExp_SpellState = sfp_smoke.onSpellState,
     },

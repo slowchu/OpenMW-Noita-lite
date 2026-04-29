@@ -8,6 +8,7 @@ local events = require("scripts.spellforge.shared.events")
 local dev_launch = require("scripts.spellforge.global.dev_launch")
 local dev_runtime = require("scripts.spellforge.global.dev_runtime")
 local limits = require("scripts.spellforge.shared.limits")
+local live_chain = require("scripts.spellforge.global.live_chain")
 local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
 local live_timer = require("scripts.spellforge.global.live_timer")
 local live_trigger = require("scripts.spellforge.global.live_trigger")
@@ -536,8 +537,10 @@ function executor.onMagicHit(payload)
     if helper_mapping and dev.devLaunchEnabled() then
         dev_launch.onHelperHit(helper_hit)
     end
+    local chain_result = nil
     local trigger_result = nil
     if helper_mapping and dev.liveSimpleDispatchEnabled() then
+        chain_result = live_chain.handleResolvedHit(helper_hit)
         trigger_result = live_trigger.handleResolvedHit(helper_hit)
     end
 
@@ -588,6 +591,12 @@ function executor.onMagicHit(payload)
                     trigger_payload_slot_id = trigger_result and trigger_result.payload_slot_id or nil,
                     trigger_payload_helper_engine_id = trigger_result and trigger_result.payload_helper_engine_id or nil,
                     trigger_payload_launched = trigger_result and trigger_result.ok == true or false,
+                    chain_payload_job_id = chain_result and chain_result.job_id or nil,
+                    chain_payload_slot_id = chain_result and chain_result.payload_slot_id or nil,
+                    chain_payload_helper_engine_id = chain_result and chain_result.payload_helper_engine_id or nil,
+                    chain_payload_launched = chain_result and chain_result.ok == true and chain_result.launch_count == 1 or false,
+                    chain_id = chain_result and chain_result.chain_id or (spellforge_hit_user_data and spellforge_hit_user_data.chain_id or nil),
+                    chain_hop_index = chain_result and chain_result.chain_hop_index or (spellforge_hit_user_data and spellforge_hit_user_data.chain_hop_index or nil),
                     slot_id = helper_mapping and helper_mapping.slot_id or (cookie and cookie.slot_id or nil),
                     helper_engine_id = helper_mapping and helper_mapping.engine_id or nil,
                     projectile_id = helper_hit and helper_hit.projectile_id or nil,
@@ -666,8 +675,11 @@ function executor.onUpdate(dt)
     if orchestrator.queueLength() > 0 then
         orchestrator.tick({
             max_jobs_per_tick = limits.MAX_JOBS_PER_TICK,
+            max_live_launches_per_tick = limits.MAX_LIVE_LAUNCHES_PER_TICK,
             dt_seconds = dt,
         })
+    else
+        orchestrator.advanceTime(dt)
     end
 end
 
@@ -697,6 +709,7 @@ function executor.onRuntimeStatsRequest(payload)
         runtime_stats.reset()
         live_timer.clearForTests()
         live_trigger.clearForTests()
+        live_chain.clearForTests()
     end
     sender:sendEvent(events.RUNTIME_STATS_RESULT, {
         request_id = payload and payload.request_id,

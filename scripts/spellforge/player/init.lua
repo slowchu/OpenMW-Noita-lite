@@ -326,6 +326,244 @@ local function sendDebugVanillaFireball()
     ))
 end
 
+local function readField(value, key)
+    if value == nil then
+        return nil
+    end
+    local ok, result = pcall(function()
+        return value[key]
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+local function scalarToken(value)
+    local value_type = type(value)
+    if value_type == "string" then
+        return value ~= "" and value or nil
+    end
+    if value_type == "number" or value_type == "boolean" then
+        return tostring(value)
+    end
+    return nil
+end
+
+local function objectToken(value)
+    local direct = scalarToken(value)
+    if direct then
+        return direct
+    end
+    if value == nil then
+        return nil
+    end
+
+    local nested = readField(value, "object")
+    if nested ~= nil and nested ~= value then
+        local nested_token = objectToken(nested)
+        if nested_token then
+            return nested_token
+        end
+    end
+
+    return scalarToken(readField(value, "id"))
+        or scalarToken(readField(value, "recordId"))
+        or scalarToken(readField(value, "refId"))
+        or scalarToken(readField(value, "name"))
+        or tostring(value)
+end
+
+local function sameObject(left, right, token)
+    if left ~= nil and right ~= nil and left == right then
+        return true
+    end
+    local left_token = objectToken(left)
+    local right_token = objectToken(right)
+    local candidate_token = token ~= nil and tostring(token) or nil
+    return (left_token ~= nil and candidate_token ~= nil and left_token == candidate_token)
+        or (left_token ~= nil and right_token ~= nil and left_token == right_token)
+end
+
+local function positionComponent(position, key)
+    local value = readField(position, key)
+    return tonumber(value)
+end
+
+local function vectorFromPayload(value)
+    if value == nil then
+        return nil
+    end
+    local position = readField(value, "position") or value
+    local x = positionComponent(position, "x")
+    local y = positionComponent(position, "y")
+    local z = positionComponent(position, "z")
+    if x == nil or y == nil then
+        return nil
+    end
+    return util.vector3(x, y, z or 0)
+end
+
+local function offsetRayStart(start_pos, target_pos)
+    local sx = positionComponent(start_pos, "x")
+    local sy = positionComponent(start_pos, "y")
+    local sz = positionComponent(start_pos, "z") or 0
+    local tx = positionComponent(target_pos, "x")
+    local ty = positionComponent(target_pos, "y")
+    local tz = positionComponent(target_pos, "z") or 0
+    if sx == nil or sy == nil or tx == nil or ty == nil then
+        return nil, nil
+    end
+
+    local dx = tx - sx
+    local dy = ty - sy
+    local dz = tz - sz
+    local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if distance <= 1 then
+        return nil, distance
+    end
+
+    local offset = math.min(24, distance * 0.25)
+    return util.vector3(
+        sx + (dx / distance) * offset,
+        sy + (dy / distance) * offset,
+        sz + (dz / distance) * offset
+    ), distance
+end
+
+local function castLosRay(ray_start, target_pos, ignore_object)
+    local ok, ray = pcall(function()
+        return nearby.castRay(ray_start, target_pos, { ignore = ignore_object or self })
+    end)
+    if ok then
+        return ray, nil
+    end
+
+    if ignore_object ~= self then
+        local fallback_ok, fallback_ray = pcall(function()
+            return nearby.castRay(ray_start, target_pos, { ignore = self })
+        end)
+        if fallback_ok then
+            return fallback_ray, nil
+        end
+        return nil, tostring(fallback_ray)
+    end
+
+    return nil, tostring(ray)
+end
+
+local function losCandidateId(candidate, index)
+    return tostring(candidate and candidate.id or ("candidate_" .. tostring(index)))
+end
+
+local function raycastChainLosCandidate(start_pos, current_target, candidate, index)
+    if type(candidate) ~= "table" then
+        return false, "invalid_candidate", false
+    end
+
+    local target_pos = vectorFromPayload(candidate.position)
+    if target_pos == nil then
+        return false, "missing_candidate_position", false
+    end
+
+    local ray_start, distance = offsetRayStart(start_pos, target_pos)
+    if ray_start == nil then
+        return distance ~= nil and distance <= 1, "too_close", false
+    end
+
+    local ray, err = castLosRay(ray_start, target_pos, current_target)
+    if err ~= nil then
+        return false, "cast_failed", true, err
+    end
+
+    if not readField(ray, "hit") then
+        return true, "clear", true
+    end
+
+    local hit_object = readField(ray, "hitObject")
+    if sameObject(hit_object, candidate.object, candidate.id) then
+        return true, "candidate_hit", true
+    end
+
+    return false, "occluded", true
+end
+
+local function onChainLosRequest(payload)
+    local request_id = payload and payload.request_id
+    if type(request_id) ~= "string" or request_id == "" then
+        return
+    end
+
+    local start_pos = vectorFromPayload(payload.start_pos)
+    if start_pos == nil then
+        core.sendGlobalEvent(events.CHAIN_LOS_RESULT, {
+            request_id = request_id,
+            ok = false,
+            rejection_reason = "chain_los_invalid_request",
+            error = "missing start_pos",
+        })
+        return
+    end
+
+    local candidates = payload.candidates
+    if type(candidates) ~= "table" then
+        candidates = {}
+    end
+
+    local visible_ids = {}
+    local blocked_count = 0
+    local raycast_count = 0
+    local error_count = 0
+    local current_target = payload.current_target
+    for index, candidate in ipairs(candidates) do
+        local visible, reason, did_raycast, err = raycastChainLosCandidate(start_pos, current_target, candidate, index)
+        if did_raycast then
+            raycast_count = raycast_count + 1
+        end
+        if visible then
+            visible_ids[#visible_ids + 1] = losCandidateId(candidate, index)
+        else
+            blocked_count = blocked_count + 1
+            if reason == "cast_failed" then
+                error_count = error_count + 1
+                log.warn(string.format(
+                    "Chain LOS raycast failed request_id=%s candidate_id=%s error=%s",
+                    tostring(request_id),
+                    losCandidateId(candidate, index),
+                    tostring(err)
+                ))
+            end
+        end
+    end
+
+    if #candidates > 0 and error_count == #candidates then
+        core.sendGlobalEvent(events.CHAIN_LOS_RESULT, {
+            request_id = request_id,
+            ok = false,
+            rejection_reason = "chain_los_unavailable",
+            error = "all local raycasts failed",
+            raycast_count = raycast_count,
+        })
+        return
+    end
+
+    core.sendGlobalEvent(events.CHAIN_LOS_RESULT, {
+        request_id = request_id,
+        ok = true,
+        visible_ids = visible_ids,
+        blocked_count = blocked_count,
+        raycast_count = raycast_count,
+    })
+    log.info(string.format(
+        "SPELLFORGE_CHAIN_LOS_LOCAL_RESULT request_id=%s candidate_count=%s visible_count=%s blocked_count=%s raycast_count=%s",
+        tostring(request_id),
+        tostring(#candidates),
+        tostring(#visible_ids),
+        tostring(blocked_count),
+        tostring(raycast_count)
+    ))
+end
+
 local function clearInterceptState()
     state.is_casting = false
     state.pending_intercept_spell_id = nil
@@ -714,5 +952,6 @@ return {
             end
         end,
         [events.INTERCEPT_DISPATCH_RESULT] = onInterceptDispatchResult,
+        [events.CHAIN_LOS_REQUEST] = onChainLosRequest,
     },
 }
