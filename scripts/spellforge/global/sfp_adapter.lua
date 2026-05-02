@@ -6,6 +6,8 @@ local sfp_adapter = {}
 local BETA3_LAUNCH_FIELDS = {
     "attacker",
     "spellId",
+    "itemObject",
+    "casterLinked",
     "startPos",
     "direction",
     "hitObject",
@@ -15,14 +17,34 @@ local BETA3_LAUNCH_FIELDS = {
     "muteLight",
     "speed",
     "maxSpeed",
+    "minSpeed",
     "accelerationExp",
+    "forceVec",
+    "maxLifetime",
+    "spawnOffset",
+    "isPaused",
+    "bounceEnabled",
+    "bounceMax",
+    "bouncePower",
+    "detonateOnActorHit",
+    "impactImpulse",
     "areaVfxRecId",
     "areaVfxScale",
     "vfxRecId",
     "boltModel",
     "hitModel",
+    "boltSound",
+    "boltLightId",
+    "spinSpeed",
+    "muteCastGlow",
+    "continuousVfx",
     "excludeTarget",
     "forcedEffects",
+    "spellType",
+    "area",
+    "unreflectable",
+    "nonRecastable",
+    "itemRequirements",
 }
 
 local BETA3_DETONATE_FIELDS = {
@@ -30,10 +52,16 @@ local BETA3_DETONATE_FIELDS = {
     "caster",
     "position",
     "cell",
-    "excludeTarget",
+    "itemObject",
+    "forcedEffects",
+    "unreflectable",
+    "casterLinked",
+    "vfxOverride",
+    "impactSpeed",
+    "maxSpeed",
     "areaVfxRecId",
     "areaVfxScale",
-    "forcedEffects",
+    "excludeTarget",
     "userData",
     "muteAudio",
     "muteLight",
@@ -44,10 +72,16 @@ local DETONATE_ALIASES = {
     caster = { "caster", "attacker", "actor" },
     position = { "position", "pos", "hitPos", "hit_pos" },
     cell = { "cell" },
-    excludeTarget = { "excludeTarget", "exclude_target" },
+    itemObject = { "itemObject", "item_object", "item" },
+    forcedEffects = { "forcedEffects", "forced_effects" },
+    unreflectable = { "unreflectable" },
+    casterLinked = { "casterLinked", "caster_linked" },
+    vfxOverride = { "vfxOverride", "vfx_override" },
+    impactSpeed = { "impactSpeed", "impact_speed" },
+    maxSpeed = { "maxSpeed", "max_speed" },
     areaVfxRecId = { "areaVfxRecId", "area_vfx_rec_id" },
     areaVfxScale = { "areaVfxScale", "area_vfx_scale" },
-    forcedEffects = { "forcedEffects", "forced_effects" },
+    excludeTarget = { "excludeTarget", "exclude_target" },
     userData = { "userData", "user_data" },
     muteAudio = { "muteAudio", "mute_audio" },
     muteLight = { "muteLight", "mute_light" },
@@ -132,6 +166,18 @@ local function noteBeta3ForwardCounters(forwarded)
     end
     if forwarded.excludeTarget then
         runtime_stats.inc("sfp_adapter_exclude_target_forwarded")
+    end
+    if forwarded.spawnOffset then
+        runtime_stats.inc("sfp_adapter_spawn_offset_forwarded")
+    end
+    if forwarded.maxLifetime then
+        runtime_stats.inc("sfp_adapter_max_lifetime_forwarded")
+    end
+    if forwarded.forceVec then
+        runtime_stats.inc("sfp_adapter_force_vec_forwarded")
+    end
+    if forwarded.muteCastGlow then
+        runtime_stats.inc("sfp_adapter_mute_cast_glow_forwarded")
     end
 end
 
@@ -368,24 +414,38 @@ local function normalizeDetonateArgs(...)
             caster = firstPresent(args, DETONATE_ALIASES.caster),
             position = firstPresent(args, DETONATE_ALIASES.position),
             cell = firstPresent(args, DETONATE_ALIASES.cell),
-            excludeTarget = firstPresent(args, DETONATE_ALIASES.excludeTarget),
+            itemObject = firstPresent(args, DETONATE_ALIASES.itemObject),
+            forcedEffects = firstPresent(args, DETONATE_ALIASES.forcedEffects),
+            unreflectable = firstPresent(args, DETONATE_ALIASES.unreflectable),
+            casterLinked = firstPresent(args, DETONATE_ALIASES.casterLinked),
+            vfxOverride = firstPresent(args, DETONATE_ALIASES.vfxOverride),
+            impactSpeed = firstPresent(args, DETONATE_ALIASES.impactSpeed),
+            maxSpeed = firstPresent(args, DETONATE_ALIASES.maxSpeed),
             areaVfxRecId = firstPresent(args, DETONATE_ALIASES.areaVfxRecId),
             areaVfxScale = firstPresent(args, DETONATE_ALIASES.areaVfxScale),
-            forcedEffects = firstPresent(args, DETONATE_ALIASES.forcedEffects),
+            excludeTarget = firstPresent(args, DETONATE_ALIASES.excludeTarget),
             userData = firstPresent(args, DETONATE_ALIASES.userData),
             muteAudio = firstPresent(args, DETONATE_ALIASES.muteAudio),
             muteLight = firstPresent(args, DETONATE_ALIASES.muteLight),
         }
+        if normalized.vfxOverride == nil then
+            normalized.vfxOverride = normalized.areaVfxRecId
+        end
         normalized.forwarded_fields = detectPresentFields(normalized, BETA3_DETONATE_FIELDS)
         normalized.positional_count = countArray({
             normalized.spellId,
             normalized.caster,
             normalized.position,
             normalized.cell,
-            normalized.excludeTarget,
-            normalized.areaVfxRecId,
-            normalized.areaVfxScale,
+            normalized.itemObject,
             normalized.forcedEffects,
+            normalized.unreflectable,
+            normalized.casterLinked,
+            normalized.vfxOverride,
+            normalized.impactSpeed,
+            normalized.maxSpeed,
+            normalized.areaVfxScale,
+            normalized.excludeTarget,
             normalized.userData,
             normalized.muteAudio,
             normalized.muteLight,
@@ -408,13 +468,19 @@ local function normalizeDetonateArgs(...)
     if arg_count <= 5 then
         normalized.item = fifth
     else
-        normalized.excludeTarget = fifth
-        normalized.areaVfxRecId = select(6, ...)
-        normalized.areaVfxScale = select(7, ...)
-        normalized.forcedEffects = select(8, ...)
-        normalized.userData = select(9, ...)
-        normalized.muteAudio = select(10, ...)
-        normalized.muteLight = select(11, ...)
+        normalized.itemObject = fifth
+        normalized.forcedEffects = select(6, ...)
+        normalized.unreflectable = select(7, ...)
+        normalized.casterLinked = select(8, ...)
+        normalized.vfxOverride = select(9, ...)
+        normalized.impactSpeed = select(10, ...)
+        normalized.maxSpeed = select(11, ...)
+        normalized.areaVfxScale = select(12, ...)
+        normalized.excludeTarget = select(13, ...)
+        normalized.userData = select(14, ...)
+        normalized.muteAudio = select(15, ...)
+        normalized.muteLight = select(16, ...)
+        normalized.areaVfxRecId = normalized.vfxOverride
     end
     normalized.forwarded_fields = detectPresentFields(normalized, BETA3_DETONATE_FIELDS)
     normalized.positional_count = arg_count
@@ -469,10 +535,11 @@ function sfp_adapter.detonateSpellAtPos(...)
     local args = normalizeDetonateArgs(...)
     noteBeta3ForwardCounters(args.forwarded_fields)
 
-    -- Legacy positional calls keep the SFP 1.7/2.2b shape:
+    -- Legacy positional calls keep the original five-argument SFP shape:
     -- detonateSpellAtPos(spellId, caster, pos, cell, item).
-    -- Spellforge table args are the Beta3 boundary shape and can carry
-    -- excludeTarget, area VFX, forcedEffects, userData, and mute flags.
+    -- Spellforge table args are normalized onto the SFP 1.7 ordered shape:
+    -- item, forcedEffects, unreflectable, casterLinked, vfxOverride,
+    -- impactSpeed, maxSpeed, areaVfxScale, excludeTarget, userData, mutes.
     local result
     if args.legacy_positional then
         result = callFunction("detonateSpellAtPos", args.spellId, args.caster, args.position, args.cell, args.item)
@@ -483,10 +550,15 @@ function sfp_adapter.detonateSpellAtPos(...)
             args.caster,
             args.position,
             args.cell,
-            args.excludeTarget,
-            args.areaVfxRecId,
-            args.areaVfxScale,
+            args.itemObject,
             args.forcedEffects,
+            args.unreflectable,
+            args.casterLinked,
+            args.vfxOverride,
+            args.impactSpeed,
+            args.maxSpeed,
+            args.areaVfxScale,
+            args.excludeTarget,
             args.userData,
             args.muteAudio,
             args.muteLight

@@ -204,6 +204,14 @@ local function run(player)
     local pollution_detected = spellbookHasAny(player, check_ids)
     assertLine(pollution_detected == false, "10 no player spellbook pollution for helper records")
 
+    local cleanup_record = attached_records.plan and attached_records.plan.helper_records and attached_records.plan.helper_records[1]
+    local cleared_count = helper_records.clearForRecipe(integrated.recipe_id)
+    assertLine(cleared_count == 1, "11 helper cleanup clears recipe mappings")
+    assertLine(cleanup_record and helper_records.getByRecipeSlot(integrated.recipe_id, cleanup_record.slot_id) == nil,
+        "11 helper cleanup removes recipe slot lookup")
+    assertLine(cleanup_record and helper_records.getByLogicalId(cleanup_record.logical_id) == nil,
+        "11 helper cleanup removes logical lookup")
+
     log.info("smoke helper records run complete")
 end
 

@@ -5,6 +5,7 @@ local emission_slots = require("scripts.spellforge.global.emission_slots")
 local helper_record_specs = require("scripts.spellforge.global.helper_record_specs")
 local helper_records = require("scripts.spellforge.global.helper_records")
 local runtime_stats = require("scripts.spellforge.global.runtime_stats")
+local validation = require("scripts.spellforge.shared.validation_contract")
 
 local plan_cache = {}
 
@@ -21,8 +22,11 @@ local plans_by_recipe_id = {}
 
 local function cloneParams(params)
     local out = {}
+    if type(params) ~= "table" then
+        return out
+    end
     local keys = {}
-    for key in pairs(params or {}) do
+    for key in pairs(params) do
         keys[#keys + 1] = key
     end
     table.sort(keys)
@@ -116,14 +120,11 @@ local function cloneGroups(groups)
 end
 
 local function cloneErrors(errors)
-    local out = {}
-    for i, err in ipairs(errors or {}) do
-        out[i] = {
-            path = err.path,
-            message = err.message,
-        }
-    end
-    return out
+    return validation.cloneIssues(errors, "error")
+end
+
+local function cloneWarnings(warnings)
+    return validation.cloneIssues(warnings, "warning")
 end
 
 local function summarizeBounds(groups, effect_count)
@@ -135,6 +136,8 @@ local function summarizeBounds(groups, effect_count)
         has_multicast = false,
         has_pattern = false,
         has_chain = false,
+        has_bounce = false,
+        has_homing = false,
         has_speed_plus = false,
         has_size_plus = false,
         group_count = #(groups or {}),
@@ -151,6 +154,10 @@ local function summarizeBounds(groups, effect_count)
                 bounds.has_pattern = true
             elseif op.opcode == "Chain" then
                 bounds.has_chain = true
+            elseif op.opcode == "Bounce" then
+                bounds.has_bounce = true
+            elseif op.opcode == "Homing" then
+                bounds.has_homing = true
             elseif op.opcode == "Speed+" then
                 bounds.has_speed_plus = true
             elseif op.opcode == "Size+" then
@@ -180,12 +187,12 @@ local function buildPlan(effects, parse_result, canonical)
         effects = sanitizeEffects(effects),
         parse_result = {
             ok = parse_result.ok,
-            warnings = cloneErrors(parse_result.warnings),
+            warnings = cloneWarnings(parse_result.warnings),
             errors = cloneErrors(parse_result.errors),
         },
         groups = groups,
         bounds = summarizeBounds(groups, #(effects or {})),
-        warnings = cloneErrors(parse_result.warnings),
+        warnings = cloneWarnings(parse_result.warnings),
         created_runtime_records = false,
         helper_records = {},
         runtime_status = "staged_only",
@@ -239,7 +246,7 @@ function plan_cache.compileOrGet(effects, opts)
             recipe_id = canonical.recipe_id,
             canonical = canonical.canonical,
             errors = cloneErrors(parse_result.errors),
-            warnings = cloneErrors(parse_result.warnings),
+            warnings = cloneWarnings(parse_result.warnings),
         }
     end
 
@@ -253,7 +260,7 @@ function plan_cache.compileOrGet(effects, opts)
         recipe_id = canonical.recipe_id,
         canonical = canonical.canonical,
         plan = plan,
-        warnings = cloneErrors(parse_result.warnings),
+        warnings = cloneWarnings(parse_result.warnings),
     }
 end
 
@@ -264,7 +271,11 @@ function plan_cache.attachEmissionSlots(recipe_id, opts)
         return {
             ok = false,
             errors = {
-                { path = "recipe_id", message = string.format("No cached plan for recipe_id=%s", tostring(recipe_id)) },
+                validation.error(
+                    "recipe_id",
+                    string.format("No cached plan for recipe_id=%s", tostring(recipe_id)),
+                    "plan_not_cached"
+                ),
             },
             warnings = {},
         }
@@ -294,7 +305,11 @@ function plan_cache.attachHelperSpecs(recipe_id, opts)
         return {
             ok = false,
             errors = {
-                { path = "recipe_id", message = string.format("No cached plan for recipe_id=%s", tostring(recipe_id)) },
+                validation.error(
+                    "recipe_id",
+                    string.format("No cached plan for recipe_id=%s", tostring(recipe_id)),
+                    "plan_not_cached"
+                ),
             },
             warnings = {},
         }
@@ -332,7 +347,11 @@ function plan_cache.attachHelperRecords(recipe_id, opts)
         return {
             ok = false,
             errors = {
-                { path = "recipe_id", message = string.format("No cached plan for recipe_id=%s", tostring(recipe_id)) },
+                validation.error(
+                    "recipe_id",
+                    string.format("No cached plan for recipe_id=%s", tostring(recipe_id)),
+                    "plan_not_cached"
+                ),
             },
             warnings = {},
         }

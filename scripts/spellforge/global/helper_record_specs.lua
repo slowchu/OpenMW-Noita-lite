@@ -1,4 +1,5 @@
 local limits = require("scripts.spellforge.shared.limits")
+local validation = require("scripts.spellforge.shared.validation_contract")
 
 local helper_record_specs = {}
 local PRESENTATION_METADATA_FIELDS = {
@@ -15,17 +16,17 @@ local ELEMENT_SCHOOL_BY_EFFECT_ID = {
     shockdamage = { school = "destruction", element = "shock" },
 }
 
-local function appendError(errors, path, message)
-    errors[#errors + 1] = {
-        path = path,
-        message = message,
-    }
+local function appendError(errors, path, message, code, details)
+    errors[#errors + 1] = validation.error(path, message, code, details)
 end
 
 local function cloneParams(params)
     local out = {}
+    if type(params) ~= "table" then
+        return out
+    end
     local keys = {}
-    for key in pairs(params or {}) do
+    for key in pairs(params) do
         keys[#keys + 1] = key
     end
     table.sort(keys)
@@ -143,9 +144,9 @@ function helper_record_specs.generate(plan, slots_or_result, opts)
     local warnings = {}
 
     if type(plan) ~= "table" then
-        appendError(errors, "plan", "plan must be a table")
+        appendError(errors, "plan", "plan must be a table", "plan_not_table")
     elseif type(plan.recipe_id) ~= "string" or plan.recipe_id == "" then
-        appendError(errors, "plan.recipe_id", "plan.recipe_id must be a non-empty string")
+        appendError(errors, "plan.recipe_id", "plan.recipe_id must be a non-empty string", "plan_recipe_id_required")
     end
 
     local slots = slots_or_result
@@ -154,7 +155,7 @@ function helper_record_specs.generate(plan, slots_or_result, opts)
     end
 
     if type(slots) ~= "table" then
-        appendError(errors, "slots", "slots must be an array or an allocation result containing slots")
+        appendError(errors, "slots", "slots must be an array or an allocation result containing slots", "slots_not_array")
     end
 
     if #errors > 0 then
@@ -166,7 +167,10 @@ function helper_record_specs.generate(plan, slots_or_result, opts)
     end
 
     if #slots > max_specs then
-        appendError(errors, "slots", string.format("Spec count exceeds MAX_PROJECTILES_PER_CAST (%d)", max_specs))
+        appendError(errors, "slots", string.format("Spec count exceeds MAX_PROJECTILES_PER_CAST (%d)", max_specs), "spec_cap_exceeded", {
+            limit = max_specs,
+            count = #slots,
+        })
         return {
             ok = false,
             recipe_id = plan.recipe_id,
@@ -178,7 +182,7 @@ function helper_record_specs.generate(plan, slots_or_result, opts)
     local specs = {}
     for index, slot in ipairs(slots) do
         if type(slot) ~= "table" or type(slot.slot_id) ~= "string" or slot.slot_id == "" then
-            appendError(errors, string.format("slots[%d]", index), "slot must include a non-empty slot_id")
+            appendError(errors, string.format("slots[%d]", index), "slot must include a non-empty slot_id", "slot_id_required")
         else
             local effects = cloneEffects(slot.effects)
             local presentation = resolvePresentation(effects)

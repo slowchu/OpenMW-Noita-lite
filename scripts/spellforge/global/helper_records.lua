@@ -30,8 +30,11 @@ end
 
 local function cloneParams(params)
     local out = {}
+    if type(params) ~= "table" then
+        return out
+    end
     local keys = {}
-    for key in pairs(params or {}) do
+    for key in pairs(params) do
         keys[#keys + 1] = key
     end
     table.sort(keys)
@@ -132,6 +135,19 @@ local function putMapping(mapping)
     by_recipe_slot[recipeSlotKey(mapping.recipe_id, mapping.slot_id)] = mapping
 end
 
+local function removeMapping(mapping)
+    if type(mapping) ~= "table" then
+        return
+    end
+    if mapping.logical_id ~= nil then
+        by_logical_id[mapping.logical_id] = nil
+    end
+    if mapping.engine_id ~= nil then
+        by_engine_id[mapping.engine_id] = nil
+    end
+    by_recipe_slot[recipeSlotKey(mapping.recipe_id, mapping.slot_id)] = nil
+end
+
 function helper_records.getByLogicalId(logical_id)
     return by_logical_id[logical_id]
 end
@@ -148,6 +164,22 @@ function helper_records.clearForTests()
     by_logical_id = {}
     by_engine_id = {}
     by_recipe_slot = {}
+end
+
+function helper_records.clearForRecipe(recipe_id)
+    local to_clear = {}
+    for _, mapping in pairs(by_recipe_slot) do
+        if mapping and mapping.recipe_id == recipe_id then
+            to_clear[#to_clear + 1] = mapping
+        end
+    end
+
+    local cleared = 0
+    for _, mapping in ipairs(to_clear) do
+        removeMapping(mapping)
+        cleared = cleared + 1
+    end
+    return cleared
 end
 
 function helper_records.materialize(specs_or_result, opts)

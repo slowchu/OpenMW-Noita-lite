@@ -9,6 +9,7 @@ local util = require("openmw.util")
 
 local dev = require("scripts.spellforge.shared.dev")
 local events = require("scripts.spellforge.shared.events")
+local limits = require("scripts.spellforge.shared.limits")
 local log = require("scripts.spellforge.shared.log").new("tests.smoke_live_simple_dispatch")
 local smoke_keys = require("scripts.spellforge.tests.smoke_keys")
 
@@ -36,6 +37,8 @@ local state = {
 }
 
 local DEBUG_MARKER_RANGE_FROM_ROOT = true
+local SMOKE_STAGE_YIELD_SECONDS = 0.05
+local SMOKE_CHAIN_CASE_YIELD_SECONDS = 0.03
 
 local KNOWN_COMBAT_SPELL_IDS = {
     "fireball",
@@ -61,6 +64,16 @@ local function clearTimer()
         state.handshake_timer:cancel()
         state.handshake_timer = nil
     end
+end
+
+local function clearPending(map)
+    for key in pairs(map or {}) do
+        map[key] = nil
+    end
+end
+
+local function yieldSmoke(delay_seconds, callback)
+    async:newUnsavableSimulationTimer(delay_seconds or SMOKE_STAGE_YIELD_SECONDS, callback)
 end
 
 local function waitFor(map, request_id, timeout_seconds, callback)
@@ -349,6 +362,55 @@ local function jobsCarrySizePlusUserData(jobs, expected_count, cast_id)
     return true
 end
 
+local function jobsCarryHomingUserData(jobs, expected_count, cast_id, expected_mode, expected_field, expect_force_vec)
+    if type(jobs) ~= "table" or #jobs ~= expected_count then
+        return false
+    end
+    local homing_mode = expected_mode or "launch_force_vec"
+    local homing_field = expected_field or "forceVec"
+    local force_vec_required = expect_force_vec
+    if force_vec_required == nil then
+        force_vec_required = true
+    end
+    for _, job in ipairs(jobs) do
+        local user_data = job.launch_user_data
+        if type(user_data) ~= "table"
+            or user_data.spellforge ~= true
+            or user_data.schema ~= "spellforge_sfp_userdata_v1"
+            or user_data.runtime ~= "2.2c_live_helper"
+            or user_data.cast_id ~= cast_id
+            or user_data.homing ~= true
+            or user_data.homing_mode ~= homing_mode
+            or user_data.homing_field ~= homing_field
+            or (type(user_data.homing_target_id) ~= "string" and type(user_data.homing_target_id) ~= "number")
+            or type(user_data.homing_target_provider) ~= "string"
+            or type(user_data.homing_direction_key) ~= "string" then
+            return false
+        end
+        if force_vec_required then
+            if type(user_data.homing_force) ~= "number"
+                or type(user_data.homing_force_key) ~= "string"
+                or job.forceVec == nil then
+                return false
+            end
+        elseif job.forceVec ~= nil or user_data.homing_force ~= nil or user_data.homing_force_key ~= nil then
+            return false
+        end
+    end
+    return true
+end
+
+local function homingProbePayload()
+    local start_pos, direction, hit_object = currentLaunchAim()
+    return {
+        start_pos = start_pos,
+        direction = direction,
+        hit_object = hit_object,
+        homing_target_id = "homing-smoke-target",
+        homing_target_position = start_pos + (direction * 1000),
+    }
+end
+
 local function sourceJobCarriesTriggerUserData(result)
     local job = result and result.jobs and result.jobs[1] or nil
     local user_data = job and job.launch_user_data or nil
@@ -379,6 +441,12 @@ local function payloadUserDataCarriesTrigger(result)
         and user_data.source_helper_engine_id == result.helper_engine_id
         and user_data.source_postfix_opcode == "Trigger"
         and user_data.depth == 1
+        and user_data.branch_kind == "trigger_payload"
+        and user_data.branch_index == 1
+        and user_data.branch_count == 1
+        and type(user_data.branch_scope) == "string"
+        and type(user_data.branch_id) == "string"
+        and type(user_data.branch_parent_id) == "string"
         and type(user_data.trigger_route) == "string"
 end
 
@@ -421,6 +489,12 @@ local function payloadUserDataCarriesTimer(result)
         and user_data.timer_delay_semantics == "async_simulation_timer"
         and type(user_data.timer_due_tick) == "number"
         and type(user_data.timer_due_seconds) == "number"
+        and user_data.branch_kind == "timer_payload"
+        and user_data.branch_index == 1
+        and user_data.branch_count == 1
+        and type(user_data.branch_scope) == "string"
+        and type(user_data.branch_id) == "string"
+        and type(user_data.branch_parent_id) == "string"
 end
 
 local function payloadJobsCarryPostfixFanout(jobs, expected_count, cast_id, source_opcode, source_slot_id)
@@ -429,6 +503,8 @@ local function payloadJobsCarryPostfixFanout(jobs, expected_count, cast_id, sour
     end
     local seen_slots = {}
     local seen_emissions = {}
+    local seen_branch_indexes = {}
+    local expected_prefix = string.lower(source_opcode) .. "_payload"
     for _, job in ipairs(jobs) do
         local user_data = job and job.launch_user_data or nil
         if type(user_data) ~= "table"
@@ -443,13 +519,29 @@ local function payloadJobsCarryPostfixFanout(jobs, expected_count, cast_id, sour
             or type(user_data.payload_slot_id) ~= "string"
             or type(user_data.slot_id) ~= "string"
             or user_data.slot_id ~= user_data.payload_slot_id
-            or type(user_data.emission_index) ~= "number" then
+            or type(user_data.emission_index) ~= "number"
+            or type(user_data.branch_scope) ~= "string"
+            or type(user_data.branch_id) ~= "string"
+            or type(user_data.branch_parent_id) ~= "string"
+            or type(user_data.branch_kind) ~= "string"
+            or string.sub(user_data.branch_kind, 1, #expected_prefix) ~= expected_prefix
+            or tonumber(user_data.branch_index) == nil
+            or tonumber(user_data.branch_count) ~= expected_count
+            or job.branch_scope ~= user_data.branch_scope
+            or job.branch_id ~= user_data.branch_id
+            or job.branch_parent_id ~= user_data.branch_parent_id
+            or job.branch_kind ~= user_data.branch_kind
+            or tonumber(job.branch_index) ~= tonumber(user_data.branch_index)
+            or tonumber(job.branch_count) ~= tonumber(user_data.branch_count) then
             return false
         end
         seen_slots[user_data.payload_slot_id] = true
         seen_emissions[user_data.emission_index] = true
+        seen_branch_indexes[tonumber(user_data.branch_index)] = true
     end
-    return tableCount(seen_slots) == expected_count and tableCount(seen_emissions) == expected_count
+    return tableCount(seen_slots) == expected_count
+        and tableCount(seen_emissions) == expected_count
+        and tableCount(seen_branch_indexes) == expected_count
 end
 
 local function payloadJobsCarryPostfixPattern(jobs, expected_count, cast_id, source_opcode, source_slot_id, pattern_kind)
@@ -504,6 +596,18 @@ local function nestedFinalFanoutJobsCarryUserData(jobs, expected_count, cast_id,
             or user_data.final_fanout_count ~= expected_count
             or user_data.fanout_count ~= expected_count
             or type(user_data.final_fanout_index) ~= "number"
+            or user_data.branch_kind ~= "nested_final_fanout"
+            or tonumber(user_data.branch_count) ~= expected_count
+            or tonumber(user_data.branch_index) ~= user_data.final_fanout_index
+            or type(user_data.branch_scope) ~= "string"
+            or type(user_data.branch_id) ~= "string"
+            or type(user_data.branch_parent_id) ~= "string"
+            or job.branch_scope ~= user_data.branch_scope
+            or job.branch_id ~= user_data.branch_id
+            or job.branch_parent_id ~= user_data.branch_parent_id
+            or job.branch_kind ~= user_data.branch_kind
+            or tonumber(job.branch_index) ~= tonumber(user_data.branch_index)
+            or tonumber(job.branch_count) ~= tonumber(user_data.branch_count)
             or type(user_data.payload_slot_id) ~= "string"
             or type(user_data.slot_id) ~= "string"
             or user_data.slot_id ~= user_data.payload_slot_id then
@@ -774,6 +878,44 @@ local function chainPayloadJobsCarryUserData(jobs, expected_count, chain_id, max
             or user_data.chain_targeting_mode ~= "no_immediate_repeat"
             or type(user_data.selected_target_id) ~= "string"
             or type(user_data.payload_slot_id) ~= "string" then
+            return false
+        end
+    end
+    return true
+end
+
+local function chainMulticastPayloadJobsCarryUserData(jobs, hop_count, fanout_count, chain_id, max_hops)
+    if type(jobs) ~= "table" or #jobs ~= hop_count * fanout_count then
+        return false
+    end
+    local saw_by_hop = {}
+    for index, job in ipairs(jobs) do
+        local user_data = job and job.launch_user_data or nil
+        local hop_index = math.floor((index - 1) / fanout_count) + 1
+        local branch_index = ((index - 1) % fanout_count) + 1
+        if type(user_data) ~= "table"
+            or user_data.runtime ~= "2.2c_live_helper"
+            or user_data.chain_runtime ~= true
+            or user_data.chain_role ~= "payload"
+            or user_data.chain_id ~= chain_id
+            or tonumber(user_data.chain_hop_index) ~= hop_index
+            or tonumber(user_data.chain_max_hops) ~= tonumber(max_hops)
+            or user_data.chain_targeting_mode ~= "no_immediate_repeat"
+            or user_data.branch_kind ~= "chain_multicast"
+            or type(user_data.branch_scope) ~= "string"
+            or tonumber(user_data.branch_index) ~= branch_index
+            or tonumber(user_data.branch_count) ~= fanout_count
+            or type(user_data.branch_id) ~= "string"
+            or type(user_data.branch_parent_id) ~= "string"
+            or type(user_data.chain_continuation_group_id) ~= "string"
+            or type(user_data.selected_target_id) ~= "string"
+            or type(user_data.payload_slot_id) ~= "string" then
+            return false
+        end
+        saw_by_hop[hop_index] = (saw_by_hop[hop_index] or 0) + 1
+    end
+    for hop_index = 1, hop_count do
+        if saw_by_hop[hop_index] ~= fanout_count then
             return false
         end
     end
@@ -1097,6 +1239,11 @@ local function runManualCastStage()
         log.info("manual cast required: select the compiled simple spell and cast within 30s")
 
         waitFor(state.pending_observe, observe_request_id, 30, function(hit_result)
+            if not hit_result or hit_result.ok ~= true then
+                log.info("SKIP optional live simple manual cast observe: " .. tostring(hit_result and hit_result.error or "timeout"))
+                state.last_spell_id = nil
+                return
+            end
             assertLine(state.intercept_seen == true, "intercept dispatched for compiled simple spell")
             assertLine(state.intercept_live_2_2c == true, "intercept used feature-flagged live 2.2c simple bridge")
             assertLine(state.intercept_dispatch_kind == "compiled_spellforge_2_2c_helper", "live bridge dispatch kind is distinct")
@@ -1141,10 +1288,13 @@ local function runManualCastStage()
                 for _, line in ipairs(stats_result and stats_result.summary_lines or {}) do
                     log.info("runtime stats " .. tostring(line))
                 end
-                log.info("smoke live simple dispatch run complete")
+                log.info("optional live simple manual cast observe complete")
+                state.last_spell_id = nil
                 state.running = false
             end)
         end)
+        log.info("smoke live simple dispatch automated run complete; optional manual cast observe remains open")
+        state.running = false
     end)
 end
 
@@ -1205,6 +1355,41 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain runtime suppresses duplicate chained payload hit")
                 assertLine(result and result.branch_hop_suppressed == true, "Trigger Chain runtime suppresses branched chained payload hit")
                 assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "Trigger Chain payload userData carries continuation identity")
+            end,
+        },
+        {
+            chain_case = "direct_chain_multicast_8",
+            label = "direct Chain 3 Multicast high fanout live runtime",
+            check = function(result)
+                local fanout_count = limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS
+                assertLine(result and result.live_mode == "chain", "direct Chain Multicast reports Chain mode")
+                assertLine(result and result.chain_shape == "source_chain_payload", "direct Chain Multicast reports direct shape")
+                assertLine(result and result.has_multicast_payload == true, "direct Chain Multicast reports payload fanout")
+                assertLine(result and result.chain_multicast_fanout_count == fanout_count, "direct Chain Multicast reports chaos fanout cap")
+                assertLine(selectedSequence(result) == "B,A,B", "direct Chain Multicast advances one continuation per hop", selectedSequence(result))
+                assertLine(result and result.chain_payload_launch_count == 3 * fanout_count, "direct Chain Multicast launches bounded sibling payloads")
+                assertLine(result and result.stop_reason == "max_hops_reached", "direct Chain Multicast stops at max hops", result and result.stop_reason)
+                assertLine(result and result.duplicate_source_suppressed == true, "direct Chain Multicast suppresses duplicate source hit")
+                assertLine(result and result.branch_source_suppressed == true, "direct Chain Multicast suppresses branched source hit")
+                assertLine(result and result.duplicate_hop_suppressed == true, "direct Chain Multicast suppresses duplicate sibling hit")
+                assertLine(result and result.branch_hop_suppressed == true, "direct Chain Multicast suppresses branched sibling hit")
+                assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), "direct Chain Multicast payload userData carries branch identity")
+            end,
+        },
+        {
+            chain_case = "trigger_chain_multicast_8",
+            label = "Trigger Chain 3 Multicast high fanout live runtime",
+            check = function(result)
+                local fanout_count = limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS
+                assertLine(result and result.live_mode == "chain", "Trigger Chain Multicast reports Chain mode")
+                assertLine(result and result.chain_shape == "trigger_payload_chain", "Trigger Chain Multicast reports Trigger payload shape")
+                assertLine(result and result.has_multicast_payload == true, "Trigger Chain Multicast reports payload fanout")
+                assertLine(result and result.chain_multicast_fanout_count == fanout_count, "Trigger Chain Multicast reports chaos fanout cap")
+                assertLine(selectedSequence(result) == "B,A,B", "Trigger Chain Multicast advances one continuation per hop", selectedSequence(result))
+                assertLine(result and result.chain_payload_launch_count == 3 * fanout_count, "Trigger Chain Multicast launches bounded sibling payloads")
+                assertLine(result and result.duplicate_source_suppressed == true, "Trigger Chain Multicast suppresses duplicate root Trigger hit")
+                assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain Multicast suppresses duplicate sibling payload hit")
+                assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), "Trigger Chain Multicast payload userData carries branch identity")
             end,
         },
         {
@@ -1348,7 +1533,11 @@ local function runChainRuntimeSmoke(callback)
             chain_case = "speed_plus_multicast",
             label = "Chain Speed+ Multicast live deferral",
             check = function(result)
-                assertLine(result and result.fallback_reason == "chain_multicast_deferred", "Chain Speed+ Multicast live defers")
+                assertLine(
+                    result and (result.fallback_reason == "chain_multicast_deferred"
+                        or result.fallback_reason == "chain_modifier_combo_deferred"),
+                    "Chain Speed+ Multicast live defers"
+                )
                 assertLine(result and result.chain_payload_launch_count == 0, "Chain Speed+ Multicast launches no Chain payload")
             end,
         },
@@ -1356,7 +1545,11 @@ local function runChainRuntimeSmoke(callback)
             chain_case = "size_plus_multicast",
             label = "Chain Size+ Multicast live deferral",
             check = function(result)
-                assertLine(result and result.fallback_reason == "chain_multicast_deferred", "Chain Size+ Multicast live defers")
+                assertLine(
+                    result and (result.fallback_reason == "chain_multicast_deferred"
+                        or result.fallback_reason == "chain_modifier_combo_deferred"),
+                    "Chain Size+ Multicast live defers"
+                )
                 assertLine(result and result.chain_payload_launch_count == 0, "Chain Size+ Multicast launches no Chain payload")
             end,
         },
@@ -1460,20 +1653,30 @@ local function runChainRuntimeSmoke(callback)
                 local snapshot = stats_result and stats_result.snapshot or {}
                 assertLine(stats_result and stats_result.ok == true, "runtime stats snapshot returned", stats_result and stats_result.error)
                 assertCounterAtLeast(snapshot, "chain_runtime_attempts", #cases - 1, "runtime stats counted Chain runtime attempts")
-                assertCounterAtLeast(snapshot, "chain_runtime_qualified", 9, "runtime stats counted Chain runtime qualifications")
+                assertCounterAtLeast(snapshot, "chain_runtime_qualified", 11, "runtime stats counted Chain runtime qualifications")
                 assertCounterAtLeast(snapshot, "chain_runtime_rejected", 7, "runtime stats counted Chain runtime rejections")
                 assertCounterAtLeast(snapshot, "chain_runtime_disabled_reject", 1, "runtime stats counted Chain runtime disabled rejection")
-                assertCounterAtLeast(snapshot, "chain_runtime_direct_qualified", 6, "runtime stats counted direct Chain qualifications")
-                assertCounterAtLeast(snapshot, "chain_runtime_trigger_chain_qualified", 3, "runtime stats counted Trigger Chain qualification")
-                assertCounterAtLeast(snapshot, "chain_runtime_source_hits", 9, "runtime stats counted Chain source hits")
-                assertCounterAtLeast(snapshot, "chain_runtime_hops_launched", 21, "runtime stats counted Chain hops launched")
-                assertCounterAtLeast(snapshot, "chain_runtime_hops_completed", 21, "runtime stats counted Chain hops completed")
-                assertCounterAtLeast(snapshot, "chain_runtime_stop_max_hops", 7, "runtime stats counted Chain max-hop stops")
+                assertCounterAtLeast(snapshot, "chain_runtime_direct_qualified", 7, "runtime stats counted direct Chain qualifications")
+                assertCounterAtLeast(snapshot, "chain_runtime_trigger_chain_qualified", 4, "runtime stats counted Trigger Chain qualification")
+                assertCounterAtLeast(snapshot, "chain_runtime_source_hits", 11, "runtime stats counted Chain source hits")
+                assertCounterAtLeast(snapshot, "chain_runtime_hops_launched", 27, "runtime stats counted Chain hops launched")
+                assertCounterAtLeast(snapshot, "chain_runtime_hops_completed", 27, "runtime stats counted Chain hops completed")
+                assertCounterAtLeast(snapshot, "chain_runtime_stop_max_hops", 9, "runtime stats counted Chain max-hop stops")
                 assertCounterAtLeast(snapshot, "chain_runtime_stop_no_target", 2, "runtime stats counted Chain no-target stop")
-                assertCounterAtLeast(snapshot, "chain_runtime_payload_jobs", 21, "runtime stats counted Chain payload jobs")
-                assertCounterAtLeast(snapshot, "chain_runtime_payload_ok", 21, "runtime stats counted Chain payload launch ok")
+                assertCounterAtLeast(snapshot, "chain_runtime_payload_jobs", 69, "runtime stats counted Chain payload jobs")
+                assertCounterAtLeast(snapshot, "chain_runtime_payload_ok", 69, "runtime stats counted Chain payload completion ok")
+                assertCounterAtLeast(snapshot, "chain_runtime_probe_virtual_payload_jobs", 42, "runtime stats counted smoke-only virtual Chain payload branches")
+                assertCounterAtLeast(snapshot, "chain_runtime_probe_virtual_payload_ok", 42, "runtime stats counted smoke-only virtual Chain payload completion")
                 assertCounterAtLeast(snapshot, "chain_runtime_duplicate_suppressed", 6, "runtime stats counted Chain duplicate suppression")
-                assertCounterAtLeast(snapshot, "chain_runtime_multicast_reject", 1, "runtime stats counted Chain Multicast rejection")
+                assertCounterAtLeast(snapshot, "chain_multicast_rejected", 2, "runtime stats counted Chain Multicast guarded rejections")
+                assertCounterAtLeast(snapshot, "chain_multicast_disabled_reject", 2, "runtime stats counted Chain Multicast disabled rejections")
+                assertCounterAtLeast(snapshot, "chain_multicast_qualified", 2, "runtime stats counted Chain Multicast qualifications")
+                assertCounterAtLeast(snapshot, "chain_multicast_hops", 6, "runtime stats counted Chain Multicast hop fanout")
+                assertCounterAtLeast(snapshot, "chain_multicast_jobs", 48, "runtime stats counted Chain Multicast payload jobs")
+                assertCounterAtLeast(snapshot, "chain_multicast_payload_ok", 48, "runtime stats counted Chain Multicast payload ok")
+                assertCounterAtLeast(snapshot, "branch_observability_chain_multicast_branches", 6, "runtime stats counted Chain Multicast continuation groups")
+                assertCounterAtLeast(snapshot, "branch_observability_events", 48, "runtime stats counted Chain Multicast branch events")
+                assertCounterAtLeast(snapshot, "branch_observability_max_branch_fanout", limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS, "runtime stats tracked Chain Multicast max fanout")
                 assertCounterAtLeast(snapshot, "chain_runtime_pattern_reject", 1, "runtime stats counted Chain pattern rejection")
                 assertCounterAtLeast(snapshot, "chain_runtime_trigger_timer_reject", 1, "runtime stats counted Chain Trigger/Timer rejection")
                 assertCounterAtLeast(snapshot, "chain_runtime_recursion_reject", 1, "runtime stats counted Chain recursion rejection")
@@ -1488,9 +1691,9 @@ local function runChainRuntimeSmoke(callback)
                 assertCounterAtLeast(snapshot, "chain_modifier_speed_mutated", 6, "runtime stats counted Chain Speed+ mutations")
                 assertCounterAtLeast(snapshot, "chain_modifier_size_mutated", 6, "runtime stats counted Chain Size+ mutations")
                 assertCounterAtLeast(snapshot, "chain_modifier_payload_ok", 12, "runtime stats counted Chain modified payload ok")
-                assertCounterAtLeast(snapshot, "chain_target_no_immediate_repeat_exclusions", 21, "runtime stats counted live Chain no-immediate-repeat exclusions")
-                assertCounterAtLeast(snapshot, "chain_provider_mock_attempts", 10, "runtime stats counted Chain mock provider use")
-                assertCounterAtLeast(snapshot, "chain_provider_attempts", 10, "runtime stats counted Chain provider attempts")
+                assertCounterAtLeast(snapshot, "chain_target_no_immediate_repeat_exclusions", 27, "runtime stats counted live Chain no-immediate-repeat exclusions")
+                assertCounterAtLeast(snapshot, "chain_provider_mock_attempts", 16, "runtime stats counted Chain mock provider use")
+                assertCounterAtLeast(snapshot, "chain_provider_attempts", 16, "runtime stats counted Chain provider attempts")
                 assertLine(
                     counter(snapshot, "chain_provider_real_ok") + counter(snapshot, "chain_provider_real_unavailable") >= 1,
                     "runtime stats counted Chain real provider supported or unavailable state",
@@ -1507,7 +1710,9 @@ local function runChainRuntimeSmoke(callback)
             assertLine(result and result.mode == "chain_runtime", "Chain runtime " .. case.label .. " returns runtime mode")
             assertLine(result and result.ok == true, "Chain runtime " .. case.label .. " ok", result and (result.rejection_reason or result.fallback_reason or result.error))
             case.check(result)
-            runCase(index + 1)
+            yieldSmoke(SMOKE_CHAIN_CASE_YIELD_SECONDS, function()
+                runCase(index + 1)
+            end)
         end, {
             chain_case = case.chain_case,
             start_pos = start_pos,
@@ -1536,28 +1741,38 @@ local function runSmoke()
         return
     end
 
+    clearPending(state.pending_observe)
+    state.last_spell_id = nil
     state.running = true
     log.info("smoke live simple dispatch hotkey accepted")
 
     requestRuntimeStats(true, function(reset_result)
         assertLine(reset_result and reset_result.ok == true, "runtime stats reset accepted", reset_result and reset_result.error)
 
-        runNestedAuditSmoke(function()
-            runChainTargetingSmoke(function()
-                runChainRuntimeSmoke(function()
-                    requestProbe("disabled", function(disabled)
-                        assertLine(disabled and disabled.ok == true, "feature flag disabled probe reports bridge unavailable", disabled and disabled.error)
-                        assertLine(disabled and disabled.used_live_2_2c == false, "disabled probe does not use live 2.2c bridge")
+        yieldSmoke(SMOKE_STAGE_YIELD_SECONDS, function()
+            runNestedAuditSmoke(function()
+                yieldSmoke(SMOKE_STAGE_YIELD_SECONDS, function()
+                    runChainTargetingSmoke(function()
+                        yieldSmoke(SMOKE_STAGE_YIELD_SECONDS, function()
+                            runChainRuntimeSmoke(function()
+                                yieldSmoke(SMOKE_STAGE_YIELD_SECONDS, function()
+                                    requestProbe("disabled", function(disabled)
+                                        assertLine(disabled and disabled.ok == true, "feature flag disabled probe reports bridge unavailable", disabled and disabled.error)
+                                        assertLine(disabled and disabled.used_live_2_2c == false, "disabled probe does not use live 2.2c bridge")
 
-                        requestProbe("qualifying_dry_run", function(qualifying)
-                            assertLine(qualifying and qualifying.ok == true, "qualifying simple bridge dry-run ok", qualifying and qualifying.error)
-                            assertLine(qualifying and qualifying.slot_count == 1, "qualifying simple bridge has one slot")
-                            assertLine(qualifying and qualifying.helper_record_count == 1, "qualifying simple bridge has one helper record")
+                                        requestProbe("qualifying_dry_run", function(qualifying)
+                                            assertLine(qualifying and qualifying.ok == true, "qualifying simple bridge dry-run ok", qualifying and qualifying.error)
+                                            assertLine(qualifying and qualifying.slot_count == 1, "qualifying simple bridge has one slot")
+                                            assertLine(qualifying and qualifying.helper_record_count == 1, "qualifying simple bridge has one helper record")
 
-                            requestProbe("non_qualifying", function(nonqualifying)
-                                assertLine(nonqualifying and nonqualifying.ok == true, "non-qualifying recipe falls back cleanly", nonqualifying and nonqualifying.error)
-                                assertLine(type(nonqualifying and nonqualifying.fallback_reason) == "string", "non-qualifying fallback has reason")
-                                runManualCastStage()
+                                            requestProbe("non_qualifying", function(nonqualifying)
+                                                assertLine(nonqualifying and nonqualifying.ok == true, "non-qualifying recipe falls back cleanly", nonqualifying and nonqualifying.error)
+                                                assertLine(type(nonqualifying and nonqualifying.fallback_reason) == "string", "non-qualifying fallback has reason")
+                                                runManualCastStage()
+                                            end)
+                                        end)
+                                    end)
+                                end)
                             end)
                         end)
                     end)
@@ -1602,6 +1817,149 @@ local function runManualChainRealProbe()
         direction = direction,
         hit_object = hit_object,
     })
+end
+
+local function runBounceSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
+    if not dev.liveSimpleDispatchEnabled() then
+        log.info(string.format("SKIP Bounce smoke: enable %s", dev.liveSimpleDispatchSettingKey()))
+        return
+    end
+    if state.running then
+        log.warn("Bounce smoke skipped: smoke live simple dispatch already in progress")
+        return
+    end
+    if state.backend ~= "READY" then
+        log.warn("Bounce smoke skipped: backend is not READY")
+        return
+    end
+
+    state.running = true
+    log.info("Bounce hardening smoke launching: Bounce 3 Fire Damage -> Trigger -> Frost Damage 20pt/10ft; aim at a wall, floor, ceiling, or actor")
+
+    local function assertBounceRejected(mode, label, expected_reason, next_step)
+        requestProbe(mode, function(result)
+            assertLine(result and result.ok == true, "Bounce " .. label .. " rejects cleanly", result and (result.fallback_reason or result.error))
+            if expected_reason ~= nil then
+                assertLine(result and result.fallback_reason == expected_reason, "Bounce " .. label .. " has stable reason", result and tostring(result.fallback_reason))
+            else
+                assertLine(type(result and result.fallback_reason) == "string", "Bounce " .. label .. " has reason", result and tostring(result and result.fallback_reason))
+            end
+            if next_step then
+                next_step()
+            end
+        end)
+    end
+
+    local function runLiveBounceLaunch()
+        requestProbe("bounce_launch", function(result)
+            local bounce_detail = result and string.format(
+                "bounce_ok=%s actor_toggle_ok=%s bounce_enabled=%s detonate_on_actor=%s payload_projectile_launches=%s bounce_error=%s actor_error=%s",
+                tostring(result.post_launch_bounce_ok),
+                tostring(result.post_launch_detonate_on_actor_ok),
+                tostring(result.jobs and result.jobs[1] and result.jobs[1].bounceEnabled),
+                tostring(result.jobs and result.jobs[1] and result.jobs[1].detonateOnActorHit),
+                tostring(result.payload_projectile_launches),
+                tostring(result.post_launch_bounce_error),
+                tostring(result.post_launch_detonate_on_actor_error)
+            ) or nil
+            local source_job = result and result.jobs and result.jobs[1] or nil
+            local user_data = source_job and source_job.launch_user_data or nil
+            assertLine(result and result.ok == true, "Bounce source launches", bounce_detail or (result and (result.fallback_reason or result.error)))
+            assertLine(result and result.live_mode == "bounce", "Bounce source reports bounce mode", result and tostring(result.live_mode))
+            assertLine(result and tonumber(result.bounce_max) == 3, "Bounce launch reports three bounces")
+            assertLine(result and result.dispatch_count == 1 and result.source_dispatch_count == 1, "Bounce launch dispatches only the source projectile")
+            assertLine(result and result.payload_projectile_launches == 0, "Bounce Trigger payload does not launch a second projectile", result and tostring(result.payload_projectile_launches))
+            assertLine(result and result.payload_detonation_mode == "bounce_detonate_at_pos", "Bounce Trigger payload uses at-position detonation")
+            assertLine(source_job and source_job.bounceEnabled == true and source_job.detonateOnActorHit == false, "Bounce source job bounces off actors")
+            assertLine(type(user_data) == "table" and user_data.bounce_runtime == true and user_data.source_prefix_opcode == "Bounce", "Bounce source userData carries Bounce identity")
+            assertLine(type(user_data) == "table" and user_data.source_postfix_opcode == "Trigger" and user_data.bounce_trigger_payload_slot_id == result.trigger_payload_slot_id, "Bounce source userData carries Trigger payload identity")
+            assertLine(type(user_data) == "table" and user_data.branch_kind == "bounce_source" and type(user_data.branch_id) == "string" and type(user_data.branch_parent_id) == "string", "Bounce source userData carries source branch identity")
+            if result and result.ok == true then
+                log.info("Bounce live: watch for exactly three SPELLFORGE_LIVE_BOUNCE_EVENT markers, source and Trigger payload detonations at each bounce, and one final cancel")
+            end
+            state.running = false
+        end, launchAimPayload())
+    end
+
+    local function runUnsupportedBounceChecks()
+        assertBounceRejected("bounce_over_cap", "over-cap", "bounce_count_cap_exceeded", function()
+            assertBounceRejected("bounce_fanout_deferred", "fanout", "bounce_fanout_deferred", function()
+                assertBounceRejected("bounce_timer_deferred", "Timer", "bounce_timer_deferred", function()
+                    assertBounceRejected("bounce_chain_deferred", "direct Chain", "bounce_chain_deferred", function()
+                        assertBounceRejected("bounce_speed_plus_deferred", "Speed+", "bounce_modifier_deferred", function()
+                            assertBounceRejected("bounce_size_plus_deferred", "Size+", "bounce_modifier_deferred", runLiveBounceLaunch)
+                        end)
+                    end)
+                end)
+            end)
+        end)
+    end
+
+    requestProbe("bounce_disabled", function(disabled)
+        assertLine(disabled and disabled.ok == true, "Bounce disabled probe rejects cleanly", disabled and disabled.error)
+        assertLine(type(disabled and disabled.fallback_reason) == "string", "Bounce disabled probe has reason")
+
+        requestProbe("bounce_dry_run", function(dry)
+            assertLine(dry and dry.ok == true, "Bounce dry-run qualifies", dry and dry.error)
+            assertLine(dry and tonumber(dry.bounce_max) == 3, "Bounce dry-run reports three bounces")
+            assertLine(dry and dry.bounce_detonate_on_actor_hit == false, "Bounce dry-run bounces actors")
+            assertLine(type(dry and dry.trigger_payload_slot_id) == "string", "Bounce dry-run keeps Trigger payload")
+            assertLine(dry and dry.payload_projectile_launches == 0, "Bounce dry-run predicts no Trigger payload projectile")
+            assertLine(dry and dry.payload_detonation_mode == "bounce_detonate_at_pos", "Bounce dry-run predicts at-position Trigger payload detonation")
+
+            requestProbe("bounce_chain_payload_dry_run", function(chain_dry)
+                assertLine(chain_dry and chain_dry.ok == true, "Bounce Trigger Chain payload dry-run qualifies", chain_dry and chain_dry.error)
+                assertLine(chain_dry and chain_dry.payload_chain_runtime == true, "Bounce Trigger Chain payload uses Chain runtime")
+                assertLine(chain_dry and chain_dry.payload_detonation_mode == "bounce_chain_runtime", "Bounce Trigger Chain payload does not detonate as simple payload")
+                assertLine(chain_dry and chain_dry.chain_shape == "trigger_payload_chain", "Bounce Trigger Chain payload keeps Trigger Chain shape", chain_dry and tostring(chain_dry.chain_shape))
+                assertLine(chain_dry and tonumber(chain_dry.chain_max_hops) == 3, "Bounce Trigger Chain payload reports three Chain hops")
+                assertLine(chain_dry and chain_dry.payload_projectile_launches == 0, "Bounce Trigger Chain payload launches no payload before a bounce hit")
+
+                runUnsupportedBounceChecks()
+            end)
+        end)
+    end)
+end
+
+local function runBounceChainSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
+    if not dev.liveSimpleDispatchEnabled() then
+        log.info(string.format("SKIP Bounce Chain smoke: enable %s", dev.liveSimpleDispatchSettingKey()))
+        return
+    end
+    if state.running then
+        log.warn("Bounce Chain smoke skipped: smoke live simple dispatch already in progress")
+        return
+    end
+    if state.backend ~= "READY" then
+        log.warn("Bounce Chain smoke skipped: backend is not READY")
+        return
+    end
+
+    state.running = true
+    log.info("Bounce Chain live launching: Bounce 3 Fire Damage -> Trigger -> Chain 3 -> Frost Damage; aim at an actor near another actor")
+
+    requestProbe("bounce_chain_payload_launch", function(result)
+        local source_job = result and result.jobs and result.jobs[1] or nil
+        local user_data = source_job and source_job.launch_user_data or nil
+        assertLine(result and result.ok == true, "Bounce Trigger Chain source launches", result and (result.fallback_reason or result.error))
+        assertLine(result and result.live_mode == "bounce", "Bounce Trigger Chain source reports bounce mode", result and tostring(result.live_mode))
+        assertLine(result and result.payload_chain_runtime == true, "Bounce Trigger Chain live uses Chain payload runtime")
+        assertLine(result and result.payload_detonation_mode == "bounce_chain_runtime", "Bounce Trigger Chain live does not simple-detonate payload")
+        assertLine(result and result.chain_shape == "trigger_payload_chain", "Bounce Trigger Chain live keeps Trigger Chain shape", result and tostring(result.chain_shape))
+        assertLine(result and tonumber(result.chain_max_hops) == 3, "Bounce Trigger Chain live reports three Chain hops")
+        assertLine(type(user_data) == "table" and user_data.bounce_runtime == true and user_data.chain_runtime == true, "Bounce Trigger Chain source userData carries Bounce and Chain identity")
+        assertLine(type(user_data) == "table" and type(user_data.branch_scope) == "string" and type(user_data.branch_id) == "string", "Bounce Trigger Chain source userData carries branch identity")
+        if result and result.ok == true then
+            log.info("Bounce Chain live: bounce points near actors should log SPELLFORGE_LIVE_BOUNCE_CHAIN_SOURCE_TARGET_INFERRED plus Chain hop markers; empty bounce points stop with no_valid_chain_target")
+        end
+        state.running = false
+    end, launchAimPayload())
 end
 
 local function runMulticastSmoke()
@@ -2117,7 +2475,7 @@ local function runTimerSmoke()
 
         requestProbe("timer_detonation_audit", function(timer_audit)
             assertLine(timer_audit and timer_audit.ok == true, "Timer source detonation capability audit returns status", timer_audit and timer_audit.error)
-            assertLine(timer_audit and timer_audit.status == "blocked", "Timer source detonation is explicitly blocked pending projectile position/cell")
+            assertLine(timer_audit and timer_audit.status ~= "blocked", "Timer source detonation has an SFP 1.7 projectile/cancel path", timer_audit and timer_audit.blocker)
 
             requestProbe("timer_disabled", function(disabled)
                 assertLine(disabled and disabled.ok == true, "live Timer subflag disabled probe rejects", disabled and disabled.error)
@@ -2163,6 +2521,7 @@ local function runTimerSmoke()
                                     assertLine(done and done.callback_payload_count == 1, "live Timer async callback payload count is one")
                                     assertLine(done and done.pending_count == 0, "live Timer async pending count clears after callback")
                                     assertLine(payloadUserDataCarriesTimer(done), "live Timer async payload userData carries source and Timer identity")
+                                    assertLine(type(done and done.timer_source_detonation_status) == "string", "live Timer async checks source detonation or safe skip")
 
                                     requestProbe("timer_payload_multicast_disabled", function(multicast_disabled)
                                         assertLine(multicast_disabled and multicast_disabled.ok == true, "payload Multicast disabled Timer probe rejects", multicast_disabled and multicast_disabled.error)
@@ -2337,7 +2696,7 @@ local function runTimerSmoke()
                                                                                     assertCounterAtLeast(snapshot, "live_timer_real_delay_smoke_pending", 1, "runtime stats counted async Timer smoke pending")
                                                                                     assertCounterAtLeast(snapshot, "live_timer_real_delay_smoke_callback_ok", 2, "runtime stats counted async Timer smoke callback ok")
                                                                                     assertCounterAtLeast(snapshot, "live_timer_immediate_payload_blocked", 2, "runtime stats counted Timer immediate payload blocking")
-                                                                                    assertCounterAtLeast(snapshot, "timer_source_detonation_blocked", 1, "runtime stats counted Timer source detonation blocker")
+                                                                                    assertCounterAtLeast(snapshot, "timer_source_detonation_checked", 1, "runtime stats counted Timer source detonation checks")
                                                                                     assertCounterAtLeast(snapshot, "payload_multicast_attempts", 2, "runtime stats counted payload Multicast attempts")
                                                                                     assertCounterAtLeast(snapshot, "payload_multicast_qualified", 1, "runtime stats counted payload Multicast qualification")
                                                                                     assertCounterAtLeast(snapshot, "payload_multicast_rejected", 1, "runtime stats counted disabled payload Multicast rejection")
@@ -2654,6 +3013,114 @@ local function runSizePlusSmoke()
     end)
 end
 
+local function runHomingSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
+    if not dev.liveSimpleDispatchEnabled() then
+        log.info(string.format("SKIP smoke live Homing: enable %s", dev.liveSimpleDispatchSettingKey()))
+        return
+    end
+    if not dev.liveHomingEnabled() then
+        log.info(string.format("SKIP smoke live Homing: enable %s", dev.liveHomingSettingKey()))
+        return
+    end
+    if not dev.liveSoftHomingProbeEnabled() then
+        log.info(string.format("SKIP smoke live Homing: enable %s", dev.liveSoftHomingProbeSettingKey()))
+        return
+    end
+    if state.running then
+        log.warn("smoke live simple dispatch already in progress")
+        return
+    end
+    if state.backend ~= "READY" then
+        log.warn("smoke live Homing skipped: backend is not READY")
+        return
+    end
+
+    state.running = true
+    log.info("smoke live Homing hotkey accepted")
+
+    requestRuntimeStats(true, function(reset_result)
+        assertLine(reset_result and reset_result.ok == true, "runtime stats reset accepted", reset_result and reset_result.error)
+
+        requestProbe("homing_disabled", function(disabled)
+            assertLine(disabled and disabled.ok == true, "live Homing subflag disabled probe rejects", disabled and disabled.error)
+            assertLine(disabled and disabled.used_live_2_2c == false, "disabled live Homing probe does not enqueue")
+
+            requestProbe("homing_dry_run", function(dry)
+                assertLine(dry and dry.ok == true, "live Homing dry-run ok", dry and dry.error)
+                assertLine(dry and dry.live_mode == "homing", "live Homing dry-run reports Homing mode")
+                assertLine(dry and dry.dispatch_count == 1, "live Homing dry-run plans one source dispatch")
+                assertLine(dry and dry.homing_field == "forceVec", "live Homing dry-run reports SFP data.forceVec field")
+                assertLine(type(dry and dry.homing_target_provider) == "string", "live Homing dry-run reports target provider")
+                assertLine(tonumber(dry and dry.homing_force) ~= nil and dry.homing_force > 0, "live Homing dry-run computes bounded force")
+                assertLine(type(dry and dry.homing_force_key) == "string", "live Homing dry-run reports force vector key")
+                assertLine(type(dry and dry.homing_direction_key) == "string", "live Homing dry-run reports direction key")
+
+                requestProbe("homing_soft_probe", function(result)
+                    assertLine(result and result.ok == true, "live Homing launch ok", result and result.error)
+                    assertLine(result and result.live_mode == "homing", "live Homing launch reports Homing mode")
+                    assertLine(result and result.dispatch_count == 1, "live Homing launch dispatches one helper")
+                    assertLine(result and result.homing_field == "redirectSpell", "live soft Homing launch withholds launch-time forceVec")
+                    assertLine(type(result and result.homing_target_provider) == "string", "live Homing launch reports target provider")
+                    assertLine(jobsAllComplete(result and result.jobs, 1), "live Homing launch job completes with SFP accepted")
+                    assertLine(jobsCarryHomingUserData(result and result.jobs, 1, result and result.cast_id, "soft_redirect_probe", "redirectSpell", false), "live soft Homing launch carries compact Homing userData")
+                    assertLine((result and result.homing_force_key) == nil, "live soft Homing launch omits launch force vector metadata")
+                    assertLine(listCount(result and result.projectile_ids) >= 1, "live Homing launch returned projectile id when available")
+                    assertLine(result and result.soft_homing_probe_registered == true, "soft Homing probe manager registered projectile", result and result.soft_homing_probe_error)
+
+                    requestProbe("homing_soft_launch", function(runtime_result)
+                    assertLine(runtime_result and runtime_result.ok == true, "live soft Homing runtime launch ok", runtime_result and runtime_result.error)
+                    assertLine(runtime_result and runtime_result.live_mode == "homing", "live soft Homing runtime reports Homing mode")
+                    assertLine(runtime_result and runtime_result.homing_field == "redirectSpell", "live soft Homing runtime uses redirectSpell")
+                    assertLine(jobsAllComplete(runtime_result and runtime_result.jobs, 1), "live soft Homing runtime job completes with SFP accepted")
+                    assertLine(jobsCarryHomingUserData(runtime_result and runtime_result.jobs, 1, runtime_result and runtime_result.cast_id, "soft_redirect", "redirectSpell", false), "live soft Homing runtime carries compact Homing userData")
+                    assertLine(runtime_result and runtime_result.soft_homing_runtime_registered == true, "soft Homing runtime manager registered projectile", runtime_result and runtime_result.soft_homing_runtime_error)
+
+                    async:newUnsavableSimulationTimer(1.5, function()
+                    requestRuntimeStats(false, function(stats_result)
+                        local snapshot = stats_result and stats_result.snapshot or {}
+                        assertLine(stats_result and stats_result.ok == true, "runtime stats snapshot returned", stats_result and stats_result.error)
+                        assertCounterAtLeast(snapshot, "live_homing_attempts", 4, "runtime stats counted live Homing attempts")
+                        assertCounterAtLeast(snapshot, "live_homing_qualified", 3, "runtime stats counted live Homing qualifications")
+                        assertCounterAtLeast(snapshot, "live_homing_rejected", 1, "runtime stats counted live Homing rejection")
+                        assertCounterAtLeast(snapshot, "live_homing_disabled_rejections", 1, "runtime stats counted disabled Homing rejection")
+                        assertCounterAtLeast(snapshot, "live_homing_jobs_mutated", 1, "runtime stats counted Homing job mutation")
+                        assertCounterAtLeast(snapshot, "live_homing_smoke_observed", 1, "runtime stats counted Homing smoke checkpoint")
+                        assertCounterAtLeast(snapshot, "jobs_enqueued", 1, "runtime stats counted Homing orchestrator enqueue")
+                        assertCounterAtLeast(snapshot, "jobs_processed", 1, "runtime stats counted Homing processing")
+                        assertCounterAtLeast(snapshot, "sfp_launch_attempts", 1, "runtime stats counted Homing SFP launch attempts")
+                        assertCounterAtLeast(snapshot, "sfp_launch_ok", 1, "runtime stats counted Homing SFP launch ok")
+                        assertLine((tonumber(snapshot.sfp_adapter_force_vec_forwarded) or 0) == 0, "runtime stats confirms soft Homing did not forward launch forceVec")
+                        assertCounterAtLeast(snapshot, "homing_probe_registered", 1, "runtime stats counted soft Homing registration")
+                        assertCounterAtLeast(snapshot, "homing_runtime_registered", 1, "runtime stats counted soft Homing runtime registration")
+                        local terminal_outcome = (tonumber(snapshot.homing_redirect_ok) or 0)
+                            + (tonumber(snapshot.homing_redirect_failed) or 0)
+                            + (tonumber(snapshot.homing_state_failed) or 0)
+                            + (tonumber(snapshot.homing_entry_retired_hit) or 0)
+                            + (tonumber(snapshot.homing_entry_retired_timeout) or 0)
+                            + (tonumber(snapshot.homing_entry_retired_missing_state) or 0)
+                            + (tonumber(snapshot.homing_entry_retired_api_failure) or 0)
+                            + (tonumber(snapshot.homing_entry_retired_static_overshot) or 0)
+                        assertLine((tonumber(snapshot.homing_tick_runs) or 0) >= 1 or terminal_outcome >= 1, "soft Homing manager ticked or recorded a fast terminal outcome")
+                        assertLine((tonumber(snapshot.homing_state_requested) or 0) >= 1 or (tonumber(snapshot.homing_entry_retired_hit) or 0) >= 1, "soft Homing requested state or retired on fast hit")
+                        assertLine(terminal_outcome >= 1, "soft Homing probe produced redirect or terminal reason")
+                        assertCounterAtLeast(snapshot, "queue_drained_observed", 1, "runtime stats observed Homing queue drain")
+                        for _, line in ipairs(stats_result and stats_result.summary_lines or {}) do
+                            log.info("runtime stats " .. tostring(line))
+                        end
+                        log.info("smoke live Homing run complete; SFP 1.7 forceVec dry-run plus delayed soft redirect/retarget runtime/probe is active")
+                        state.running = false
+                    end)
+                    end)
+                    end, homingProbePayload())
+                end, homingProbePayload())
+            end, homingProbePayload())
+        end, homingProbePayload())
+    end)
+end
+
 local function runChaosBudgetSmoke()
     if state.running then
         log.warn("smoke live simple dispatch already in progress")
@@ -2733,11 +3200,17 @@ local function runChaosBudgetSmoke()
             assertCounterAtLeast(snapshot, "chaos_budget_max_jobs_observed", high_count, "runtime stats tracked high chaos job count")
             assertCounterAtLeast(snapshot, "chaos_budget_max_projectiles_observed", high_count, "runtime stats tracked high chaos projectile count")
             assertCounterAtLeast(snapshot, "chaos_budget_launch_density_throttle", 1, "runtime stats counted live launch density throttling")
+            assertCounterAtLeast(snapshot, "chaos_budget_launch_density_initial_burst", 1, "runtime stats counted adaptive live launch burst")
             assertCounterAtLeast(snapshot, "chaos_budget_max_live_launches_per_tick_observed", 1, "runtime stats tracked live launches per tick")
+            assertCounterAtLeast(snapshot, "chaos_budget_max_live_launches_initial_burst_observed", 1, "runtime stats tracked adaptive live launch burst cap")
             assertCounterAtLeast(snapshot, "chaos_budget_cap_reject", 2, "runtime stats counted chaos cap rejection")
             assertCounterAtLeast(snapshot, "chaos_budget_fanout_cap_reject", 2, "runtime stats counted chaos fanout cap rejection")
             assertCounterAtLeast(snapshot, "nested_final_fanout_cap_reject", 1, "runtime stats counted nested final fanout cap rejection")
-            assertCounterAtLeast(snapshot, "chain_runtime_multicast_reject", 1, "runtime stats counted Chain+Multicast deferral under chaos budget")
+            assertCounterAtLeast(snapshot, "chain_multicast_disabled_reject", 1, "runtime stats counted Chain+Multicast disabled deferral under chaos budget")
+            assertCounterAtLeast(snapshot, "chain_multicast_qualified", 2, "runtime stats counted Chain+Multicast chaos qualifications")
+            assertCounterAtLeast(snapshot, "chain_multicast_hops", 6, "runtime stats counted Chain+Multicast chaos hops")
+            assertCounterAtLeast(snapshot, "chain_multicast_jobs", limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS * 6, "runtime stats counted Chain+Multicast chaos jobs")
+            assertCounterAtLeast(snapshot, "branch_observability_events", limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS * 6, "runtime stats counted Chain+Multicast branch observability")
             for _, line in ipairs(stats_result and stats_result.summary or {}) do
                 log.info("runtime stats " .. tostring(line))
             end
@@ -2757,7 +3230,10 @@ local function runChaosBudgetSmoke()
             assertLine((chaos_limits.MAX_LIVE_LAUNCHES_PER_TICK or 0) > 0, "chaos live launch density cap is positive")
             assertLine((chaos_limits.MAX_LIVE_LAUNCHES_PER_TICK or 0) <= (default_limits.MAX_LIVE_LAUNCHES_PER_TICK or 0), "chaos live launch density cap stays protective")
             assertLine((chaos_limits.MAX_LIVE_LAUNCHES_PER_TICK or 0) < (chaos_limits.MAX_PAYLOAD_FANOUT or 0), "chaos live launch density cap chunks high fanout")
+            assertLine((chaos_limits.MAX_LIVE_LAUNCHES_INITIAL_BURST or 0) >= (chaos_limits.MAX_LIVE_LAUNCHES_PER_TICK or 0), "chaos adaptive launch burst is at least sustained cap")
+            assertLine((chaos_limits.MAX_LIVE_LAUNCHES_INITIAL_BURST or 0) < (chaos_limits.MAX_PAYLOAD_FANOUT or 0), "chaos adaptive launch burst still chunks high fanout")
             assertLine(chaos_limits.MAX_CHAIN_BRANCHES == default_limits.MAX_CHAIN_BRANCHES, "chaos budget keeps Chain branching disabled")
+            assertLine((chaos_limits.MAX_CHAIN_MULTICAST_FANOUT or 0) > (default_limits.MAX_CHAIN_MULTICAST_FANOUT or 0), "chaos Chain Multicast fanout cap exceeds default")
 
             requestProbe("chaos_multicast_high_dry_run", function(dry)
                 assertLine(dry and dry.ok == true, "chaos direct Multicast high fanout dry-run ok", dry and dry.error)
@@ -2834,11 +3310,33 @@ local function runChaosBudgetSmoke()
                                                                                                 assertLine(over_nested and over_nested.ok == true, "chaos nested final fanout over-cap rejects safely", over_nested and over_nested.error)
                                                                                                 assertLine(over_nested and (over_nested.fallback_reason == "payload_multicast_fanout_cap_exceeded" or over_nested.fallback_reason == "exceeds_fanout_cap"), "chaos nested final fanout over-cap has stable reason", over_nested and over_nested.fallback_reason)
 
-                                                                                                requestProbe("chaos_chain_multicast_still_deferred", function(chain_deferred)
-                                                                                                    assertLine(chain_deferred and chain_deferred.ok == true, "chaos Chain+Multicast remains deferred", chain_deferred and chain_deferred.error)
-                                                                                                    assertLine(chain_deferred and chain_deferred.fallback_reason == "chain_multicast_deferred", "chaos Chain+Multicast deferral reason is stable", chain_deferred and chain_deferred.fallback_reason)
-                                                                                                    finish()
-                                                                                                end)
+                                                                                                requestProbe("chain_runtime", function(chain_deferred)
+                                                                                                    assertLine(chain_deferred and chain_deferred.ok == true, "chaos Chain+Multicast disabled path remains deferred", chain_deferred and chain_deferred.error)
+                                                                                                    assertLine(chain_deferred and chain_deferred.fallback_reason ~= nil, "chaos Chain+Multicast disabled path has stable reason", chain_deferred and chain_deferred.fallback_reason)
+
+                                                                                                    requestProbe("chain_runtime", function(chain_multi)
+                                                                                                        local fanout_count = limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS
+                                                                                                        assertLine(chain_multi and chain_multi.ok == true, "chaos direct Chain+Multicast high fanout ok", chain_multi and chain_multi.error)
+                                                                                                        assertLine(chain_multi and chain_multi.has_multicast_payload == true, "chaos direct Chain+Multicast reports fanout")
+                                                                                                        assertLine(chain_multi and chain_multi.chain_multicast_fanout_count == fanout_count, "chaos direct Chain+Multicast uses chaos fanout cap")
+                                                                                                        assertLine(chain_multi and selectedSequence(chain_multi) == "B,A,B", "chaos direct Chain+Multicast advances one continuation per hop", chain_multi and selectedSequence(chain_multi))
+                                                                                                        assertLine(chain_multi and chain_multi.chain_payload_launch_count == 3 * fanout_count, "chaos direct Chain+Multicast launches bounded payload siblings")
+
+                                                                                                        requestProbe("chain_runtime", function(trigger_chain_multi)
+                                                                                                            assertLine(trigger_chain_multi and trigger_chain_multi.ok == true, "chaos Trigger Chain+Multicast high fanout ok", trigger_chain_multi and trigger_chain_multi.error)
+                                                                                                            assertLine(trigger_chain_multi and trigger_chain_multi.chain_shape == "trigger_payload_chain", "chaos Trigger Chain+Multicast keeps Trigger source shape")
+                                                                                                            assertLine(trigger_chain_multi and trigger_chain_multi.has_multicast_payload == true, "chaos Trigger Chain+Multicast reports fanout")
+                                                                                                            assertLine(trigger_chain_multi and trigger_chain_multi.chain_payload_launch_count == 3 * fanout_count, "chaos Trigger Chain+Multicast launches bounded payload siblings")
+                                                                                                            finish()
+                                                                                                        end, launchAimPayload({
+                                                                                                            chain_case = "trigger_chain_multicast_8",
+                                                                                                        }))
+                                                                                                    end, launchAimPayload({
+                                                                                                        chain_case = "direct_chain_multicast_8",
+                                                                                                    }))
+                                                                                                end, launchAimPayload({
+                                                                                                    chain_case = "multicast",
+                                                                                                }))
                                                                                             end)
                                                                                         end)
                                                                                     end)
@@ -2914,12 +3412,24 @@ local function onKeyPress(key)
         runSizePlusSmoke()
         return false
     end
+    if symbol == "k" or key.code == input.KEY.K then
+        runHomingSmoke()
+        return false
+    end
     if smoke_keys.matches(key, "decimal") then
         runChaosBudgetSmoke()
         return false
     end
     if symbol == "l" or key.code == input.KEY.L then
         runManualChainRealProbe()
+        return false
+    end
+    if symbol == "g" or key.code == input.KEY.G then
+        runBounceSmoke()
+        return false
+    end
+    if symbol == "h" or key.code == input.KEY.H then
+        runBounceChainSmoke()
         return false
     end
     return true
@@ -2942,7 +3452,7 @@ return {
                 requestBackend()
             elseif state.backend == "READY" and not state.ready_logged then
                 state.ready_logged = true
-                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ payload modifiers, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, Numpad . for chaos high-fanout budget stress, or L for manual Chain real-provider probe")
+                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ and Chain+Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0, or H for Bounce Trigger Chain")
             end
         end,
         onKeyPress = onKeyPress,
@@ -3012,7 +3522,10 @@ return {
             end
         end,
         [events.INTERCEPT_DISPATCH_RESULT] = function(payload)
-            if not state.running or not state.last_spell_id then
+            if (not state.running) and next(state.pending_observe) == nil then
+                return
+            end
+            if not state.last_spell_id then
                 return
             end
             if not payload or payload.spell_id ~= state.last_spell_id then

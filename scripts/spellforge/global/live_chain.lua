@@ -6,6 +6,7 @@ local dev = require("scripts.spellforge.shared.dev")
 local events = require("scripts.spellforge.shared.events")
 local limits = require("scripts.spellforge.shared.limits")
 local log = require("scripts.spellforge.shared.log").new("global.live_chain")
+local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
 local chain_target_provider = require("scripts.spellforge.global.chain_target_provider")
 local chain_targeting = require("scripts.spellforge.global.chain_targeting")
 local helper_records = require("scripts.spellforge.global.helper_records")
@@ -75,6 +76,8 @@ local function analyzePayloadPrefixOps(ops)
         speed_op = nil,
         size_count = 0,
         size_op = nil,
+        multicast_count = 0,
+        multicast_op = nil,
         unsupported_count = 0,
         unsupported_opcode = nil,
     }
@@ -88,12 +91,33 @@ local function analyzePayloadPrefixOps(ops)
         elseif op and op.opcode == "Size+" then
             info.size_count = info.size_count + 1
             info.size_op = info.size_op or op
+        elseif op and op.opcode == "Multicast" then
+            info.multicast_count = info.multicast_count + 1
+            info.multicast_op = info.multicast_op or op
         else
             info.unsupported_count = info.unsupported_count + 1
             info.unsupported_opcode = info.unsupported_opcode or (op and op.opcode)
         end
     end
     return info
+end
+
+local function multicastFanout(op)
+    local count = tonumber(op and op.params and op.params.count) or 1
+    if count ~= count or count == math.huge or count == -math.huge then
+        return 1
+    end
+    return math.max(1, math.floor(count))
+end
+
+local function chainMulticastEnabled(options)
+    if options.force_chain_multicast_disabled == true then
+        return false
+    end
+    return options.force_chain_multicast_enabled == true
+        or options.allow_chain_multicast == true
+        or options.chain_multicast_enabled == true
+        or dev.liveChainMulticastEnabled()
 end
 
 local function modifierEnabled(kind, options)
@@ -142,6 +166,26 @@ local function copyModifierFields(target, mutation, kind)
         target.size_plus_base_area = mutation.size_plus_base_area
         target.size_plus_area = mutation.size_plus_area
     end
+end
+
+local function clonePayload(payload)
+    local out = {}
+    for key, value in pairs(payload or {}) do
+        out[key] = value
+    end
+    return out
+end
+
+local function cloneJobInput(job)
+    local out = {}
+    for key, value in pairs(job or {}) do
+        if key == "payload" then
+            out.payload = clonePayload(value)
+        else
+            out[key] = value
+        end
+    end
+    return out
 end
 
 local function helperBySlotId(helpers)
@@ -396,6 +440,13 @@ local function compactJob(job_id)
         chain_max_hops = job and (job.chain_max_hops or (payload and payload.chain_max_hops)) or nil,
         chain_targeting_mode = job and (job.chain_targeting_mode or (payload and payload.chain_targeting_mode)) or nil,
         chain_target_provider = job and (job.chain_target_provider or (payload and payload.chain_target_provider)) or nil,
+        branch_scope = job and (job.branch_scope or (payload and payload.branch_scope)) or nil,
+        branch_id = job and (job.branch_id or (payload and payload.branch_id)) or nil,
+        branch_parent_id = job and (job.branch_parent_id or (payload and payload.branch_parent_id)) or nil,
+        branch_kind = job and (job.branch_kind or (payload and payload.branch_kind)) or nil,
+        branch_index = job and (job.branch_index or (payload and payload.branch_index)) or nil,
+        branch_count = job and (job.branch_count or (payload and payload.branch_count)) or nil,
+        chain_continuation_group_id = job and (job.chain_continuation_group_id or (payload and payload.chain_continuation_group_id)) or nil,
         current_hit_target_id = job and (job.current_hit_target_id or (payload and payload.current_hit_target_id)) or nil,
         selected_target_id = job and (job.selected_target_id or (payload and payload.selected_target_id)) or nil,
         previous_projectile_id = job and (job.previous_projectile_id or (payload and payload.previous_projectile_id)) or nil,
@@ -428,20 +479,109 @@ local function compactJob(job_id)
     }
 end
 
-local function tickJob(job_id, opts)
-    local options = opts or {}
-    local tick_result = nil
-    for _ = 1, tonumber(options.max_chain_ticks or 8) or 8 do
-        tick_result = orchestrator.tick({
-            max_jobs_per_tick = tonumber(options.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK,
-            max_live_launches_per_tick = tonumber(options.max_live_launches_per_tick) or limits.MAX_LIVE_LAUNCHES_PER_TICK,
-        })
+local function makeProbeVirtualPayloadJob(job, job_id, projectile_id)
+    local source = job or {}
+    local payload = source.payload or {}
+    local user_data_args = cloneJobInput(source)
+    user_data_args.runtime = "2.2c_live_helper"
+    user_data_args.mapping = helper_records.getByEngineId(source.helper_engine_id)
+    user_data_args.job_kind = user_data_args.job_kind or user_data_args.kind
+    user_data_args.job_id = job_id
+    local user_data = sfp_userdata.buildHelperUserData(user_data_args)
+    return {
+        job_id = job_id,
+        job_status = "complete",
+        slot_id = source.slot_id,
+        helper_engine_id = source.helper_engine_id,
+        cast_id = source.cast_id,
+        emission_index = source.emission_index,
+        group_index = source.group_index,
+        source_slot_id = source.source_slot_id,
+        payload_slot_id = source.payload_slot_id,
+        root_source_slot_id = source.root_source_slot_id or payload.root_source_slot_id,
+        chain_runtime = source.chain_runtime or payload.chain_runtime,
+        chain_role = source.chain_role or payload.chain_role,
+        chain_id = source.chain_id or payload.chain_id,
+        chain_hop_index = source.chain_hop_index or payload.chain_hop_index,
+        chain_max_hops = source.chain_max_hops or payload.chain_max_hops,
+        chain_targeting_mode = source.chain_targeting_mode or payload.chain_targeting_mode,
+        chain_target_provider = source.chain_target_provider or payload.chain_target_provider,
+        branch_scope = source.branch_scope or payload.branch_scope,
+        branch_id = source.branch_id or payload.branch_id,
+        branch_parent_id = source.branch_parent_id or payload.branch_parent_id,
+        branch_kind = source.branch_kind or payload.branch_kind,
+        branch_index = source.branch_index or payload.branch_index,
+        branch_count = source.branch_count or payload.branch_count,
+        chain_continuation_group_id = source.chain_continuation_group_id or payload.chain_continuation_group_id,
+        current_hit_target_id = source.current_hit_target_id or payload.current_hit_target_id,
+        selected_target_id = source.selected_target_id or payload.selected_target_id,
+        previous_projectile_id = source.previous_projectile_id or payload.previous_projectile_id,
+        payload_modifier_kind = source.payload_modifier_kind or payload.payload_modifier_kind,
+        speed = source.speed or payload.speed,
+        maxSpeed = source.maxSpeed or payload.maxSpeed,
+        speed_plus = source.speed_plus or payload.speed_plus,
+        speed_plus_mode = source.speed_plus_mode or payload.speed_plus_mode,
+        speed_plus_value = source.speed_plus_value or payload.speed_plus_value,
+        speed_plus_base_speed = source.speed_plus_base_speed or payload.speed_plus_base_speed,
+        speed_plus_multiplier = source.speed_plus_multiplier or payload.speed_plus_multiplier,
+        speed_plus_speed = source.speed_plus_speed or payload.speed_plus_speed,
+        speed_plus_max_speed = source.speed_plus_max_speed or payload.speed_plus_max_speed,
+        speed_plus_field = source.speed_plus_field or payload.speed_plus_field,
+        speed_plus_capped = source.speed_plus_capped or payload.speed_plus_capped,
+        size_plus = source.size_plus or payload.size_plus,
+        size_plus_mode = source.size_plus_mode or payload.size_plus_mode,
+        size_plus_value = source.size_plus_value or payload.size_plus_value,
+        size_plus_multiplier = source.size_plus_multiplier or payload.size_plus_multiplier,
+        size_plus_field = source.size_plus_field or payload.size_plus_field,
+        size_plus_capped = source.size_plus_capped or payload.size_plus_capped,
+        size_plus_base_area = source.size_plus_base_area or payload.size_plus_base_area,
+        size_plus_area = source.size_plus_area or payload.size_plus_area,
+        launch_accepted = true,
+        projectile_id = projectile_id,
+        projectile_id_source = "probe_virtual",
+        launch_direction = payload.direction,
+        launch_user_data = user_data,
+        probe_virtual = true,
+    }
+end
+
+local function jobsSettled(job_ids)
+    for _, job_id in ipairs(job_ids or {}) do
         local job = orchestrator.getJob(job_id)
-        if job and job.status ~= "queued" and job.status ~= "running" then
-            break
+        if not job or job.status == "queued" or job.status == "running" then
+            return false
         end
     end
-    return tick_result
+    return true
+end
+
+local function tickJobs(job_ids, opts)
+    local options = opts or {}
+    local max_live_launches_per_tick = tonumber(options.max_live_launches_per_tick)
+        or limits.MAX_LIVE_LAUNCHES_PER_TICK
+    local job_count = type(job_ids) == "table" and #job_ids or 0
+    local default_ticks = math.max(
+        8,
+        math.ceil(job_count / math.max(1, max_live_launches_per_tick)) + 2
+    )
+    local max_ticks = tonumber(options.max_chain_ticks) or default_ticks
+    local tick_result = nil
+    local tick_results = {}
+    for _ = 1, max_ticks do
+        if jobsSettled(job_ids) then
+            break
+        end
+        local tick_options = {
+            max_jobs_per_tick = tonumber(options.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK,
+            max_live_launches_per_tick = max_live_launches_per_tick,
+        }
+        if options.simulate_update_ticks == true then
+            tick_options.dt_seconds = tonumber(options.simulated_dt_seconds) or 0
+        end
+        tick_result = orchestrator.tick(tick_options)
+        tick_results[#tick_results + 1] = tick_result
+    end
+    return tick_result, tick_results
 end
 
 local function shortKey(key)
@@ -465,10 +605,28 @@ local function inspectPayloadModifier(plan, audit, options)
     if prefix.speed_count > 1 or prefix.size_count > 1 or (prefix.speed_count > 0 and prefix.size_count > 0) then
         return nil, "chain_modifier_combo_deferred"
     end
+    if prefix.multicast_count > 1 then
+        return nil, "chain_multicast_nested_deferred"
+    end
+    if prefix.multicast_count == 1 and (prefix.speed_count > 0 or prefix.size_count > 0) then
+        return nil, "chain_modifier_combo_deferred"
+    end
 
     local modifier_count = prefix.speed_count + prefix.size_count
-    if prefix.unsupported_count > 0 or #(payload_slot.prefix_ops or {}) ~= (1 + modifier_count) then
+    local multicast_count = prefix.multicast_count or 0
+    if prefix.unsupported_count > 0 or #(payload_slot.prefix_ops or {}) ~= (1 + modifier_count + multicast_count) then
         return nil, "chain_payload_modifier_deferred"
+    end
+    local fanout_count = 1
+    if multicast_count == 1 then
+        if not chainMulticastEnabled(options or {}) then
+            return nil, "chain_multicast_disabled"
+        end
+        fanout_count = multicastFanout(prefix.multicast_op)
+        local cap = tonumber(options and options.max_chain_multicast_fanout) or limits.MAX_CHAIN_MULTICAST_FANOUT
+        if fanout_count > cap then
+            return nil, "chain_multicast_fanout_cap_exceeded"
+        end
     end
 
     local kind = nil
@@ -506,6 +664,8 @@ local function inspectPayloadModifier(plan, audit, options)
         payload_modifier_kind = kind,
         has_speed_plus_payload = kind == "speed_plus",
         has_size_plus_payload = kind == "size_plus",
+        has_multicast_payload = multicast_count == 1,
+        chain_multicast_fanout_count = fanout_count,
         speed_plus_mutation = kind == "speed_plus" and mutation or nil,
         size_plus_mutation = kind == "size_plus" and mutation or nil,
         size_plus_apply_result = apply_result,
@@ -519,6 +679,8 @@ function live_chain.preparePayloadModifiers(plan, opts)
         max_jobs = options.max_jobs or limits.MAX_CHAIN_JOBS_PER_CAST,
         scan_radius = options.scan_radius,
         max_candidates = options.max_candidates or options.candidate_cap,
+        allow_chain_multicast = chainMulticastEnabled(options),
+        max_chain_multicast_fanout = options.max_chain_multicast_fanout,
     })
     if audit.chain_candidate ~= true then
         return nil, audit.rejection_reason or "unsupported_chain_shape", audit
@@ -535,6 +697,8 @@ function live_chain.preparePayloadModifiers(plan, opts)
     audit.payload_modifier_kind = modifier.payload_modifier_kind
     audit.has_speed_plus_payload = modifier.has_speed_plus_payload == true
     audit.has_size_plus_payload = modifier.has_size_plus_payload == true
+    audit.has_multicast_payload = modifier.has_multicast_payload == true
+    audit.chain_multicast_fanout_count = modifier.chain_multicast_fanout_count
     return modifier, nil, audit
 end
 
@@ -545,6 +709,8 @@ function live_chain.selectV0Plan(plan, opts)
         max_jobs = options.max_jobs or limits.MAX_CHAIN_JOBS_PER_CAST,
         scan_radius = options.scan_radius,
         max_candidates = options.max_candidates or options.candidate_cap,
+        allow_chain_multicast = chainMulticastEnabled(options),
+        max_chain_multicast_fanout = options.max_chain_multicast_fanout,
     })
     if audit.chain_candidate ~= true then
         return nil, audit.rejection_reason or "unsupported_chain_shape", audit
@@ -597,6 +763,9 @@ function live_chain.selectV0Plan(plan, opts)
     if helper_prefix.speed_count ~= prefix.speed_count or helper_prefix.size_count ~= prefix.size_count then
         return nil, "chain_modifier_payload_unsupported", audit
     end
+    if helper_prefix.multicast_count ~= prefix.multicast_count then
+        return nil, "chain_multicast_payload_unsupported", audit
+    end
     if helper_prefix.unsupported_count > 0
         or #(payload_helper.prefix_ops or {}) ~= #(payload_slot.prefix_ops or {}) then
         return nil, "chain_payload_modifier_deferred", audit
@@ -616,6 +785,8 @@ function live_chain.selectV0Plan(plan, opts)
         payload_helper_engine_id = payload_helper.engine_id,
         payload_effect_id = firstEffectId(payload_helper),
         payload_modifier_kind = modifier.payload_modifier_kind,
+        has_multicast_payload = modifier.has_multicast_payload == true,
+        chain_multicast_fanout_count = modifier.chain_multicast_fanout_count or 1,
         has_speed_plus_payload = modifier.has_speed_plus_payload == true,
         has_size_plus_payload = modifier.has_size_plus_payload == true,
         speed_plus_mutation = modifier.speed_plus_mutation,
@@ -652,6 +823,10 @@ function live_chain.decorateSourceJob(job, binding)
     job.source_helper_engine_id = binding.source_helper_engine_id
     job.payload_slot_id = binding.payload_slot_id
     job.payload_modifier_kind = binding.payload_modifier_kind
+    job.branch_scope = binding.branch_scope or "default"
+    job.branch_id = binding.root_branch_id or binding.chain_id
+    job.branch_kind = binding.branch_kind or "chain"
+    job.branch_count = binding.chain_multicast_fanout_count or 1
     if binding.chain_shape == "trigger_payload_chain" then
         job.source_postfix_opcode = "Trigger"
     end
@@ -670,6 +845,10 @@ function live_chain.decorateSourceJob(job, binding)
     job.payload.source_helper_engine_id = binding.source_helper_engine_id
     job.payload.payload_slot_id = binding.payload_slot_id
     job.payload.payload_modifier_kind = binding.payload_modifier_kind
+    job.payload.branch_scope = binding.branch_scope or "default"
+    job.payload.branch_id = binding.root_branch_id or binding.chain_id
+    job.payload.branch_kind = binding.branch_kind or "chain"
+    job.payload.branch_count = binding.chain_multicast_fanout_count or 1
     if binding.chain_shape == "trigger_payload_chain" then
         job.payload.source_postfix_opcode = "Trigger"
     end
@@ -718,8 +897,9 @@ local function routeHopIndex(route, binding)
     local user_data = route.user_data or {}
     if user_data.chain_runtime == true
         and user_data.chain_id == binding.chain_id
-        and route.slot_id == binding.payload_slot_id
-        and route.helper_engine_id == binding.payload_helper_engine_id then
+        and (user_data.chain_role == "payload"
+            or (route.slot_id == binding.payload_slot_id
+                and route.helper_engine_id == binding.payload_helper_engine_id)) then
         return tonumber(user_data.chain_hop_index) or 0, "payload"
     end
     if route.slot_id == binding.source_slot_id
@@ -729,30 +909,71 @@ local function routeHopIndex(route, binding)
     return nil, nil
 end
 
+local function routeContinuationScope(route)
+    local user_data = route and route.user_data or nil
+    if user_data and user_data.bounce_runtime == true and user_data.bounce_index ~= nil then
+        return string.format(
+            "bounce:%s:%s",
+            tostring(user_data.bounce_id or "no-bounce"),
+            tostring(user_data.bounce_index)
+        )
+    end
+    return "default"
+end
+
+local function copyBounceContinuationScope(route, target)
+    local user_data = route and route.user_data or nil
+    if type(target) ~= "table" or not user_data
+        or user_data.bounce_runtime ~= true
+        or user_data.bounce_index == nil then
+        return
+    end
+
+    -- Keep Bounce-triggered Chain branches independent without making the
+    -- chained payload itself bounce. These fields are continuation identity.
+    target.bounce_runtime = true
+    target.bounce_role = "chain_branch_scope"
+    target.bounce_id = user_data.bounce_id
+    target.bounce_index = user_data.bounce_index
+    target.bounce_max = user_data.bounce_max
+    target.bounce_power = user_data.bounce_power
+    target.bounce_trigger_payload_slot_id = user_data.bounce_trigger_payload_slot_id
+    target.bounce_final = user_data.bounce_final
+end
+
 local function duplicateKey(route, binding, hop_index)
     return string.format(
-        "chain:%s:%s:%s:%s:%s:%s:%s",
+        "chain:%s:%s:%s:%s:%s:%s:%s:%s",
         tostring(binding.chain_id),
         tostring(binding.cast_id or (route.user_data and route.user_data.cast_id) or "no-cast"),
         tostring(hop_index),
         tostring(route.slot_id),
         tostring(route.helper_engine_id),
         tostring(route.projectile_id or "no-projectile"),
-        tostring(binding.payload_slot_id)
+        tostring(binding.payload_slot_id),
+        routeContinuationScope(route)
     )
 end
 
 -- One Chain continuation may produce several hit reports from a single detonation.
 -- Claim by hop, not projectile, so async LOS cannot fan those reports into branches.
+-- Bounce sources are the exception: each bounce index is its own discrete trigger.
 local function continuationClaimKey(route, binding, hop_index)
+    local user_data = route and route.user_data or {}
+    local continuation_group = user_data.chain_continuation_group_id
+        or string.format(
+            "%s:%s:%s",
+            tostring(route and route.slot_id),
+            tostring(route and route.helper_engine_id),
+            tostring(binding.payload_slot_id)
+        )
     return string.format(
-        "chain-continuation:%s:%s:%s:%s:%s:%s",
+        "chain-continuation:%s:%s:%s:%s:%s",
         tostring(binding.chain_id),
-        tostring(binding.cast_id or (route.user_data and route.user_data.cast_id) or "no-cast"),
+        tostring(binding.cast_id or (user_data and user_data.cast_id) or "no-cast"),
         tostring(hop_index),
-        tostring(route.slot_id),
-        tostring(route.helper_engine_id),
-        tostring(binding.payload_slot_id)
+        tostring(continuation_group),
+        routeContinuationScope(route)
     )
 end
 
@@ -822,6 +1043,7 @@ end
 
 local function stopResult(reason, binding, route, previous_hop, extra)
     local result = extra or {}
+    local branch_scope = routeContinuationScope(route)
     result.ok = result.ok ~= false
     result.stopped = true
     result.stop_reason = reason
@@ -833,11 +1055,13 @@ local function stopResult(reason, binding, route, previous_hop, extra)
     result.chain_hop_index = previous_hop
     result.max_hops = binding and binding.max_hops or nil
     result.projectile_id = route and route.projectile_id or nil
+    result.branch_scope = branch_scope
     log.info(string.format(
-        "SPELLFORGE_CHAIN_HOP_STOPPED recipe_id=%s cast_id=%s chain_id=%s hop_index=%s max_hops=%s stop_reason=%s",
+        "SPELLFORGE_CHAIN_HOP_STOPPED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s max_hops=%s stop_reason=%s",
         tostring(binding and binding.recipe_id or nil),
         tostring(binding and binding.cast_id or nil),
         tostring(binding and binding.chain_id or nil),
+        tostring(branch_scope),
         tostring(previous_hop),
         tostring(binding and binding.max_hops or nil),
         tostring(reason)
@@ -878,10 +1102,11 @@ local function completeLosRequest(request_id, payload)
     provider_result.los_request_id = request_id
 
     log.info(string.format(
-        "SPELLFORGE_CHAIN_LOS_RESULT recipe_id=%s cast_id=%s chain_id=%s hop_index=%s request_id=%s candidate_count=%s visible_count=%s blocked_count=%s raycast_count=%s",
+        "SPELLFORGE_CHAIN_LOS_RESULT recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s request_id=%s candidate_count=%s visible_count=%s blocked_count=%s raycast_count=%s",
         tostring(pending.binding and pending.binding.recipe_id or nil),
         tostring(pending.binding and pending.binding.cast_id or nil),
         tostring(pending.binding and pending.binding.chain_id or nil),
+        tostring(routeContinuationScope(pending.route)),
         tostring(pending.next_hop),
         tostring(request_id),
         tostring(original_count),
@@ -915,6 +1140,10 @@ local function completeLosRequest(request_id, payload)
         skip_los = true,
         resume_after_los = true,
         max_chain_ticks = pending.options and pending.options.max_chain_ticks or nil,
+        max_jobs_per_tick = pending.options and pending.options.max_jobs_per_tick or nil,
+        max_live_launches_per_tick = pending.options and pending.options.max_live_launches_per_tick or nil,
+        simulate_update_ticks = pending.options and pending.options.simulate_update_ticks == true,
+        simulated_dt_seconds = pending.options and pending.options.simulated_dt_seconds or nil,
     })
 end
 
@@ -990,10 +1219,11 @@ local function requestLosFilter(binding, route, previous_hop, current_target, hi
 
     runtime_stats.inc("chain_runtime_los_requests")
     log.info(string.format(
-        "SPELLFORGE_CHAIN_LOS_REQUESTED recipe_id=%s cast_id=%s chain_id=%s hop_index=%s request_id=%s candidate_count=%s",
+        "SPELLFORGE_CHAIN_LOS_REQUESTED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s request_id=%s candidate_count=%s",
         tostring(binding.recipe_id),
         tostring(binding.cast_id),
         tostring(binding.chain_id),
+        tostring(routeContinuationScope(route)),
         tostring(next_hop),
         tostring(request_id),
         tostring(candidate_count)
@@ -1010,6 +1240,7 @@ local function requestLosFilter(binding, route, previous_hop, current_target, hi
         previous_hop_index = previous_hop,
         max_hops = binding.max_hops,
         los_request_id = request_id,
+        branch_scope = routeContinuationScope(route),
     }
 end
 
@@ -1028,6 +1259,7 @@ function live_chain.handleResolvedHit(route, opts)
     if previous_hop == nil then
         return { ok = true, ignored = true, reason = "not_chain_source_or_payload" }
     end
+    local branch_scope = routeContinuationScope(route)
 
     if options.force_enabled ~= true and binding.force_enabled ~= true and not dev.liveChainRuntimeEnabled() then
         runtime_stats.inc("chain_runtime_rejected")
@@ -1072,10 +1304,11 @@ function live_chain.handleResolvedHit(route, opts)
         if continuation_claims[claim_key] or duplicate_keys[key] then
             runtime_stats.inc("chain_runtime_duplicate_suppressed")
             log.info(string.format(
-                "SPELLFORGE_CHAIN_DUPLICATE_SUPPRESSED recipe_id=%s cast_id=%s chain_id=%s hop_index=%s key=%s claim_key=%s",
+                "SPELLFORGE_CHAIN_DUPLICATE_SUPPRESSED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s key=%s claim_key=%s",
                 tostring(binding.recipe_id),
                 tostring(binding.cast_id),
                 tostring(binding.chain_id),
+                tostring(branch_scope),
                 tostring(previous_hop),
                 tostring(shortKey(key) or "<long>"),
                 tostring(shortKey(claim_key) or "<long>")
@@ -1088,6 +1321,7 @@ function live_chain.handleResolvedHit(route, opts)
                 chain_id = binding.chain_id,
                 chain_hop_index = previous_hop,
                 max_hops = binding.max_hops,
+                branch_scope = branch_scope,
             }
         end
         rememberDuplicateKey(key)
@@ -1176,10 +1410,11 @@ function live_chain.handleResolvedHit(route, opts)
         selected_object = nil
     end
     log.info(string.format(
-        "SPELLFORGE_CHAIN_HOP_TARGET_SELECTED recipe_id=%s cast_id=%s chain_id=%s source_slot_id=%s payload_slot_id=%s hop_index=%s max_hops=%s current_hit_target_id=%s selected_target_id=%s targeting_mode=%s provider=%s",
+        "SPELLFORGE_CHAIN_HOP_TARGET_SELECTED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s source_slot_id=%s payload_slot_id=%s hop_index=%s max_hops=%s current_hit_target_id=%s selected_target_id=%s targeting_mode=%s provider=%s",
         tostring(binding.recipe_id),
         tostring(binding.cast_id),
         tostring(binding.chain_id),
+        tostring(branch_scope),
         tostring(binding.source_slot_id),
         tostring(binding.payload_slot_id),
         tostring(next_hop),
@@ -1192,10 +1427,11 @@ function live_chain.handleResolvedHit(route, opts)
     if provider_result and provider_result.provider == "real" then
         runtime_stats.inc("chain_provider_selected_real")
         log.info(string.format(
-            "SPELLFORGE_CHAIN_REAL_TARGET_SELECTED recipe_id=%s cast_id=%s chain_id=%s hop_index=%s selected_target_id=%s candidate_count=%s radius=%s vertical_delta=%s aim_height=%s",
+            "SPELLFORGE_CHAIN_REAL_TARGET_SELECTED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s selected_target_id=%s candidate_count=%s radius=%s vertical_delta=%s aim_height=%s",
             tostring(binding.recipe_id),
             tostring(binding.cast_id),
             tostring(binding.chain_id),
+            tostring(branch_scope),
             tostring(next_hop),
             tostring(selected.id),
             tostring(provider_result.candidate_count),
@@ -1206,7 +1442,13 @@ function live_chain.handleResolvedHit(route, opts)
     end
 
     local source_job_id = binding.source_job_id or (route.user_data and route.user_data.job_id)
-    local idempotency_key = string.format("%s:%s:%s", tostring(binding.chain_id), tostring(next_hop), tostring(selected.id))
+    local idempotency_key = string.format(
+        "%s:%s:%s:%s",
+        tostring(binding.chain_id),
+        tostring(next_hop),
+        tostring(selected.id),
+        tostring(branch_scope)
+    )
     local job_input = {
         kind = orchestrator.LIVE_CHAIN_PAYLOAD_JOB_KIND,
         recipe_id = binding.recipe_id,
@@ -1219,7 +1461,7 @@ function live_chain.handleResolvedHit(route, opts)
         cast_id = binding.cast_id,
         emission_index = binding.payload_emission_index,
         group_index = binding.payload_group_index,
-        fanout_count = 1,
+        fanout_count = binding.chain_multicast_fanout_count or 1,
         max_live_launches_per_tick = binding.max_live_launches_per_tick,
         chaos_budget_profile = binding.chaos_budget_profile,
         root_source_slot_id = binding.root_source_slot_id or binding.source_slot_id,
@@ -1237,6 +1479,10 @@ function live_chain.handleResolvedHit(route, opts)
         chain_max_hops = binding.max_hops,
         chain_targeting_mode = binding.targeting_mode or "no_immediate_repeat",
         chain_target_provider = provider_result and provider_result.provider or nil,
+        branch_scope = branch_scope,
+        branch_kind = binding.has_multicast_payload and "chain_multicast" or "chain",
+        branch_count = binding.chain_multicast_fanout_count or 1,
+        chain_continuation_group_id = string.format("%s:h%s:%s", tostring(binding.chain_id), tostring(next_hop), tostring(branch_scope)),
         current_hit_target_id = objectToken(current_target),
         selected_target_id = selected.id,
         previous_projectile_id = route.projectile_id,
@@ -1255,7 +1501,7 @@ function live_chain.handleResolvedHit(route, opts)
             parent_slot_id = binding.source_slot_id,
             payload_depth = 1,
             payload_slot_id = binding.payload_slot_id,
-            fanout_count = 1,
+            fanout_count = binding.chain_multicast_fanout_count or 1,
             emission_index = binding.payload_emission_index,
             group_index = binding.payload_group_index,
             chain_runtime = true,
@@ -1265,11 +1511,18 @@ function live_chain.handleResolvedHit(route, opts)
             chain_max_hops = binding.max_hops,
             chain_targeting_mode = binding.targeting_mode or "no_immediate_repeat",
             chain_target_provider = provider_result and provider_result.provider or nil,
+            branch_scope = branch_scope,
+            branch_kind = binding.has_multicast_payload and "chain_multicast" or "chain",
+            branch_count = binding.chain_multicast_fanout_count or 1,
+            chain_continuation_group_id = string.format("%s:h%s:%s", tostring(binding.chain_id), tostring(next_hop), tostring(branch_scope)),
             current_hit_target_id = objectToken(current_target),
             selected_target_id = selected.id,
             previous_projectile_id = route.projectile_id,
         },
     }
+    copyBounceContinuationScope(route, job_input)
+    copyBounceContinuationScope(route, job_input.payload)
+
     local modifier_kind = binding.payload_modifier_kind
     if modifier_kind == "speed_plus" then
         copyModifierFields(job_input, binding.speed_plus_mutation, modifier_kind)
@@ -1277,10 +1530,11 @@ function live_chain.handleResolvedHit(route, opts)
         runtime_stats.inc("chain_modifier_speed_jobs")
         runtime_stats.inc("chain_modifier_speed_mutated")
         log.info(string.format(
-            "SPELLFORGE_CHAIN_SPEED_PLUS_APPLIED recipe_id=%s cast_id=%s chain_id=%s hop_index=%s max_hops=%s payload_modifier_kind=%s source_slot_id=%s payload_slot_id=%s selected_target_id=%s speed_value=%s",
+            "SPELLFORGE_CHAIN_SPEED_PLUS_APPLIED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s max_hops=%s payload_modifier_kind=%s source_slot_id=%s payload_slot_id=%s selected_target_id=%s speed_value=%s",
             tostring(binding.recipe_id),
             tostring(binding.cast_id),
             tostring(binding.chain_id),
+            tostring(branch_scope),
             tostring(next_hop),
             tostring(binding.max_hops),
             tostring(modifier_kind),
@@ -1295,10 +1549,11 @@ function live_chain.handleResolvedHit(route, opts)
         runtime_stats.inc("chain_modifier_size_jobs")
         runtime_stats.inc("chain_modifier_size_mutated")
         log.info(string.format(
-            "SPELLFORGE_CHAIN_SIZE_PLUS_APPLIED recipe_id=%s cast_id=%s chain_id=%s hop_index=%s max_hops=%s payload_modifier_kind=%s source_slot_id=%s payload_slot_id=%s selected_target_id=%s size_area=%s",
+            "SPELLFORGE_CHAIN_SIZE_PLUS_APPLIED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s max_hops=%s payload_modifier_kind=%s source_slot_id=%s payload_slot_id=%s selected_target_id=%s size_area=%s",
             tostring(binding.recipe_id),
             tostring(binding.cast_id),
             tostring(binding.chain_id),
+            tostring(branch_scope),
             tostring(next_hop),
             tostring(binding.max_hops),
             tostring(modifier_kind),
@@ -1309,101 +1564,290 @@ function live_chain.handleResolvedHit(route, opts)
         ))
     end
 
-    local enqueue = orchestrator.enqueue(job_input)
-    if not enqueue.ok then
-        runtime_stats.inc("chain_runtime_hop_rejected")
-        runtime_stats.inc("chain_runtime_context_reject")
-        return { ok = false, error = enqueue.error or "Chain payload enqueue failed" }
-    end
-
-    runtime_stats.inc("chain_runtime_payload_jobs")
-    runtime_stats.inc("chain_runtime_hops_launched")
-    runtime_stats.inc("chain_runtime_sfp_launch_attempts")
-    log.info(string.format(
-        "SPELLFORGE_CHAIN_HOP_ENQUEUED recipe_id=%s cast_id=%s chain_id=%s source_slot_id=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s job_id=%s",
-        tostring(binding.recipe_id),
-        tostring(binding.cast_id),
+    local fanout_count = math.max(1, tonumber(binding.chain_multicast_fanout_count) or 1)
+    local continuation_group_id = job_input.chain_continuation_group_id
+    local branch_parent_id = continuation_group_id
+    local launch_density_group_key = string.format(
+        "chainfanout:%s:%s:%s",
         tostring(binding.chain_id),
-        tostring(binding.source_slot_id),
-        tostring(binding.payload_slot_id),
         tostring(next_hop),
-        tostring(binding.max_hops),
-        tostring(selected.id),
-        tostring(enqueue.job_id)
-    ))
-    if modifier_kind ~= nil then
+        tostring(branch_scope)
+    )
+    local job_ids = {}
+    local real_job_ids = {}
+    local jobs = {}
+    local projectile_ids = {}
+    local tick_results = {}
+    local probe_virtual_jobs = {}
+    local probe_virtual_fanout_after = tonumber(options.probe_virtual_fanout_after)
+    local virtualized_count = 0
+    local virtualized_first_branch_index = nil
+    local virtualized_last_branch_index = nil
+    local virtualized_sample_job_id = nil
+    if probe_virtual_fanout_after ~= nil then
+        probe_virtual_fanout_after = math.max(1, math.floor(probe_virtual_fanout_after))
+    end
+    if fanout_count <= 1 then
+        probe_virtual_fanout_after = nil
+    end
+
+    if fanout_count > 1 then
+        runtime_stats.inc("chain_multicast_hops")
+        runtime_stats.inc("branch_observability_chain_multicast_branches")
+        runtime_stats.max("branch_observability_max_branch_fanout", fanout_count)
         log.info(string.format(
-            "SPELLFORGE_CHAIN_MODIFIED_HOP_ENQUEUED recipe_id=%s cast_id=%s chain_id=%s source_slot_id=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s payload_modifier_kind=%s job_id=%s",
+            "SPELLFORGE_CHAIN_MULTICAST_HOP_QUALIFIED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s max_hops=%s fanout_count=%s selected_target_id=%s continuation_group_id=%s",
             tostring(binding.recipe_id),
             tostring(binding.cast_id),
             tostring(binding.chain_id),
-            tostring(binding.source_slot_id),
-            tostring(binding.payload_slot_id),
+            tostring(branch_scope),
             tostring(next_hop),
             tostring(binding.max_hops),
+            tostring(fanout_count),
             tostring(selected.id),
-            tostring(modifier_kind),
-            tostring(enqueue.job_id)
+            tostring(continuation_group_id)
         ))
     end
 
-    local tick_result = tickJob(enqueue.job_id, {
-        max_chain_ticks = options.max_chain_ticks,
-        max_jobs_per_tick = binding.max_jobs_per_tick,
-        max_live_launches_per_tick = binding.max_live_launches_per_tick,
-    })
-    local job = compactJob(enqueue.job_id)
-    runtime_stats.inc("chain_runtime_payload_processed")
-    if job.job_status == "complete" and job.launch_accepted == true then
-        runtime_stats.inc("chain_runtime_payload_ok")
-        runtime_stats.inc("chain_runtime_sfp_launch_ok")
-        runtime_stats.inc("chain_runtime_hops_completed")
-        if modifier_kind ~= nil then
-            runtime_stats.inc("chain_modifier_payload_ok")
+    for fanout_index = 1, fanout_count do
+        local job_to_enqueue = fanout_index == 1 and job_input or cloneJobInput(job_input)
+        local branch_id = fanout_count > 1
+            and string.format("%s:f%s", tostring(branch_parent_id), tostring(fanout_index))
+            or branch_parent_id
+        job_to_enqueue.idempotency_key = fanout_count > 1
+            and string.format("%s:f%s", tostring(idempotency_key), tostring(fanout_index))
+            or idempotency_key
+        job_to_enqueue.fanout_count = fanout_count
+        job_to_enqueue.branch_id = branch_id
+        job_to_enqueue.branch_parent_id = branch_parent_id
+        job_to_enqueue.branch_kind = fanout_count > 1 and "chain_multicast" or "chain"
+        job_to_enqueue.branch_index = fanout_index
+        job_to_enqueue.branch_count = fanout_count
+        job_to_enqueue.chain_continuation_group_id = continuation_group_id
+        job_to_enqueue.launch_density_group_key = launch_density_group_key
+        if job_to_enqueue.payload then
+            job_to_enqueue.payload.fanout_count = fanout_count
+            job_to_enqueue.payload.branch_id = branch_id
+            job_to_enqueue.payload.branch_parent_id = branch_parent_id
+            job_to_enqueue.payload.branch_kind = job_to_enqueue.branch_kind
+            job_to_enqueue.payload.branch_index = fanout_index
+            job_to_enqueue.payload.branch_count = fanout_count
+            job_to_enqueue.payload.chain_continuation_group_id = continuation_group_id
         end
-        log.info(string.format(
-            "SPELLFORGE_CHAIN_HOP_PAYLOAD_OK recipe_id=%s cast_id=%s chain_id=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s projectile_id=%s",
-            tostring(binding.recipe_id),
-            tostring(binding.cast_id),
-            tostring(binding.chain_id),
-            tostring(binding.payload_slot_id),
-            tostring(next_hop),
-            tostring(binding.max_hops),
-            tostring(selected.id),
-            tostring(job.projectile_id)
-        ))
-        if modifier_kind ~= nil then
+
+        local probe_virtual = probe_virtual_fanout_after ~= nil and fanout_index > probe_virtual_fanout_after
+        local enqueued_job_id = nil
+        if probe_virtual then
+            enqueued_job_id = string.format(
+                "probe_virtual_chain:%s:%s:%s:%s",
+                tostring(binding.chain_id),
+                tostring(next_hop),
+                tostring(branch_scope),
+                tostring(fanout_index)
+            )
+            probe_virtual_jobs[enqueued_job_id] = makeProbeVirtualPayloadJob(
+                job_to_enqueue,
+                enqueued_job_id,
+                "probe_virtual:" .. enqueued_job_id
+            )
+            runtime_stats.inc("chain_runtime_probe_virtual_payload_jobs")
+            virtualized_count = virtualized_count + 1
+            virtualized_first_branch_index = virtualized_first_branch_index or fanout_index
+            virtualized_last_branch_index = fanout_index
+            virtualized_sample_job_id = virtualized_sample_job_id or enqueued_job_id
+        else
+            local enqueue = orchestrator.enqueue(job_to_enqueue)
+            if not enqueue.ok then
+                runtime_stats.inc("chain_runtime_hop_rejected")
+                runtime_stats.inc("chain_runtime_context_reject")
+                if fanout_count > 1 then
+                    runtime_stats.inc("chain_multicast_payload_failed")
+                end
+                return { ok = false, error = enqueue.error or "Chain payload enqueue failed" }
+            end
+            enqueued_job_id = enqueue.job_id
+            real_job_ids[#real_job_ids + 1] = enqueue.job_id
+            runtime_stats.inc("chain_runtime_sfp_launch_attempts")
             log.info(string.format(
-                "SPELLFORGE_CHAIN_MODIFIED_PAYLOAD_OK recipe_id=%s cast_id=%s chain_id=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s payload_modifier_kind=%s projectile_id=%s",
+                "SPELLFORGE_CHAIN_HOP_ENQUEUED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s branch_id=%s branch_index=%s branch_count=%s source_slot_id=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s job_id=%s",
                 tostring(binding.recipe_id),
                 tostring(binding.cast_id),
                 tostring(binding.chain_id),
+                tostring(branch_scope),
+                tostring(branch_id),
+                tostring(fanout_index),
+                tostring(fanout_count),
+                tostring(binding.source_slot_id),
+                tostring(binding.payload_slot_id),
+                tostring(next_hop),
+                tostring(binding.max_hops),
+                tostring(selected.id),
+                tostring(enqueued_job_id)
+            ))
+        end
+
+        job_ids[#job_ids + 1] = enqueued_job_id
+        runtime_stats.inc("chain_runtime_payload_jobs")
+        if fanout_count > 1 then
+            runtime_stats.inc("chain_multicast_jobs")
+            runtime_stats.inc("branch_observability_events")
+        end
+        if modifier_kind ~= nil then
+            log.info(string.format(
+                "SPELLFORGE_CHAIN_MODIFIED_HOP_ENQUEUED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s source_slot_id=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s payload_modifier_kind=%s job_id=%s",
+                tostring(binding.recipe_id),
+                tostring(binding.cast_id),
+                tostring(binding.chain_id),
+                tostring(branch_scope),
+                tostring(binding.source_slot_id),
                 tostring(binding.payload_slot_id),
                 tostring(next_hop),
                 tostring(binding.max_hops),
                 tostring(selected.id),
                 tostring(modifier_kind),
-                tostring(job.projectile_id)
+                tostring(enqueued_job_id)
             ))
         end
-    else
-        runtime_stats.inc("chain_runtime_payload_failed")
-        runtime_stats.inc("chain_runtime_sfp_launch_failed")
-        if modifier_kind ~= nil then
-            runtime_stats.inc("chain_modifier_payload_failed")
+    end
+    if virtualized_count > 0 then
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_HOP_PROBE_VIRTUALIZED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s branch_count=%s virtual_branch_count=%s first_virtual_branch_index=%s last_virtual_branch_index=%s source_slot_id=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s sample_job_id=%s",
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(binding.chain_id),
+            tostring(branch_scope),
+            tostring(fanout_count),
+            tostring(virtualized_count),
+            tostring(virtualized_first_branch_index),
+            tostring(virtualized_last_branch_index),
+            tostring(binding.source_slot_id),
+            tostring(binding.payload_slot_id),
+            tostring(next_hop),
+            tostring(binding.max_hops),
+            tostring(selected.id),
+            tostring(virtualized_sample_job_id)
+        ))
+    end
+    runtime_stats.inc("chain_runtime_hops_launched")
+
+    local failed_job = nil
+    local tick_result = nil
+    tick_result, tick_results = tickJobs(real_job_ids, {
+        max_chain_ticks = options.max_chain_ticks,
+        max_jobs_per_tick = options.max_jobs_per_tick or binding.max_jobs_per_tick,
+        max_live_launches_per_tick = options.max_live_launches_per_tick or binding.max_live_launches_per_tick,
+        simulate_update_ticks = options.simulate_update_ticks == true,
+        simulated_dt_seconds = options.simulated_dt_seconds,
+    })
+
+    local virtual_ok_count = 0
+    local virtual_ok_first_branch_index = nil
+    local virtual_ok_last_branch_index = nil
+    local virtual_ok_sample_projectile_id = nil
+    for _, job_id in ipairs(job_ids) do
+        local job = probe_virtual_jobs[job_id] or compactJob(job_id)
+        jobs[#jobs + 1] = job
+        runtime_stats.inc("chain_runtime_payload_processed")
+        if job.job_status == "complete" and job.launch_accepted == true then
+            runtime_stats.inc("chain_runtime_payload_ok")
+            if job.probe_virtual == true then
+                runtime_stats.inc("chain_runtime_probe_virtual_payload_ok")
+                virtual_ok_count = virtual_ok_count + 1
+                virtual_ok_first_branch_index = virtual_ok_first_branch_index or job.branch_index
+                virtual_ok_last_branch_index = job.branch_index
+                virtual_ok_sample_projectile_id = virtual_ok_sample_projectile_id or job.projectile_id
+            else
+                runtime_stats.inc("chain_runtime_sfp_launch_ok")
+                log.info(string.format(
+                    "SPELLFORGE_CHAIN_HOP_PAYLOAD_OK recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s branch_id=%s branch_index=%s branch_count=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s projectile_id=%s",
+                    tostring(binding.recipe_id),
+                    tostring(binding.cast_id),
+                    tostring(binding.chain_id),
+                    tostring(branch_scope),
+                    tostring(job.branch_id),
+                    tostring(job.branch_index),
+                    tostring(job.branch_count),
+                    tostring(binding.payload_slot_id),
+                    tostring(next_hop),
+                    tostring(binding.max_hops),
+                    tostring(selected.id),
+                    tostring(job.projectile_id)
+                ))
+            end
+            if modifier_kind ~= nil then
+                runtime_stats.inc("chain_modifier_payload_ok")
+            end
+            if fanout_count > 1 then
+                runtime_stats.inc("chain_multicast_payload_ok")
+            end
+            if job.projectile_id ~= nil then
+                projectile_ids[#projectile_ids + 1] = job.projectile_id
+            end
+            if modifier_kind ~= nil then
+                log.info(string.format(
+                    "SPELLFORGE_CHAIN_MODIFIED_PAYLOAD_OK recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s payload_modifier_kind=%s projectile_id=%s",
+                    tostring(binding.recipe_id),
+                    tostring(binding.cast_id),
+                    tostring(binding.chain_id),
+                    tostring(branch_scope),
+                    tostring(binding.payload_slot_id),
+                    tostring(next_hop),
+                    tostring(binding.max_hops),
+                    tostring(selected.id),
+                    tostring(modifier_kind),
+                    tostring(job.projectile_id)
+                ))
+            end
+        else
+            failed_job = job
+            runtime_stats.inc("chain_runtime_payload_failed")
+            runtime_stats.inc("chain_runtime_sfp_launch_failed")
+            if modifier_kind ~= nil then
+                runtime_stats.inc("chain_modifier_payload_failed")
+            end
+            if fanout_count > 1 then
+                runtime_stats.inc("chain_multicast_payload_failed")
+            end
         end
+    end
+    if virtual_ok_count > 0 then
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_HOP_PAYLOAD_VIRTUAL_OK recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s branch_count=%s virtual_payload_count=%s first_virtual_branch_index=%s last_virtual_branch_index=%s payload_slot_id=%s hop_index=%s max_hops=%s selected_target_id=%s sample_projectile_id=%s",
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(binding.chain_id),
+            tostring(branch_scope),
+            tostring(fanout_count),
+            tostring(virtual_ok_count),
+            tostring(virtual_ok_first_branch_index),
+            tostring(virtual_ok_last_branch_index),
+            tostring(binding.payload_slot_id),
+            tostring(next_hop),
+            tostring(binding.max_hops),
+            tostring(selected.id),
+            tostring(virtual_ok_sample_projectile_id)
+        ))
+    end
+
+    if failed_job then
         return {
             ok = false,
-            error = job.error or "Chain payload launch failed",
+            error = failed_job.error or "Chain payload launch failed",
             chain_id = binding.chain_id,
             chain_hop_index = next_hop,
             max_hops = binding.max_hops,
-            job_id = enqueue.job_id,
-            job = job,
+            branch_scope = branch_scope,
+            job_id = failed_job.job_id,
+            job = failed_job,
+            jobs = jobs,
+            job_ids = job_ids,
             tick_result = tick_result,
+            tick_results = tick_results,
             resolved = resolved,
         }
     end
+
+    runtime_stats.inc("chain_runtime_hops_completed")
 
     return {
         ok = true,
@@ -1415,6 +1859,7 @@ function live_chain.handleResolvedHit(route, opts)
         chain_hop_index = next_hop,
         previous_hop_index = previous_hop,
         max_hops = binding.max_hops,
+        branch_scope = branch_scope,
         targeting_mode = binding.targeting_mode or "no_immediate_repeat",
         current_hit_target_id = objectToken(current_target),
         selected_target_id = selected.id,
@@ -1428,17 +1873,21 @@ function live_chain.handleResolvedHit(route, opts)
         provider = provider_result and provider_result.provider or nil,
         provider_result = provider_result,
         excluded_current_target_id = resolved.excluded_current_target_id,
-        job_id = enqueue.job_id,
-        job_ids = { enqueue.job_id },
-        jobs = { job },
-        launch_count = 1,
-        payload_job = job,
+        job_id = job_ids[1],
+        job_ids = job_ids,
+        jobs = jobs,
+        launch_count = #jobs,
+        payload_job = jobs[1],
         payload_slot_id = binding.payload_slot_id,
         payload_helper_engine_id = binding.payload_helper_engine_id,
-        projectile_id = job.projectile_id,
-        launch_user_data = job.launch_user_data,
+        has_multicast_payload = fanout_count > 1,
+        chain_multicast_fanout_count = fanout_count,
+        projectile_id = jobs[1] and jobs[1].projectile_id or nil,
+        projectile_ids = projectile_ids,
+        launch_user_data = jobs[1] and jobs[1].launch_user_data or nil,
         resolved = resolved,
         tick_result = tick_result,
+        tick_results = tick_results,
     }
 end
 

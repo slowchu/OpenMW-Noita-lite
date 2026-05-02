@@ -75,6 +75,7 @@ function sfp_userdata.buildHelperUserData(args)
     setScalar(out, "final_fanout_count", input.final_fanout_count)
     setScalar(out, "final_fanout_index", input.final_fanout_index)
     setScalar(out, "source_slot_id", firstNonNil(input.source_slot_id, mappingField(mapping, "trigger_source_slot_id"), mappingField(mapping, "timer_source_slot_id")))
+    setScalar(out, "source_prefix_opcode", firstNonNil(input.source_prefix_opcode, mappingField(mapping, "source_prefix_opcode")))
     setScalar(out, "source_postfix_opcode", firstNonNil(input.source_postfix_opcode, mappingField(mapping, "source_postfix_opcode")))
     setScalar(out, "payload_slot_id", input.payload_slot_id)
     setScalar(out, "source_helper_engine_id", input.source_helper_engine_id)
@@ -110,9 +111,26 @@ function sfp_userdata.buildHelperUserData(args)
     setScalar(out, "chain_max_hops", input.chain_max_hops)
     setScalar(out, "chain_targeting_mode", input.chain_targeting_mode)
     setScalar(out, "chain_target_provider", input.chain_target_provider)
+    setScalar(out, "branch_scope", input.branch_scope)
+    setScalar(out, "branch_id", input.branch_id)
+    setScalar(out, "branch_parent_id", input.branch_parent_id)
+    setScalar(out, "branch_kind", input.branch_kind)
+    setScalar(out, "branch_index", input.branch_index)
+    setScalar(out, "branch_count", input.branch_count)
+    setScalar(out, "chain_continuation_group_id", input.chain_continuation_group_id)
     setScalar(out, "current_hit_target_id", input.current_hit_target_id)
     setScalar(out, "selected_target_id", input.selected_target_id)
     setScalar(out, "previous_projectile_id", input.previous_projectile_id)
+    setScalar(out, "bounce_runtime", input.bounce_runtime)
+    setScalar(out, "bounce_role", input.bounce_role)
+    setScalar(out, "bounce_id", input.bounce_id)
+    setScalar(out, "bounce_index", input.bounce_index)
+    setScalar(out, "bounce_max", input.bounce_max)
+    setScalar(out, "bounce_power", input.bounce_power)
+    setScalar(out, "bounce_detonate_on_actor_hit", input.bounce_detonate_on_actor_hit)
+    setScalar(out, "bounce_trigger_payload_slot_id", input.bounce_trigger_payload_slot_id)
+    setScalar(out, "bounce_manual_detonation", input.bounce_manual_detonation)
+    setScalar(out, "bounce_final", input.bounce_final)
     setScalar(out, "payload_modifier_kind", input.payload_modifier_kind)
     setScalar(out, "speed_plus", input.speed_plus)
     setScalar(out, "speed_plus_mode", input.speed_plus_mode)
@@ -131,6 +149,19 @@ function sfp_userdata.buildHelperUserData(args)
     setScalar(out, "size_plus_capped", input.size_plus_capped)
     setScalar(out, "size_plus_base_area", input.size_plus_base_area)
     setScalar(out, "size_plus_area", input.size_plus_area)
+    setScalar(out, "homing", input.homing)
+    setScalar(out, "homing_mode", input.homing_mode)
+    setScalar(out, "homing_force", input.homing_force)
+    setScalar(out, "homing_field", input.homing_field)
+    setScalar(out, "homing_target_id", input.homing_target_id)
+    setScalar(out, "homing_target_provider", input.homing_target_provider)
+    setScalar(out, "homing_target_kind", input.homing_target_kind)
+    setScalar(out, "homing_candidate_count", input.homing_candidate_count)
+    setScalar(out, "homing_actor_candidate_count", input.homing_actor_candidate_count)
+    setScalar(out, "homing_creature_candidate_count", input.homing_creature_candidate_count)
+    setScalar(out, "homing_npc_candidate_count", input.homing_npc_candidate_count)
+    setScalar(out, "homing_force_key", input.homing_force_key)
+    setScalar(out, "homing_direction_key", input.homing_direction_key)
 
     return out
 end
@@ -176,6 +207,7 @@ function sfp_userdata.compactSpellforgeUserData(user_data)
         "final_fanout_count",
         "final_fanout_index",
         "source_slot_id",
+        "source_prefix_opcode",
         "source_postfix_opcode",
         "payload_slot_id",
         "source_helper_engine_id",
@@ -211,9 +243,26 @@ function sfp_userdata.compactSpellforgeUserData(user_data)
         "chain_max_hops",
         "chain_targeting_mode",
         "chain_target_provider",
+        "branch_scope",
+        "branch_id",
+        "branch_parent_id",
+        "branch_kind",
+        "branch_index",
+        "branch_count",
+        "chain_continuation_group_id",
         "current_hit_target_id",
         "selected_target_id",
         "previous_projectile_id",
+        "bounce_runtime",
+        "bounce_role",
+        "bounce_id",
+        "bounce_index",
+        "bounce_max",
+        "bounce_power",
+        "bounce_detonate_on_actor_hit",
+        "bounce_trigger_payload_slot_id",
+        "bounce_manual_detonation",
+        "bounce_final",
         "payload_modifier_kind",
         "speed_plus",
         "speed_plus_mode",
@@ -232,6 +281,19 @@ function sfp_userdata.compactSpellforgeUserData(user_data)
         "size_plus_capped",
         "size_plus_base_area",
         "size_plus_area",
+        "homing",
+        "homing_mode",
+        "homing_force",
+        "homing_field",
+        "homing_target_id",
+        "homing_target_provider",
+        "homing_target_kind",
+        "homing_candidate_count",
+        "homing_actor_candidate_count",
+        "homing_creature_candidate_count",
+        "homing_npc_candidate_count",
+        "homing_force_key",
+        "homing_direction_key",
         "source_spell_id",
         "dispatch_spell_id",
         "effect_index",

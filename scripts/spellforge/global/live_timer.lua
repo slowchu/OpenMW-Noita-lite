@@ -6,6 +6,7 @@ local helper_records = require("scripts.spellforge.global.helper_records")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
 local payload_multicast = require("scripts.spellforge.global.payload_multicast")
 local payload_pattern = require("scripts.spellforge.global.payload_pattern")
+local projectile_registry = require("scripts.spellforge.global.projectile_registry")
 local runtime_stats = require("scripts.spellforge.global.runtime_stats")
 local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
 
@@ -424,6 +425,8 @@ function live_timer.decorateSourceJob(job, binding)
     job.payload.timer_delay_semantics = "async_simulation_timer"
 end
 
+local sourceProjectileSnapshot
+
 function live_timer.sourceDetonationAudit(opts)
     local options = opts or {}
     local caps = sfp_adapter.capabilities()
@@ -434,29 +437,45 @@ function live_timer.sourceDetonationAudit(opts)
     local has_projectile_id = type(projectile_id) == "string" and projectile_id ~= ""
     local has_source_spell_id = type(source_spell_id) == "string" and source_spell_id ~= ""
     local has_caster = caster ~= nil
-    local has_position = type(projectile_state) == "table"
-        and (projectile_state.position ~= nil or projectile_state.pos ~= nil)
-    local has_cell = type(projectile_state) == "table" and projectile_state.cell ~= nil
-    local can_detonate = caps.has_detonateSpellAtPos == true
-        and caps.has_cancelSpell == true
-        and has_projectile_id
-        and has_position
-        and has_cell
+    local snapshot = has_projectile_id and sourceProjectileSnapshot
+        and sourceProjectileSnapshot(projectile_id, projectile_state)
+        or nil
+    local has_position = snapshot and snapshot.position ~= nil or (
+        type(projectile_state) == "table"
+            and (projectile_state.position ~= nil or projectile_state.pos ~= nil)
+    )
+    local has_cell = snapshot and snapshot.cell ~= nil or (type(projectile_state) == "table" and projectile_state.cell ~= nil)
+    local api_ready = caps.has_detonateSpellAtPos == true and caps.has_cancelSpell == true
+    local can_detonate = api_ready and has_projectile_id and has_position and has_cell
     local blocker = nil
-    if not can_detonate then
-        blocker = "Timer source detonation requires current projectile position/cell; cancelSpell can remove by projectile id, but detonateSpellAtPos requires position/cell and Spellforge does not currently maintain that state at Timer maturity."
+    local status = "ready"
+    if not api_ready then
+        status = "blocked"
+        blocker = "Timer source detonation requires SFP detonateSpellAtPos and cancelSpell."
+    elseif not has_projectile_id then
+        status = "pending_projectile"
+    elseif snapshot and snapshot.already_hit == true then
+        status = "already_hit"
+    elseif can_detonate then
+        status = "implementable"
+    else
+        status = "pending_projectile_state"
     end
     return {
-        status = can_detonate and "implementable" or "blocked",
+        status = status,
         blocker = blocker,
         cancelSpell_available = caps.has_cancelSpell == true,
         detonateSpellAtPos_available = caps.has_detonateSpellAtPos == true,
         getSpellState_available = caps.has_getSpellState == true,
+        launch_projectile_registry_available = true,
         projectile_id_available = has_projectile_id,
         source_spell_id_available = has_source_spell_id,
         caster_available = has_caster,
         projectile_position_available = has_position == true,
         projectile_cell_available = has_cell == true,
+        projectile_already_hit = snapshot and snapshot.already_hit == true or false,
+        projectile_object_available = snapshot and snapshot.projectile ~= nil or false,
+        projectile_state_fallback_available = snapshot and snapshot.from_projectile_state == true or false,
     }
 end
 
@@ -496,6 +515,74 @@ local function shortKey(key)
     return nil
 end
 
+local function sourceUserData(value)
+    if type(value) == "table" then
+        return value.source_user_data
+    end
+    return nil
+end
+
+local function branchScope(value)
+    local user_data = sourceUserData(value)
+    return value.branch_scope
+        or (user_data and user_data.branch_scope)
+        or "default"
+end
+
+local function branchParentId(value)
+    local user_data = sourceUserData(value)
+    return value.branch_id
+        or (user_data and user_data.branch_id)
+        or string.format(
+            "root:%s:%s",
+            tostring(value.cast_id or (user_data and user_data.cast_id) or "no-cast"),
+            tostring(value.source_slot_id or "no-source")
+        )
+end
+
+local function branchKind(value, count)
+    if value.nested_final_fanout == true then
+        return "nested_final_fanout"
+    end
+    local prefix = "timer_payload"
+    if value.payload_pattern == true then
+        return prefix .. "_pattern"
+    end
+    if value.payload_multicast == true or tonumber(count) ~= 1 then
+        return prefix .. "_multicast"
+    end
+    return prefix
+end
+
+local function branchInfo(value, payload, index, count)
+    local parent_id = branchParentId(value)
+    local payload_slot_id = payload and payload.slot_id or value.payload_slot_id or "no-payload"
+    local user_data = sourceUserData(value)
+    return {
+        branch_scope = branchScope(value),
+        branch_parent_id = parent_id,
+        branch_id = string.format("%s:timer:%s:%s", tostring(parent_id), tostring(index), tostring(payload_slot_id)),
+        branch_kind = branchKind(value, count),
+        branch_index = index,
+        branch_count = count,
+        chain_continuation_group_id = value.chain_continuation_group_id
+            or (user_data and user_data.chain_continuation_group_id),
+    }
+end
+
+local function copyBranchFields(target, branch)
+    if type(target) ~= "table" or type(branch) ~= "table" then
+        return
+    end
+    target.branch_scope = branch.branch_scope
+    target.branch_id = branch.branch_id
+    target.branch_parent_id = branch.branch_parent_id
+    target.branch_kind = branch.branch_kind
+    target.branch_index = branch.branch_index
+    target.branch_count = branch.branch_count
+    target.chain_continuation_group_id = branch.chain_continuation_group_id
+end
+
 local function finiteNonNegative(value)
     local n = tonumber(value)
     if n == nil or n ~= n or n == math.huge or n == -math.huge or n < 0 then
@@ -520,6 +607,111 @@ local function rememberTimerResult(result)
     appendBounded(timer_result_order, result.timer_id, MAX_TIMER_RESULTS, function(evicted)
         timer_results[evicted] = nil
     end)
+end
+
+local function mergeSourceDetonationResult(result, source_result)
+    if type(result) ~= "table" or type(source_result) ~= "table" then
+        return result
+    end
+    for key, value in pairs(source_result) do
+        if result[key] == nil then
+            result[key] = value
+        end
+    end
+    return result
+end
+
+local function safeReadField(value, key)
+    if value == nil then
+        return nil
+    end
+    local ok, result = pcall(function()
+        return value[key]
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+local function objectIsValid(value)
+    if value == nil then
+        return false
+    end
+    local is_valid = safeReadField(value, "isValid")
+    if type(is_valid) == "function" then
+        local ok, result = pcall(function()
+            return value:isValid()
+        end)
+        return ok and result == true
+    end
+    return true
+end
+
+local function statePosition(state)
+    if type(state) ~= "table" then
+        return nil
+    end
+    return state.position or state.pos or state.hitPos or state.hit_pos
+end
+
+local function stateCell(state)
+    if type(state) ~= "table" then
+        return nil
+    end
+    local cell = state.cell
+    if cell ~= nil then
+        return cell
+    end
+    local projectile = state.projectile
+    return safeReadField(projectile, "cell")
+end
+
+sourceProjectileSnapshot = function(projectile_id, projectile_state)
+    local entry = projectile_id and projectile_registry.getByProjectileId(projectile_id) or nil
+    if entry and entry.hit == true then
+        return {
+            entry = entry,
+            already_hit = true,
+            position = statePosition(entry.hit_payload),
+            cell = stateCell(entry.hit_payload),
+        }
+    end
+
+    local projectile = entry and entry.projectile or nil
+    if objectIsValid(projectile) then
+        local position = safeReadField(projectile, "position")
+        local cell = safeReadField(projectile, "cell")
+        if position ~= nil and cell ~= nil then
+            return {
+                entry = entry,
+                projectile = projectile,
+                position = position,
+                cell = cell,
+                from_projectile_object = true,
+            }
+        end
+    end
+
+    local state = projectile_state or (entry and entry.last_state)
+    local position = statePosition(state)
+    local cell = stateCell(state)
+    if position ~= nil and cell ~= nil then
+        return {
+            entry = entry,
+            projectile = state and state.projectile or projectile,
+            position = position,
+            cell = cell,
+            from_projectile_state = true,
+        }
+    end
+
+    return {
+        entry = entry,
+        projectile = projectile,
+        position = position,
+        cell = cell,
+    }
 end
 
 local function compactPayloadsFromBinding(binding)
@@ -691,16 +883,16 @@ local function validateTimerData(data)
     }, nil
 end
 
-local function enqueuePayloadFromTimer(data)
+local function enqueuePayloadFromTimer(data, source_result)
     local validated, validation_error = validateTimerData(data)
     if not validated then
         runtime_stats.inc("live_timer_payload_route_failed")
-        rememberTimerResult({
+        rememberTimerResult(mergeSourceDetonationResult({
             timer_id = data and data.timer_id or "unknown",
             ok = false,
             error = validation_error,
             status = "validation_failed",
-        })
+        }, source_result))
         return { ok = false, error = validation_error }
     end
 
@@ -709,6 +901,52 @@ local function enqueuePayloadFromTimer(data)
     local payload_helper_engine_ids = {}
     for index, payload in ipairs(validated.payloads) do
         local payload_key = string.format("%s:%s", tostring(data.duplicate_key), tostring(payload.slot_id))
+        local branch = branchInfo(data, payload, index, #validated.payloads)
+        local payload_launch = {
+            actor = data.actor,
+            start_pos = data.start_pos,
+            direction = payload.direction or data.direction,
+            hit_object = data.hit_object,
+            cast_id = data.cast_id,
+            source_slot_id = data.source_slot_id,
+            source_helper_engine_id = data.source_helper_engine_id,
+            source_postfix_opcode = "Timer",
+            root_source_slot_id = payload.root_source_slot_id or data.root_source_slot_id,
+            current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
+            parent_slot_id = payload.parent_slot_id or data.source_slot_id,
+            payload_depth = payload.payload_depth or validated.payload_depth,
+            nested_stage_kind = payload.nested_stage_kind or data.nested_stage_kind,
+            nested_stage_index = payload.nested_stage_index or data.nested_stage_index,
+            has_trigger_payload = payload.has_trigger_payload,
+            has_timer_payload = payload.has_timer_payload,
+            payload_slot_id = payload.slot_id,
+            timer_source_slot_id = data.source_slot_id,
+            timer_payload_slot_id = payload.slot_id,
+            timer_id = data.timer_id,
+            timer_delay_ticks = data.delay_ticks,
+            timer_delay_seconds = data.delay_seconds,
+            timer_scheduled_tick = data.scheduled_tick,
+            timer_due_tick = data.due_tick,
+            timer_scheduled_seconds = data.scheduled_seconds,
+            timer_due_seconds = data.due_seconds,
+            timer_delay_semantics = "async_simulation_timer",
+            timer_duplicate_key = shortKey(data.duplicate_key),
+            payload_multicast = data.payload_multicast == true,
+            payload_pattern = data.payload_pattern == true,
+            payload_count = #validated.payloads,
+            fanout_count = #validated.payloads,
+            emission_index = payload.emission_index,
+            group_index = payload.group_index,
+            pattern_kind = payload.pattern_kind,
+            pattern_index = payload.pattern_index,
+            pattern_count = payload.pattern_count,
+            pattern_direction_key = payload.pattern_direction_key,
+            nested_final_fanout = data.nested_final_fanout == true,
+            nested_final_fanout_kind = data.nested_final_fanout_kind,
+            final_fanout_count = data.nested_final_fanout == true and #validated.payloads or nil,
+            final_fanout_index = data.nested_final_fanout == true and index or nil,
+        }
+        copyBranchFields(payload_launch, branch)
         local enqueue = orchestrator.enqueue({
             kind = orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND,
             recipe_id = data.recipe_id,
@@ -756,60 +994,24 @@ local function enqueuePayloadFromTimer(data)
             timer_due_seconds = data.due_seconds,
             timer_delay_semantics = "async_simulation_timer",
             timer_duplicate_key = shortKey(data.duplicate_key),
-            payload = {
-                actor = data.actor,
-                start_pos = data.start_pos,
-                direction = payload.direction or data.direction,
-                hit_object = data.hit_object,
-                cast_id = data.cast_id,
-                source_slot_id = data.source_slot_id,
-                source_helper_engine_id = data.source_helper_engine_id,
-                source_postfix_opcode = "Timer",
-                root_source_slot_id = payload.root_source_slot_id or data.root_source_slot_id,
-                current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
-                parent_slot_id = payload.parent_slot_id or data.source_slot_id,
-                payload_depth = payload.payload_depth or validated.payload_depth,
-                nested_stage_kind = payload.nested_stage_kind or data.nested_stage_kind,
-                nested_stage_index = payload.nested_stage_index or data.nested_stage_index,
-                has_trigger_payload = payload.has_trigger_payload,
-                has_timer_payload = payload.has_timer_payload,
-                payload_slot_id = payload.slot_id,
-                timer_source_slot_id = data.source_slot_id,
-                timer_payload_slot_id = payload.slot_id,
-                timer_id = data.timer_id,
-                timer_delay_ticks = data.delay_ticks,
-                timer_delay_seconds = data.delay_seconds,
-                timer_scheduled_tick = data.scheduled_tick,
-                timer_due_tick = data.due_tick,
-                timer_scheduled_seconds = data.scheduled_seconds,
-                timer_due_seconds = data.due_seconds,
-                timer_delay_semantics = "async_simulation_timer",
-                timer_duplicate_key = shortKey(data.duplicate_key),
-                payload_multicast = data.payload_multicast == true,
-                payload_pattern = data.payload_pattern == true,
-                payload_count = #validated.payloads,
-                fanout_count = #validated.payloads,
-                emission_index = payload.emission_index,
-                group_index = payload.group_index,
-                pattern_kind = payload.pattern_kind,
-                pattern_index = payload.pattern_index,
-                pattern_count = payload.pattern_count,
-                pattern_direction_key = payload.pattern_direction_key,
-                nested_final_fanout = data.nested_final_fanout == true,
-                nested_final_fanout_kind = data.nested_final_fanout_kind,
-                final_fanout_count = data.nested_final_fanout == true and #validated.payloads or nil,
-                final_fanout_index = data.nested_final_fanout == true and index or nil,
-            },
+            branch_scope = branch.branch_scope,
+            branch_id = branch.branch_id,
+            branch_parent_id = branch.branch_parent_id,
+            branch_kind = branch.branch_kind,
+            branch_index = branch.branch_index,
+            branch_count = branch.branch_count,
+            chain_continuation_group_id = branch.chain_continuation_group_id,
+            payload = payload_launch,
         })
         if not enqueue.ok then
             runtime_stats.inc("live_timer_payload_route_failed")
-            rememberTimerResult({
+            rememberTimerResult(mergeSourceDetonationResult({
                 timer_id = data.timer_id,
                 ok = false,
                 error = enqueue.error or "timer payload enqueue failed",
                 status = "enqueue_failed",
                 job_ids = job_ids,
-            })
+            }, source_result))
             return { ok = false, error = enqueue.error or "timer payload enqueue failed" }
         end
         job_ids[#job_ids + 1] = enqueue.job_id
@@ -865,7 +1067,7 @@ local function enqueuePayloadFromTimer(data)
             runtime_stats.inc("nested_final_fanout_burst_jobs", #job_ids)
         end
     end
-    rememberTimerResult({
+    rememberTimerResult(mergeSourceDetonationResult({
         timer_id = data.timer_id,
         ok = true,
         status = "payload_enqueued",
@@ -888,7 +1090,7 @@ local function enqueuePayloadFromTimer(data)
         payload_helper_engine_id = payload_helper_engine_ids[1],
         payload_slot_ids = payload_slot_ids,
         payload_helper_engine_ids = payload_helper_engine_ids,
-    })
+    }, source_result))
     local marker = data.nested_final_fanout == true
         and "SPELLFORGE_NESTED_FINAL_FANOUT_TIMER_ENQUEUED"
         or data.payload_pattern == true
@@ -896,8 +1098,9 @@ local function enqueuePayloadFromTimer(data)
         or data.payload_multicast == true
         and "SPELLFORGE_PAYLOAD_MULTICAST_TIMER_ENQUEUED"
         or "SPELLFORGE_LIVE_TIMER_ASYNC_PAYLOAD_ENQUEUED"
+    local first_queued_job = orchestrator.getJob(job_ids[1])
     log.info(string.format(
-        "%s timer_id=%s job_count=%s cast_id=%s source_slot_id=%s payload_count=%s pattern_kind=%s first_payload_slot_id=%s",
+        "%s timer_id=%s job_count=%s cast_id=%s source_slot_id=%s payload_count=%s pattern_kind=%s first_payload_slot_id=%s first_branch_id=%s branch_kind=%s",
         marker,
         tostring(data.timer_id),
         tostring(#job_ids),
@@ -905,14 +1108,145 @@ local function enqueuePayloadFromTimer(data)
         tostring(data.source_slot_id),
         tostring(#job_ids),
         tostring(data.payload_pattern_kind),
-        tostring(payload_slot_ids[1])
+        tostring(payload_slot_ids[1]),
+        tostring(first_queued_job and first_queued_job.branch_id or nil),
+        tostring(first_queued_job and first_queued_job.branch_kind or nil)
     ))
-    return {
+    return mergeSourceDetonationResult({
         ok = true,
         job_id = job_ids[1],
         job_ids = job_ids,
         payload_count = #job_ids,
         timer_id = data.timer_id,
+    }, source_result)
+end
+
+local function helperPresentation(helper_engine_id)
+    local mapping = helper_records.getByEngineId(helper_engine_id)
+    return mapping and mapping.presentation or nil
+end
+
+local function detonateTimerSource(data)
+    if type(data) ~= "table" then
+        return {
+            source_detonation_status = "skipped_missing_timer_data",
+            source_detonation_ok = false,
+        }
+    end
+
+    runtime_stats.inc("timer_source_detonation_checked")
+    local projectile_id = data.source_projectile_id
+    local source_spell_id = data.source_helper_engine_id
+    local caps = sfp_adapter.capabilities()
+    if not caps.has_detonateSpellAtPos or not caps.has_cancelSpell then
+        runtime_stats.inc("timer_source_detonation_blocked")
+        return {
+            source_detonation_status = "skipped_capability_unavailable",
+            source_detonation_ok = false,
+            source_cancel_ok = false,
+            source_projectile_id = projectile_id,
+        }
+    end
+    if type(projectile_id) ~= "string" or projectile_id == "" then
+        runtime_stats.inc("timer_source_detonation_skipped")
+        return {
+            source_detonation_status = "skipped_no_projectile_id",
+            source_detonation_ok = false,
+            source_cancel_ok = false,
+        }
+    end
+    if type(source_spell_id) ~= "string" or source_spell_id == "" or data.actor == nil then
+        runtime_stats.inc("timer_source_detonation_failed")
+        return {
+            source_detonation_status = "failed_missing_source_context",
+            source_detonation_ok = false,
+            source_cancel_ok = false,
+            source_projectile_id = projectile_id,
+        }
+    end
+
+    local snapshot = sourceProjectileSnapshot(projectile_id, data.source_projectile_state)
+    if snapshot and snapshot.position ~= nil and snapshot.cell == nil then
+        snapshot.cell = safeReadField(data.actor, "cell")
+    end
+    if snapshot and snapshot.already_hit == true then
+        runtime_stats.inc("timer_source_detonation_skipped")
+        return {
+            source_detonation_status = "skipped_already_hit",
+            source_detonation_ok = false,
+            source_cancel_ok = false,
+            source_projectile_id = projectile_id,
+            source_projectile_already_hit = true,
+        }
+    end
+    if not snapshot or snapshot.position == nil or snapshot.cell == nil then
+        runtime_stats.inc("timer_source_detonation_failed")
+        log.info(string.format(
+            "SPELLFORGE_LIVE_TIMER_SOURCE_DETONATION_SKIPPED timer_id=%s recipe_id=%s cast_id=%s source_slot_id=%s projectile_id=%s reason=missing_position_or_cell",
+            tostring(data.timer_id),
+            tostring(data.recipe_id),
+            tostring(data.cast_id),
+            tostring(data.source_slot_id),
+            tostring(projectile_id)
+        ))
+        return {
+            source_detonation_status = "failed_missing_position_or_cell",
+            source_detonation_ok = false,
+            source_cancel_ok = false,
+            source_projectile_id = projectile_id,
+            source_projectile_position_available = snapshot and snapshot.position ~= nil or false,
+            source_projectile_cell_available = snapshot and snapshot.cell ~= nil or false,
+        }
+    end
+
+    runtime_stats.inc("timer_source_detonation_attempts")
+    local presentation = helperPresentation(source_spell_id)
+    local detonate = sfp_adapter.detonateSpellAtPos({
+        spellId = source_spell_id,
+        caster = data.actor,
+        position = snapshot.position,
+        cell = snapshot.cell,
+        areaVfxRecId = presentation and presentation.areaVfxRecId or nil,
+        areaVfxScale = presentation and presentation.areaVfxScale or nil,
+        userData = data.source_user_data,
+        muteAudio = data.source_mute_audio,
+        muteLight = data.source_mute_light,
+    })
+    local cancel = sfp_adapter.cancelSpell(projectile_id)
+    if detonate.ok then
+        runtime_stats.inc("timer_source_detonation_ok")
+    else
+        runtime_stats.inc("timer_source_detonation_failed")
+    end
+    if cancel.ok then
+        runtime_stats.inc("timer_source_cancel_ok")
+    else
+        runtime_stats.inc("timer_source_cancel_failed")
+    end
+
+    local status = detonate.ok and "detonated" or "detonate_failed"
+    log.info(string.format(
+        "SPELLFORGE_LIVE_TIMER_SOURCE_DETONATED timer_id=%s recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s status=%s cancel_ok=%s",
+        tostring(data.timer_id),
+        tostring(data.recipe_id),
+        tostring(data.cast_id),
+        tostring(data.source_slot_id),
+        tostring(source_spell_id),
+        tostring(projectile_id),
+        tostring(status),
+        tostring(cancel.ok == true)
+    ))
+    return {
+        source_detonation_status = status,
+        source_detonation_ok = detonate.ok == true,
+        source_cancel_ok = cancel.ok == true,
+        source_projectile_id = projectile_id,
+        source_projectile_position_available = true,
+        source_projectile_cell_available = true,
+        source_detonation_from_projectile_object = snapshot.from_projectile_object == true,
+        source_detonation_from_projectile_state = snapshot.from_projectile_state == true,
+        source_detonation_error = detonate.ok and nil or detonate.error,
+        source_cancel_error = cancel.ok and nil or cancel.error,
     }
 end
 
@@ -934,7 +1268,8 @@ local function onAsyncTimerDue(data)
         tostring(timer_id),
         tostring(found)
     ))
-    return enqueuePayloadFromTimer(data)
+    local source_result = detonateTimerSource(data)
+    return enqueuePayloadFromTimer(data, source_result)
 end
 
 function live_timer.registerCallbacks()
@@ -947,10 +1282,6 @@ end
 
 function live_timer.schedulePayload(binding, opts)
     local options = opts or {}
-    -- Timer source detonation is intentionally not implemented in v0.
-    -- SFP cancelSpell can remove by projectile id, but it does not detonate by id.
-    -- Future timed detonation needs current projectile position/cell, then
-    -- detonateSpellAtPos(...) at that position and cancelSpell(projectile_id).
     if type(binding) ~= "table" then
         runtime_stats.inc("live_timer_payload_route_failed")
         return { ok = false, error = "missing timer binding" }
@@ -1079,6 +1410,10 @@ function live_timer.schedulePayload(binding, opts)
         recipe_id = binding.recipe_id,
         cast_id = binding.cast_id,
         source_job_id = binding.source_job_id,
+        source_projectile_id = options.source_projectile_id or binding.source_projectile_id,
+        source_user_data = options.source_user_data or binding.source_user_data,
+        source_mute_audio = options.source_mute_audio or binding.source_mute_audio,
+        source_mute_light = options.source_mute_light or binding.source_mute_light,
         source_slot_id = binding.source_slot_id,
         source_helper_engine_id = binding.source_helper_engine_id,
         payload_slot_id = binding.payload_slot_id,
@@ -1089,6 +1424,12 @@ function live_timer.schedulePayload(binding, opts)
         payload_multicast = binding.payload_multicast == true,
         payload_pattern = binding.payload_pattern == true,
         payload_pattern_kind = binding.payload_pattern_kind,
+        branch_scope = branchScope(binding),
+        branch_parent_id = branchParentId(binding),
+        branch_kind = branchKind(binding, #payloads),
+        branch_count = #payloads,
+        chain_continuation_group_id = binding.chain_continuation_group_id
+            or (binding.source_user_data and binding.source_user_data.chain_continuation_group_id),
         max_payload_fanout = max_payload_fanout,
         max_projectiles = max_projectiles,
         max_jobs_per_tick = tonumber(binding.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK,
@@ -1137,12 +1478,14 @@ function live_timer.schedulePayload(binding, opts)
     runtime_stats.inc("live_timer_wait_jobs_enqueued")
     runtime_stats.inc("live_timer_immediate_payload_blocked")
     log.info(string.format(
-        "SPELLFORGE_LIVE_TIMER_ASYNC_SCHEDULED timer_id=%s recipe_id=%s cast_id=%s source_slot_id=%s payload_slot_id=%s delay_seconds=%s",
+        "SPELLFORGE_LIVE_TIMER_ASYNC_SCHEDULED timer_id=%s recipe_id=%s cast_id=%s source_slot_id=%s payload_slot_id=%s branch_parent_id=%s branch_kind=%s delay_seconds=%s",
         tostring(timer_id),
         tostring(binding.recipe_id),
         tostring(binding.cast_id),
         tostring(binding.source_slot_id),
         tostring(binding.payload_slot_id),
+        tostring(timer_data.branch_parent_id),
+        tostring(timer_data.branch_kind),
         tostring(delay_seconds)
     ))
 
@@ -1220,6 +1563,13 @@ function live_timer.timerStatus(timer_id)
             payload_depth = payload_job.payload_depth,
             nested_stage_kind = payload_job.nested_stage_kind,
             nested_stage_index = payload_job.nested_stage_index,
+            branch_scope = payload_job.branch_scope,
+            branch_id = payload_job.branch_id,
+            branch_parent_id = payload_job.branch_parent_id,
+            branch_kind = payload_job.branch_kind,
+            branch_index = payload_job.branch_index,
+            branch_count = payload_job.branch_count,
+            chain_continuation_group_id = payload_job.chain_continuation_group_id,
             pattern_kind = payload_job.pattern_kind,
             pattern_index = payload_job.pattern_index,
             pattern_count = payload_job.pattern_count,
@@ -1263,6 +1613,15 @@ function live_timer.timerStatus(timer_id)
         payload_launch_count = payload_launch_count,
         payload_launch_user_data = job and job.launch_user_data or nil,
         payload_projectile_id = job and job.projectile_id or nil,
+        source_projectile_id = (pending and pending.source_projectile_id) or (result and result.source_projectile_id) or nil,
+        source_detonation_status = result and result.source_detonation_status or nil,
+        source_detonation_ok = result and result.source_detonation_ok == true or false,
+        source_cancel_ok = result and result.source_cancel_ok == true or false,
+        source_projectile_position_available = result and result.source_projectile_position_available == true or false,
+        source_projectile_cell_available = result and result.source_projectile_cell_available == true or false,
+        source_projectile_already_hit = result and result.source_projectile_already_hit == true or false,
+        source_detonation_error = result and result.source_detonation_error or nil,
+        source_cancel_error = result and result.source_cancel_error or nil,
         cast_id = (pending and pending.cast_id) or (result and result.cast_id) or (job and job.cast_id) or nil,
         source_slot_id = (pending and pending.source_slot_id) or (result and result.source_slot_id) or (job and job.source_slot_id) or nil,
         source_helper_engine_id = (pending and pending.source_helper_engine_id) or (result and result.source_helper_engine_id) or (job and job.source_helper_engine_id) or nil,

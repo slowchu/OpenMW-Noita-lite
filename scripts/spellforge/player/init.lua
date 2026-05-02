@@ -11,6 +11,8 @@ local util = require("openmw.util")
 local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("player.init")
 local dev = require("scripts.spellforge.shared.dev")
+local spellcrafting_ui = require("scripts.spellforge.player.spellcrafting_ui")
+local ui = require("scripts.spellforge.player.ui")
 
 local DEV_COMPILE_BASE_SPELL_ID = "fireball"
 
@@ -832,6 +834,14 @@ local function onInputAction(action)
 end
 
 local function onKeyPress(key)
+    local ui_handled = spellcrafting_ui.handleKeyPress(key)
+    if ui_handled == false then
+        return false
+    end
+    if spellcrafting_ui.isVisible() then
+        return true
+    end
+
     local symbol = key.symbol and string.lower(key.symbol) or ""
     if symbol == "k" or key.code == input.KEY.K then
         if not dev.devHotkeysEnabled() then
@@ -947,10 +957,14 @@ return {
         end,
         [events.COMPILE_RESULT] = function(payload)
             onCompileResult(payload)
+            ui.handleCompileResult(payload)
             if payload and payload.ok and payload.spell_id then
                 refreshSpellMetadata(payload.spell_id, "compile-result")
             end
         end,
+        [events.VALIDATE_RESULT] = ui.handleValidateResult,
+        [events.PREVIEW_RESULT] = ui.handlePreviewResult,
+        [events.UI_CATALOG_RESULT] = ui.handleCatalogResult,
         [events.INTERCEPT_DISPATCH_RESULT] = onInterceptDispatchResult,
         [events.CHAIN_LOS_REQUEST] = onChainLosRequest,
     },

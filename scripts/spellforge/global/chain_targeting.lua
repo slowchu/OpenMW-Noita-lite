@@ -52,6 +52,19 @@ local function countOpcode(ops, opcode)
     return count, first
 end
 
+local function multicastFanout(ops)
+    local count = 1
+    local found = false
+    for _, op in ipairs(ops or {}) do
+        if op and op.opcode == "Multicast" then
+            found = true
+            local op_count = tonumber(op.params and op.params.count) or 1
+            count = count * math.max(1, math.floor(op_count))
+        end
+    end
+    return found and count or 1
+end
+
 local function hasPayloadBindings(value)
     return type(value) == "table" and #value > 0
 end
@@ -270,6 +283,8 @@ function chain_targeting.inspectPlan(plan, opts)
     local options = opts or {}
     local hop_cap = tonumber(options.max_hops or limits.MAX_CHAIN_AUDIT_HOPS or limits.MAX_CHAIN_HOPS) or 1
     local max_jobs = tonumber(options.max_jobs or limits.MAX_CHAIN_JOBS_PER_CAST) or hop_cap
+    local allow_chain_multicast = options.allow_chain_multicast == true
+    local chain_multicast_fanout_cap = tonumber(options.max_chain_multicast_fanout or limits.MAX_CHAIN_MULTICAST_FANOUT) or 1
     local reasons = {}
     local result = {
         ok = false,
@@ -312,6 +327,10 @@ function chain_targeting.inspectPlan(plan, opts)
         has_speed_plus_payload = false,
         has_size_plus_payload = false,
         has_multicast_payload = false,
+        chain_multicast_runtime_candidate = false,
+        chain_multicast_fanout_count = 1,
+        chain_multicast_fanout_cap = chain_multicast_fanout_cap,
+        payload_slot_ids = nil,
         has_pattern_payload = false,
         has_trigger_timer_payload = false,
         has_chain_recursion = false,
@@ -361,7 +380,10 @@ function chain_targeting.inspectPlan(plan, opts)
             if hasOpcode(slot.prefix_ops, "Multicast") then
                 result.has_chain_with_multicast = true
                 result.has_multicast_payload = true
-                addReason(reasons, "chain_multicast_deferred")
+                result.chain_multicast_fanout_count = math.max(result.chain_multicast_fanout_count or 1, multicastFanout(slot.prefix_ops))
+                if not allow_chain_multicast then
+                    addReason(reasons, "chain_multicast_deferred")
+                end
             end
             if hasOpcode(slot.prefix_ops, "Spread") or hasOpcode(slot.prefix_ops, "Burst") then
                 result.has_chain_with_pattern = true
@@ -405,7 +427,41 @@ function chain_targeting.inspectPlan(plan, opts)
         end
     end
 
-    if total_chain_ops > 1 or #chain_slots > 1 then
+    local logical_chain_slot_count = #chain_slots
+    local chain_multicast_fanout_slots = false
+    if allow_chain_multicast and #chain_slots > 1 then
+        local first = chain_slots[1] and chain_slots[1].slot or nil
+        local same_group = first ~= nil and hasOpcode(first.prefix_ops, "Multicast")
+        for _, entry in ipairs(chain_slots) do
+            local slot = entry.slot
+            if slot == nil
+                or not hasOpcode(slot.prefix_ops, "Multicast")
+                or tonumber(slot.group_index) ~= tonumber(first.group_index)
+                or tostring(slot.kind) ~= tostring(first.kind)
+                or tostring(slot.parent_slot_id) ~= tostring(first.parent_slot_id)
+                or tostring(slot.source_postfix_opcode) ~= tostring(first.source_postfix_opcode)
+                or entry.count ~= 1 then
+                same_group = false
+                break
+            end
+        end
+        if same_group then
+            chain_multicast_fanout_slots = true
+            logical_chain_slot_count = 1
+            result.payload_slot_ids = {}
+            for _, entry in ipairs(chain_slots) do
+                result.payload_slot_ids[#result.payload_slot_ids + 1] = entry.slot.slot_id
+            end
+            result.chain_multicast_fanout_count = math.max(#chain_slots, result.chain_multicast_fanout_count or 1)
+        end
+    end
+
+    if result.has_chain_with_multicast == true
+        and result.chain_multicast_fanout_count > chain_multicast_fanout_cap then
+        addReason(reasons, "chain_multicast_fanout_cap_exceeded")
+    end
+
+    if (total_chain_ops > 1 or #chain_slots > 1) and not chain_multicast_fanout_slots then
         result.has_nested_chain = true
         result.has_chain_recursion = true
         addReason(reasons, "chain_recursion_deferred")
@@ -413,7 +469,7 @@ function chain_targeting.inspectPlan(plan, opts)
 
     if #chain_slots == 0 then
         addReason(reasons, "no_chain")
-    elseif #chain_slots == 1 then
+    elseif logical_chain_slot_count == 1 then
         local chain_slot = chain_slots[1].slot
         result.payload_slot_id = chain_slot.slot_id
 
@@ -451,13 +507,16 @@ function chain_targeting.inspectPlan(plan, opts)
         end
     end
 
-    result.exceeds_job_cap = result.max_hops > max_jobs
+    local jobs_per_hop = result.has_chain_with_multicast == true and (tonumber(result.chain_multicast_fanout_count) or 1) or 1
+    result.would_enqueue_jobs = (tonumber(result.max_hops) or 0) * jobs_per_hop
+    result.would_launch_payloads = result.would_enqueue_jobs
+    result.exceeds_job_cap = result.would_enqueue_jobs > max_jobs
     if result.exceeds_job_cap then
         addReason(reasons, "chain_job_cap_exceeded")
     end
 
     result.chain_candidate = result.has_chain == true
-        and #chain_slots == 1
+        and logical_chain_slot_count == 1
         and (result.chain_shape == "source_chain_payload" or result.chain_shape == "trigger_payload_chain")
         and result.source_slot_id ~= nil
         and result.payload_slot_id ~= nil
@@ -465,12 +524,17 @@ function chain_targeting.inspectPlan(plan, opts)
         and result.requested_hops >= 1
         and result.has_nested_chain == false
         and result.has_chain_in_nested_payload == false
-        and result.has_chain_with_multicast == false
+        and (result.has_chain_with_multicast == false or allow_chain_multicast)
         and result.has_chain_with_pattern == false
         and result.has_chain_with_trigger_timer == false
         and result.has_chain_with_modifier_combo == false
         and result.exceeds_hop_cap == false
         and result.exceeds_job_cap == false
+        and (result.has_chain_with_multicast == false or result.chain_multicast_fanout_count <= chain_multicast_fanout_cap)
+
+    result.chain_multicast_runtime_candidate = result.chain_candidate == true
+        and result.has_chain_with_multicast == true
+        and allow_chain_multicast == true
 
     result.unsupported_reasons = sortedReasons(reasons)
     result.rejection_reason = result.chain_candidate and nil or firstReason(result.unsupported_reasons)

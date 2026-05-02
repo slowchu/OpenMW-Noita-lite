@@ -19,6 +19,8 @@ local next_job_index = 1
 local current_tick = 0
 local elapsed_seconds = 0
 local live_launches_this_update = 0
+local live_launch_density_groups = {}
+local LAUNCH_DENSITY_GROUP_TTL_TICKS = 256
 
 local function cloneJob(job)
     if type(job) ~= "table" then
@@ -90,6 +92,67 @@ local function isLiveTimerPayloadJob(kind)
     return kind == orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND
 end
 
+local function clampPositiveInteger(value, fallback)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        n = tonumber(fallback)
+    end
+    n = tonumber(n) or 1
+    return math.max(1, math.floor(n))
+end
+
+local function defaultInitialBurstCap(job, sustained_cap)
+    if job and job.chaos_budget_profile == "chaos" then
+        return limits.MAX_LIVE_LAUNCHES_INITIAL_BURST_CHAOS or sustained_cap
+    end
+    return sustained_cap
+end
+
+local function launchDensityGroupKey(job)
+    if type(job) ~= "table" then
+        return nil
+    end
+    if type(job.launch_density_group_key) == "string" and job.launch_density_group_key ~= "" then
+        return job.launch_density_group_key
+    end
+    local root = job.cast_id or job.recipe_id or "unknown_cast"
+    local route = job.timer_id or job.source_job_id or job.parent_job_id or job.source_slot_id or "root"
+    return table.concat({
+        tostring(root),
+        tostring(job.kind or "live_launch"),
+        tostring(route),
+    }, ":")
+end
+
+local function pruneLaunchDensityGroups()
+    for key, state in pairs(live_launch_density_groups) do
+        local burst_tick = tonumber(state and state.burst_tick) or current_tick
+        if current_tick - burst_tick > LAUNCH_DENSITY_GROUP_TTL_TICKS then
+            live_launch_density_groups[key] = nil
+        end
+    end
+end
+
+local function liveLaunchCapForJob(job, default_sustained_cap)
+    local sustained_cap = clampPositiveInteger(firstNonNil(
+        job.max_live_launches_per_tick,
+        job.max_live_launches_per_update
+    ), default_sustained_cap)
+    local burst_cap = clampPositiveInteger(firstNonNil(
+        job.max_live_launches_initial_burst,
+        job.max_live_launches_initial_burst_per_update
+    ), defaultInitialBurstCap(job, sustained_cap))
+    burst_cap = math.min(
+        math.max(sustained_cap, burst_cap),
+        limits.MAX_LIVE_LAUNCHES_INITIAL_BURST_HARD or burst_cap
+    )
+
+    local group_key = launchDensityGroupKey(job)
+    local state = group_key and live_launch_density_groups[group_key] or nil
+    local burst_available = burst_cap > sustained_cap and (state == nil or state.burst_tick == current_tick)
+    return burst_available and burst_cap or sustained_cap, sustained_cap, burst_cap, group_key, burst_available and state == nil
+end
+
 local function enqueueInternal(job)
     local job_id = string.format("job_%d", next_job_index)
     next_job_index = next_job_index + 1
@@ -115,11 +178,28 @@ local function enqueueInternal(job)
         fanout_count = job.fanout_count,
         max_live_launches_per_tick = job.max_live_launches_per_tick,
         max_live_launches_per_update = job.max_live_launches_per_update,
+        max_live_launches_initial_burst = job.max_live_launches_initial_burst,
+        max_live_launches_initial_burst_per_update = job.max_live_launches_initial_burst_per_update,
+        launch_density_group_key = job.launch_density_group_key,
         chaos_budget_profile = job.chaos_budget_profile,
         pattern_kind = job.pattern_kind,
         pattern_index = job.pattern_index,
         pattern_count = job.pattern_count,
         pattern_direction_key = job.pattern_direction_key,
+        bounce_runtime = job.bounce_runtime == true,
+        bounce_role = job.bounce_role,
+        bounce_id = job.bounce_id,
+        bounce_index = job.bounce_index,
+        bounce_max = job.bounce_max,
+        bounce_power = job.bounce_power,
+        bounceEnabled = job.bounceEnabled,
+        bounceMax = job.bounceMax,
+        bouncePower = job.bouncePower,
+        detonateOnActorHit = job.detonateOnActorHit,
+        bounce_detonate_on_actor_hit = job.bounce_detonate_on_actor_hit,
+        bounce_trigger_payload_slot_id = job.bounce_trigger_payload_slot_id,
+        bounce_manual_detonation = job.bounce_manual_detonation,
+        bounce_final = job.bounce_final,
         chain_runtime = job.chain_runtime == true,
         chain_role = job.chain_role,
         chain_id = job.chain_id,
@@ -127,6 +207,13 @@ local function enqueueInternal(job)
         chain_max_hops = job.chain_max_hops,
         chain_targeting_mode = job.chain_targeting_mode,
         chain_target_provider = job.chain_target_provider,
+        branch_scope = job.branch_scope,
+        branch_id = job.branch_id,
+        branch_parent_id = job.branch_parent_id,
+        branch_kind = job.branch_kind,
+        branch_index = job.branch_index,
+        branch_count = job.branch_count,
+        chain_continuation_group_id = job.chain_continuation_group_id,
         current_hit_target_id = job.current_hit_target_id,
         selected_target_id = job.selected_target_id,
         previous_projectile_id = job.previous_projectile_id,
@@ -141,6 +228,7 @@ local function enqueueInternal(job)
         not_before_tick = job.not_before_tick,
         not_before_seconds = finiteNonNegative(job.not_before_seconds),
         source_slot_id = job.source_slot_id,
+        source_prefix_opcode = job.source_prefix_opcode,
         source_helper_engine_id = job.source_helper_engine_id,
         source_postfix_opcode = job.source_postfix_opcode,
         payload_slot_id = job.payload_slot_id,
@@ -274,6 +362,7 @@ function orchestrator.tick(opts)
         live_launches_this_update = 0
     end
     current_tick = current_tick + 1
+    pruneLaunchDensityGroups()
 
     local max_jobs = tonumber(options.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK
     local max_live_launches = tonumber(firstNonNil(
@@ -290,6 +379,8 @@ function orchestrator.tick(opts)
     local live_launch_count = 0
     local live_launch_throttled_count = 0
     local effective_live_launch_cap = max_live_launches
+    local effective_live_launch_burst_cap = max_live_launches
+    local initial_burst_used_count = 0
     local processed_order = {}
 
     local iterations = 0
@@ -302,13 +393,18 @@ function orchestrator.tick(opts)
 
         if job and job.status == "queued" then
             local job_live_launch_cap = max_live_launches
+            local job_live_launch_sustained_cap = max_live_launches
+            local job_live_launch_burst_cap = max_live_launches
+            local launch_density_group_key = nil
+            local should_mark_initial_burst = false
             if isLiveHelperJob(job.kind) then
-                job_live_launch_cap = tonumber(firstNonNil(
-                    job.max_live_launches_per_tick,
-                    job.max_live_launches_per_update
-                )) or max_live_launches
-                job_live_launch_cap = math.max(1, math.floor(math.min(max_live_launches, job_live_launch_cap)))
-                effective_live_launch_cap = math.min(effective_live_launch_cap, job_live_launch_cap)
+                job_live_launch_cap,
+                    job_live_launch_sustained_cap,
+                    job_live_launch_burst_cap,
+                    launch_density_group_key,
+                    should_mark_initial_burst = liveLaunchCapForJob(job, max_live_launches)
+                effective_live_launch_cap = math.min(effective_live_launch_cap, job_live_launch_sustained_cap)
+                effective_live_launch_burst_cap = math.max(effective_live_launch_burst_cap, job_live_launch_burst_cap)
             end
             local waiting, _, time_not_ready = notReady(job)
             if waiting then
@@ -342,6 +438,15 @@ function orchestrator.tick(opts)
                 runtime_stats.max("max_queue_depth", #queue)
             else
                 job.status = "running"
+                if should_mark_initial_burst and launch_density_group_key then
+                    live_launch_density_groups[launch_density_group_key] = {
+                        burst_tick = current_tick,
+                    }
+                    initial_burst_used_count = initial_burst_used_count + 1
+                    runtime_stats.inc("live_launch_density_initial_burst")
+                    runtime_stats.inc("chaos_budget_launch_density_initial_burst")
+                    runtime_stats.max("chaos_budget_max_live_launches_initial_burst_observed", job_live_launch_burst_cap)
+                end
                 if isLiveTimerPayloadJob(job.kind) and job.not_before_seconds ~= nil then
                     runtime_stats.inc("live_timer_real_delay_matured")
                 end
@@ -415,9 +520,10 @@ function orchestrator.tick(opts)
 
     if live_launch_throttled_count > 0 then
         log.info(string.format(
-            "SPELLFORGE_LIVE_LAUNCH_DENSITY_THROTTLED tick=%s cap=%d throttled=%d remaining=%d",
+            "SPELLFORGE_LIVE_LAUNCH_DENSITY_THROTTLED tick=%s cap=%d burst_cap=%d throttled=%d remaining=%d",
             tostring(current_tick),
             effective_live_launch_cap,
+            effective_live_launch_burst_cap,
             live_launch_throttled_count,
             #queue
         ))
@@ -437,7 +543,9 @@ function orchestrator.tick(opts)
         live_launch_count = live_launch_count,
         live_launches_this_update = live_launches_this_update,
         max_live_launches_per_tick = effective_live_launch_cap,
+        max_live_launches_initial_burst = effective_live_launch_burst_cap,
         live_launch_throttled_count = live_launch_throttled_count,
+        initial_burst_used_count = initial_burst_used_count,
     }
 end
 
@@ -484,6 +592,7 @@ function orchestrator.clearForTests()
     current_tick = 0
     elapsed_seconds = 0
     live_launches_this_update = 0
+    live_launch_density_groups = {}
 end
 
 return orchestrator
