@@ -76,8 +76,11 @@ local PERFORMANCE_STRESS_TARGET = {
 
 local function cloneParams(params)
     local out = {}
+    if type(params) ~= "table" then
+        return out
+    end
     local keys = {}
-    for key in pairs(params or {}) do
+    for key in pairs(params) do
         keys[#keys + 1] = key
     end
     table.sort(keys)

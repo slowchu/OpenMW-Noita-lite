@@ -76,7 +76,7 @@ local function validateSequence(nodes, state, path, depth)
                 appendError(state.errors, node_path, "Trigger/Timer must be preceded by emitter in same scope")
             end
 
-            local params = node.params or {}
+            local params = type(node.params) == "table" and node.params or {}
             for key, spec in pairs(def.parameters) do
                 if params[key] == nil then
                     appendError(state.errors, node_path, string.format("Missing parameter %s for %s", key, opcode_name))

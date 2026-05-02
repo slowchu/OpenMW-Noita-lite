@@ -56,6 +56,99 @@ local function mappingHasAreaEffect(mapping)
     return false
 end
 
+local function applyPostLaunchPhysics(launch_data, launch_result, capabilities)
+    local out = {}
+    local projectile_id = launch_result and launch_result.projectile_id or nil
+    local has_bounce = launch_data.bounceEnabled ~= nil
+        or launch_data.bounceMax ~= nil
+        or launch_data.bouncePower ~= nil
+    local has_actor_toggle = launch_data.detonateOnActorHit ~= nil
+    if projectile_id == nil then
+        if has_bounce or has_actor_toggle then
+            runtime_stats.inc("sfp_post_launch_physics_projectile_missing")
+            out.projectile_missing = true
+        end
+        return out
+    end
+
+    if (has_bounce or has_actor_toggle) and capabilities and capabilities.has_setSpellPhysics then
+        local physics = {}
+        copyIfPresent(physics, "bounceEnabled", launch_data.bounceEnabled)
+        copyIfPresent(physics, "bounceMax", launch_data.bounceMax)
+        copyIfPresent(physics, "bouncePower", launch_data.bouncePower)
+        copyIfPresent(physics, "detonateOnActorHit", launch_data.detonateOnActorHit)
+        local result = sfp_adapter.setSpellPhysics(projectile_id, physics)
+        if has_bounce then
+            out.bounce_attempted = true
+            runtime_stats.inc("sfp_post_launch_bounce_attempts")
+            out.bounce_ok = result.ok == true
+            out.bounce_error = result.error
+            if out.bounce_ok then
+                runtime_stats.inc("sfp_post_launch_bounce_ok")
+            else
+                runtime_stats.inc("sfp_post_launch_bounce_failed")
+            end
+        end
+        if has_actor_toggle then
+            out.detonate_on_actor_attempted = true
+            runtime_stats.inc("sfp_post_launch_actor_toggle_attempts")
+            out.detonate_on_actor_ok = result.ok == true
+            out.detonate_on_actor_error = result.error
+            if out.detonate_on_actor_ok then
+                runtime_stats.inc("sfp_post_launch_actor_toggle_ok")
+            else
+                runtime_stats.inc("sfp_post_launch_actor_toggle_failed")
+            end
+        end
+        return out
+    end
+
+    if has_bounce then
+        out.bounce_attempted = true
+        runtime_stats.inc("sfp_post_launch_bounce_attempts")
+        if capabilities and capabilities.has_setSpellBounce then
+            local result = sfp_adapter.setSpellBounce(
+                projectile_id,
+                launch_data.bounceEnabled == true,
+                launch_data.bounceMax,
+                launch_data.bouncePower
+            )
+            out.bounce_ok = result.ok == true
+            out.bounce_error = result.error
+            if out.bounce_ok then
+                runtime_stats.inc("sfp_post_launch_bounce_ok")
+            else
+                runtime_stats.inc("sfp_post_launch_bounce_failed")
+            end
+        else
+            out.bounce_ok = false
+            out.bounce_error = "I.MagExp.setSpellBounce missing"
+            runtime_stats.inc("sfp_post_launch_bounce_failed")
+        end
+    end
+
+    if has_actor_toggle then
+        out.detonate_on_actor_attempted = true
+        runtime_stats.inc("sfp_post_launch_actor_toggle_attempts")
+        if capabilities and capabilities.has_setSpellDetonateOnActor then
+            local result = sfp_adapter.setSpellDetonateOnActor(projectile_id, launch_data.detonateOnActorHit)
+            out.detonate_on_actor_ok = result.ok == true
+            out.detonate_on_actor_error = result.error
+            if out.detonate_on_actor_ok then
+                runtime_stats.inc("sfp_post_launch_actor_toggle_ok")
+            else
+                runtime_stats.inc("sfp_post_launch_actor_toggle_failed")
+            end
+        else
+            out.detonate_on_actor_ok = false
+            out.detonate_on_actor_error = "I.MagExp.setSpellDetonateOnActor missing"
+            runtime_stats.inc("sfp_post_launch_actor_toggle_failed")
+        end
+    end
+
+    return out
+end
+
 function runtime_launch.launchHelper(input)
     local launch = input or {}
     runtime_stats.inc("sfp_launch_attempts")
@@ -105,6 +198,7 @@ function runtime_launch.launchHelper(input)
         final_fanout_count = launch.final_fanout_count,
         final_fanout_index = launch.final_fanout_index,
         source_slot_id = launch.source_slot_id,
+        source_prefix_opcode = launch.source_prefix_opcode,
         source_postfix_opcode = launch.source_postfix_opcode,
         payload_slot_id = launch.payload_slot_id,
         source_helper_engine_id = launch.source_helper_engine_id,
@@ -140,9 +234,26 @@ function runtime_launch.launchHelper(input)
         chain_max_hops = launch.chain_max_hops,
         chain_targeting_mode = launch.chain_targeting_mode,
         chain_target_provider = launch.chain_target_provider,
+        branch_scope = launch.branch_scope,
+        branch_id = launch.branch_id,
+        branch_parent_id = launch.branch_parent_id,
+        branch_kind = launch.branch_kind,
+        branch_index = launch.branch_index,
+        branch_count = launch.branch_count,
+        chain_continuation_group_id = launch.chain_continuation_group_id,
         current_hit_target_id = launch.current_hit_target_id,
         selected_target_id = launch.selected_target_id,
         previous_projectile_id = launch.previous_projectile_id,
+        bounce_runtime = launch.bounce_runtime,
+        bounce_role = launch.bounce_role,
+        bounce_id = launch.bounce_id,
+        bounce_index = launch.bounce_index,
+        bounce_max = launch.bounce_max,
+        bounce_power = launch.bounce_power,
+        bounce_detonate_on_actor_hit = launch.bounce_detonate_on_actor_hit,
+        bounce_trigger_payload_slot_id = launch.bounce_trigger_payload_slot_id,
+        bounce_manual_detonation = launch.bounce_manual_detonation,
+        bounce_final = launch.bounce_final,
         payload_modifier_kind = launch.payload_modifier_kind,
         speed_plus = launch.speed_plus,
         speed_plus_mode = launch.speed_plus_mode,
@@ -161,6 +272,19 @@ function runtime_launch.launchHelper(input)
         size_plus_capped = launch.size_plus_capped,
         size_plus_base_area = launch.size_plus_base_area,
         size_plus_area = launch.size_plus_area,
+        homing = launch.homing,
+        homing_mode = launch.homing_mode,
+        homing_force = launch.homing_force,
+        homing_field = launch.homing_field,
+        homing_target_id = launch.homing_target_id,
+        homing_target_provider = launch.homing_target_provider,
+        homing_target_kind = launch.homing_target_kind,
+        homing_candidate_count = launch.homing_candidate_count,
+        homing_actor_candidate_count = launch.homing_actor_candidate_count,
+        homing_creature_candidate_count = launch.homing_creature_candidate_count,
+        homing_npc_candidate_count = launch.homing_npc_candidate_count,
+        homing_force_key = launch.homing_force_key,
+        homing_direction_key = launch.homing_direction_key,
     })
     if supplied_user_data then
         for key, value in pairs(built_user_data) do
@@ -193,10 +317,30 @@ function runtime_launch.launchHelper(input)
     if type(max_speed) == "number" then
         launch_data.maxSpeed = max_speed
     end
+    local min_speed = firstNonNil(launch.minSpeed, launch.min_speed)
+    if type(min_speed) == "number" then
+        launch_data.minSpeed = min_speed
+    end
     local acceleration_exp = firstNonNil(launch.accelerationExp, launch.acceleration_exp)
     if type(acceleration_exp) == "number" then
         launch_data.accelerationExp = acceleration_exp
     end
+    copyIfPresent(launch_data, "itemObject", firstNonNil(launch.itemObject, launch.item_object, launch.item))
+    copyIfPresent(launch_data, "casterLinked", firstNonNil(launch.casterLinked, launch.caster_linked))
+    copyIfPresent(launch_data, "forceVec", firstNonNil(launch.forceVec, launch.force_vec))
+    copyIfPresent(launch_data, "maxLifetime", firstNonNil(launch.maxLifetime, launch.max_lifetime))
+    copyIfPresent(launch_data, "spawnOffset", firstNonNil(launch.spawnOffset, launch.spawn_offset))
+    copyIfPresent(launch_data, "isPaused", firstNonNil(launch.isPaused, launch.is_paused))
+    copyIfPresent(launch_data, "bounceEnabled", firstNonNil(launch.bounceEnabled, launch.bounce_enabled))
+    copyIfPresent(launch_data, "bounceMax", firstNonNil(launch.bounceMax, launch.bounce_max))
+    copyIfPresent(launch_data, "bouncePower", firstNonNil(launch.bouncePower, launch.bounce_power))
+    copyIfPresent(launch_data, "detonateOnActorHit", firstNonNil(launch.detonateOnActorHit, launch.detonate_on_actor_hit))
+    copyIfPresent(launch_data, "impactImpulse", firstNonNil(launch.impactImpulse, launch.impact_impulse))
+    copyIfPresent(launch_data, "spellType", firstNonNil(launch.spellType, launch.spell_type))
+    copyIfPresent(launch_data, "area", firstNonNil(launch.area))
+    copyIfPresent(launch_data, "unreflectable", firstNonNil(launch.unreflectable))
+    copyIfPresent(launch_data, "nonRecastable", firstNonNil(launch.nonRecastable, launch.non_recastable))
+    copyIfPresent(launch_data, "itemRequirements", firstNonNil(launch.itemRequirements, launch.item_requirements))
 
     local presentation = mapping and mapping.presentation or nil
     local area_vfx_rec_id = firstNonNil(
@@ -251,6 +395,29 @@ function runtime_launch.launchHelper(input)
     if hit_model then
         launch_data.hitModel = hit_model
     end
+    local bolt_sound = nonEmptyString(firstNonNil(
+        launch.boltSound,
+        launch.bolt_sound,
+        presentation and presentation.boltSound,
+        presentation and presentation.bolt_sound
+    ))
+    if bolt_sound then
+        launch_data.boltSound = bolt_sound
+    end
+    copyIfPresent(launch_data, "boltLightId", firstNonNil(
+        launch.boltLightId,
+        launch.bolt_light_id,
+        presentation and presentation.boltLightId,
+        presentation and presentation.bolt_light_id
+    ))
+    copyIfPresent(launch_data, "spinSpeed", firstNonNil(
+        launch.spinSpeed,
+        launch.spin_speed,
+        presentation and presentation.spinSpeed,
+        presentation and presentation.spin_speed
+    ))
+    copyIfPresent(launch_data, "muteCastGlow", firstNonNil(launch.muteCastGlow, launch.mute_cast_glow))
+    copyIfPresent(launch_data, "continuousVfx", firstNonNil(launch.continuousVfx, launch.continuous_vfx))
     copyIfPresent(launch_data, "excludeTarget", firstNonNil(launch.excludeTarget, launch.exclude_target))
     copyIfPresent(launch_data, "forcedEffects", firstNonNil(launch.forcedEffects, launch.forced_effects))
 
@@ -276,6 +443,7 @@ function runtime_launch.launchHelper(input)
     else
         runtime_stats.inc("sfp_projectile_id_missing")
     end
+    local post_launch_physics = applyPostLaunchPhysics(launch_data, launch_result, capabilities)
 
     local registry_entry = projectile_registry.registerLaunch(launch_result, {
         recipe_id = launch.recipe_id,
@@ -308,14 +476,40 @@ function runtime_launch.launchHelper(input)
         registry_entry = registry_entry,
         user_data = user_data,
         forwarded_fields = launch_result.forwarded_fields,
+        post_launch_physics = post_launch_physics,
+        post_launch_bounce_attempted = post_launch_physics.bounce_attempted == true,
+        post_launch_bounce_ok = post_launch_physics.bounce_ok == true,
+        post_launch_bounce_error = post_launch_physics.bounce_error,
+        post_launch_detonate_on_actor_attempted = post_launch_physics.detonate_on_actor_attempted == true,
+        post_launch_detonate_on_actor_ok = post_launch_physics.detonate_on_actor_ok == true,
+        post_launch_detonate_on_actor_error = post_launch_physics.detonate_on_actor_error,
+        minSpeed = launch_data.minSpeed,
         accelerationExp = launch_data.accelerationExp,
+        forceVec = launch_data.forceVec,
+        maxLifetime = launch_data.maxLifetime,
+        spawnOffset = launch_data.spawnOffset,
+        isPaused = launch_data.isPaused,
+        bounceEnabled = launch_data.bounceEnabled,
+        bounceMax = launch_data.bounceMax,
+        bouncePower = launch_data.bouncePower,
+        detonateOnActorHit = launch_data.detonateOnActorHit,
+        impactImpulse = launch_data.impactImpulse,
         areaVfxRecId = launch_data.areaVfxRecId,
         areaVfxScale = launch_data.areaVfxScale,
         vfxRecId = launch_data.vfxRecId,
         boltModel = launch_data.boltModel,
         hitModel = launch_data.hitModel,
+        boltSound = launch_data.boltSound,
+        boltLightId = launch_data.boltLightId,
+        spinSpeed = launch_data.spinSpeed,
+        muteCastGlow = launch_data.muteCastGlow,
+        continuousVfx = launch_data.continuousVfx,
         excludeTarget = launch_data.excludeTarget,
         forcedEffects = launch_data.forcedEffects,
+        spellType = launch_data.spellType,
+        area = launch_data.area,
+        unreflectable = launch_data.unreflectable,
+        nonRecastable = launch_data.nonRecastable,
         warnings = launch_result.warnings or {},
         capability_notes = launch_result.capability_notes or {},
     }
@@ -384,6 +578,7 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
         final_fanout_index = payload.final_fanout_index or job.final_fanout_index,
         cast_id = payload.cast_id or job.cast_id,
         source_slot_id = payload.source_slot_id,
+        source_prefix_opcode = payload.source_prefix_opcode,
         source_postfix_opcode = payload.source_postfix_opcode or mapping.source_postfix_opcode,
         payload_slot_id = payload.payload_slot_id,
         source_helper_engine_id = payload.source_helper_engine_id,
@@ -423,13 +618,35 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
         chain_max_hops = payload.chain_max_hops or job.chain_max_hops,
         chain_targeting_mode = payload.chain_targeting_mode or job.chain_targeting_mode,
         chain_target_provider = payload.chain_target_provider or job.chain_target_provider,
+        branch_scope = payload.branch_scope or job.branch_scope,
+        branch_id = payload.branch_id or job.branch_id,
+        branch_parent_id = payload.branch_parent_id or job.branch_parent_id,
+        branch_kind = payload.branch_kind or job.branch_kind,
+        branch_index = payload.branch_index or job.branch_index,
+        branch_count = payload.branch_count or job.branch_count,
+        chain_continuation_group_id = payload.chain_continuation_group_id or job.chain_continuation_group_id,
         current_hit_target_id = payload.current_hit_target_id or job.current_hit_target_id,
         selected_target_id = payload.selected_target_id or job.selected_target_id,
         previous_projectile_id = payload.previous_projectile_id or job.previous_projectile_id,
+        bounceEnabled = firstNonNil(payload.bounceEnabled, payload.bounce_enabled, job.bounceEnabled, job.bounce_enabled),
+        bounceMax = firstNonNil(payload.bounceMax, payload.bounce_max, job.bounceMax, job.bounce_max),
+        bouncePower = firstNonNil(payload.bouncePower, payload.bounce_power, job.bouncePower, job.bounce_power),
+        detonateOnActorHit = firstNonNil(payload.detonateOnActorHit, payload.detonate_on_actor_hit, job.detonateOnActorHit, job.detonate_on_actor_hit),
+        bounce_runtime = firstNonNil(payload.bounce_runtime, job.bounce_runtime),
+        bounce_role = firstNonNil(payload.bounce_role, job.bounce_role),
+        bounce_id = firstNonNil(payload.bounce_id, job.bounce_id),
+        bounce_index = firstNonNil(payload.bounce_index, job.bounce_index),
+        bounce_max = firstNonNil(payload.bounce_max, job.bounce_max),
+        bounce_power = firstNonNil(payload.bounce_power, job.bounce_power),
+        bounce_detonate_on_actor_hit = firstNonNil(payload.bounce_detonate_on_actor_hit, job.bounce_detonate_on_actor_hit),
+        bounce_trigger_payload_slot_id = firstNonNil(payload.bounce_trigger_payload_slot_id, job.bounce_trigger_payload_slot_id),
+        bounce_manual_detonation = firstNonNil(payload.bounce_manual_detonation, job.bounce_manual_detonation),
+        bounce_final = firstNonNil(payload.bounce_final, job.bounce_final),
         payload_modifier_kind = payload.payload_modifier_kind or job.payload_modifier_kind,
         speed = firstNonNil(payload.speed, job.speed),
         maxSpeed = firstNonNil(payload.maxSpeed, job.maxSpeed),
         accelerationExp = firstNonNil(payload.accelerationExp, payload.acceleration_exp, job.accelerationExp, job.acceleration_exp),
+        forceVec = firstNonNil(payload.forceVec, payload.force_vec, job.forceVec, job.force_vec),
         areaVfxRecId = firstNonNil(payload.areaVfxRecId, payload.area_vfx_rec_id, job.areaVfxRecId, job.area_vfx_rec_id),
         areaVfxScale = firstNonNil(payload.areaVfxScale, payload.area_vfx_scale, job.areaVfxScale, job.area_vfx_scale),
         vfxRecId = firstNonNil(payload.vfxRecId, payload.vfx_rec_id, job.vfxRecId, job.vfx_rec_id),
@@ -454,6 +671,19 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
         size_plus_capped = payload.size_plus_capped or job.size_plus_capped,
         size_plus_base_area = payload.size_plus_base_area or job.size_plus_base_area,
         size_plus_area = payload.size_plus_area or job.size_plus_area,
+        homing = payload.homing or job.homing,
+        homing_mode = payload.homing_mode or job.homing_mode,
+        homing_force = payload.homing_force or job.homing_force,
+        homing_field = payload.homing_field or job.homing_field,
+        homing_target_id = payload.homing_target_id or job.homing_target_id,
+        homing_target_provider = payload.homing_target_provider or job.homing_target_provider,
+        homing_target_kind = payload.homing_target_kind or job.homing_target_kind,
+        homing_candidate_count = payload.homing_candidate_count or job.homing_candidate_count,
+        homing_actor_candidate_count = payload.homing_actor_candidate_count or job.homing_actor_candidate_count,
+        homing_creature_candidate_count = payload.homing_creature_candidate_count or job.homing_creature_candidate_count,
+        homing_npc_candidate_count = payload.homing_npc_candidate_count or job.homing_npc_candidate_count,
+        homing_force_key = payload.homing_force_key or job.homing_force_key,
+        homing_direction_key = payload.homing_direction_key or job.homing_direction_key,
     })
     if not result.ok then
         return false, tostring(result.error), nil
@@ -480,6 +710,7 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
     job.final_fanout_index = payload.final_fanout_index or job.final_fanout_index
     job.payload_slot_id = payload.payload_slot_id
     job.source_slot_id = payload.source_slot_id
+    job.source_prefix_opcode = payload.source_prefix_opcode
     job.source_helper_engine_id = payload.source_helper_engine_id
     job.source_postfix_opcode = payload.source_postfix_opcode or mapping.source_postfix_opcode
     job.trigger_route = payload.trigger_route
@@ -497,15 +728,41 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
     job.timer_id = payload.timer_id
     job.speed = firstNonNil(payload.speed, job.speed)
     job.maxSpeed = firstNonNil(payload.maxSpeed, job.maxSpeed)
+    job.minSpeed = firstNonNil(result.minSpeed, payload.minSpeed, payload.min_speed, job.minSpeed, job.min_speed)
     job.accelerationExp = firstNonNil(result.accelerationExp, payload.accelerationExp, payload.acceleration_exp, job.accelerationExp, job.acceleration_exp)
+    job.forceVec = firstNonNil(result.forceVec, payload.forceVec, payload.force_vec, job.forceVec, job.force_vec)
+    job.maxLifetime = firstNonNil(result.maxLifetime, payload.maxLifetime, payload.max_lifetime, job.maxLifetime, job.max_lifetime)
+    job.spawnOffset = firstNonNil(result.spawnOffset, payload.spawnOffset, payload.spawn_offset, job.spawnOffset, job.spawn_offset)
+    job.isPaused = firstNonNil(result.isPaused, payload.isPaused, payload.is_paused, job.isPaused, job.is_paused)
+    job.bounceEnabled = firstNonNil(result.bounceEnabled, payload.bounceEnabled, payload.bounce_enabled, job.bounceEnabled, job.bounce_enabled)
+    job.bounceMax = firstNonNil(result.bounceMax, payload.bounceMax, payload.bounce_max, job.bounceMax, job.bounce_max)
+    job.bouncePower = firstNonNil(result.bouncePower, payload.bouncePower, payload.bounce_power, job.bouncePower, job.bounce_power)
+    job.detonateOnActorHit = firstNonNil(result.detonateOnActorHit, payload.detonateOnActorHit, payload.detonate_on_actor_hit, job.detonateOnActorHit, job.detonate_on_actor_hit)
+    job.impactImpulse = firstNonNil(result.impactImpulse, payload.impactImpulse, payload.impact_impulse, job.impactImpulse, job.impact_impulse)
     job.areaVfxRecId = firstNonNil(result.areaVfxRecId, payload.areaVfxRecId, payload.area_vfx_rec_id, job.areaVfxRecId, job.area_vfx_rec_id)
     job.areaVfxScale = firstNonNil(result.areaVfxScale, payload.areaVfxScale, payload.area_vfx_scale, job.areaVfxScale, job.area_vfx_scale)
     job.vfxRecId = firstNonNil(result.vfxRecId, payload.vfxRecId, payload.vfx_rec_id, job.vfxRecId, job.vfx_rec_id)
     job.boltModel = firstNonNil(result.boltModel, payload.boltModel, payload.bolt_model, job.boltModel, job.bolt_model)
     job.hitModel = firstNonNil(result.hitModel, payload.hitModel, payload.hit_model, job.hitModel, job.hit_model)
+    job.boltSound = firstNonNil(result.boltSound, payload.boltSound, payload.bolt_sound, job.boltSound, job.bolt_sound)
+    job.boltLightId = firstNonNil(result.boltLightId, payload.boltLightId, payload.bolt_light_id, job.boltLightId, job.bolt_light_id)
+    job.spinSpeed = firstNonNil(result.spinSpeed, payload.spinSpeed, payload.spin_speed, job.spinSpeed, job.spin_speed)
+    job.muteCastGlow = firstNonNil(result.muteCastGlow, payload.muteCastGlow, payload.mute_cast_glow, job.muteCastGlow, job.mute_cast_glow)
+    job.continuousVfx = firstNonNil(result.continuousVfx, payload.continuousVfx, payload.continuous_vfx, job.continuousVfx, job.continuous_vfx)
     job.excludeTarget = firstNonNil(result.excludeTarget, payload.excludeTarget, payload.exclude_target, job.excludeTarget, job.exclude_target)
     job.forcedEffects = firstNonNil(result.forcedEffects, payload.forcedEffects, payload.forced_effects, job.forcedEffects, job.forced_effects)
+    job.spellType = firstNonNil(result.spellType, payload.spellType, payload.spell_type, job.spellType, job.spell_type)
+    job.area = firstNonNil(result.area, payload.area, job.area)
+    job.unreflectable = firstNonNil(result.unreflectable, payload.unreflectable, job.unreflectable)
+    job.nonRecastable = firstNonNil(result.nonRecastable, payload.nonRecastable, payload.non_recastable, job.nonRecastable, job.non_recastable)
     job.forwarded_launch_fields = result.forwarded_fields
+    job.post_launch_physics = result.post_launch_physics
+    job.post_launch_bounce_attempted = result.post_launch_bounce_attempted == true
+    job.post_launch_bounce_ok = result.post_launch_bounce_ok == true
+    job.post_launch_bounce_error = result.post_launch_bounce_error
+    job.post_launch_detonate_on_actor_attempted = result.post_launch_detonate_on_actor_attempted == true
+    job.post_launch_detonate_on_actor_ok = result.post_launch_detonate_on_actor_ok == true
+    job.post_launch_detonate_on_actor_error = result.post_launch_detonate_on_actor_error
     job.chain_runtime = payload.chain_runtime or job.chain_runtime
     job.chain_role = payload.chain_role or job.chain_role
     job.chain_id = payload.chain_id or job.chain_id
@@ -513,9 +770,32 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
     job.chain_max_hops = payload.chain_max_hops or job.chain_max_hops
     job.chain_targeting_mode = payload.chain_targeting_mode or job.chain_targeting_mode
     job.chain_target_provider = payload.chain_target_provider or job.chain_target_provider
+    job.branch_scope = payload.branch_scope or job.branch_scope
+    job.branch_id = payload.branch_id or job.branch_id
+    job.branch_parent_id = payload.branch_parent_id or job.branch_parent_id
+    job.branch_kind = payload.branch_kind or job.branch_kind
+    job.branch_index = payload.branch_index or job.branch_index
+    job.branch_count = payload.branch_count or job.branch_count
+    job.chain_continuation_group_id = payload.chain_continuation_group_id or job.chain_continuation_group_id
     job.current_hit_target_id = payload.current_hit_target_id or job.current_hit_target_id
     job.selected_target_id = payload.selected_target_id or job.selected_target_id
     job.previous_projectile_id = payload.previous_projectile_id or job.previous_projectile_id
+    job.homing_target_provider = payload.homing_target_provider or job.homing_target_provider
+    job.homing_target_kind = payload.homing_target_kind or job.homing_target_kind
+    job.homing_candidate_count = payload.homing_candidate_count or job.homing_candidate_count
+    job.homing_actor_candidate_count = payload.homing_actor_candidate_count or job.homing_actor_candidate_count
+    job.homing_creature_candidate_count = payload.homing_creature_candidate_count or job.homing_creature_candidate_count
+    job.homing_npc_candidate_count = payload.homing_npc_candidate_count or job.homing_npc_candidate_count
+    job.bounce_runtime = firstNonNil(payload.bounce_runtime, job.bounce_runtime)
+    job.bounce_role = firstNonNil(payload.bounce_role, job.bounce_role)
+    job.bounce_id = firstNonNil(payload.bounce_id, job.bounce_id)
+    job.bounce_index = firstNonNil(payload.bounce_index, job.bounce_index)
+    job.bounce_max = firstNonNil(payload.bounce_max, job.bounce_max)
+    job.bounce_power = firstNonNil(payload.bounce_power, job.bounce_power)
+    job.bounce_detonate_on_actor_hit = firstNonNil(payload.bounce_detonate_on_actor_hit, job.bounce_detonate_on_actor_hit)
+    job.bounce_trigger_payload_slot_id = firstNonNil(payload.bounce_trigger_payload_slot_id, job.bounce_trigger_payload_slot_id)
+    job.bounce_manual_detonation = firstNonNil(payload.bounce_manual_detonation, job.bounce_manual_detonation)
+    job.bounce_final = firstNonNil(payload.bounce_final, job.bounce_final)
     job.payload_modifier_kind = payload.payload_modifier_kind or job.payload_modifier_kind
     job.speed_plus = payload.speed_plus or job.speed_plus
     job.speed_plus_mode = payload.speed_plus_mode or job.speed_plus_mode
@@ -534,6 +814,14 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
     job.size_plus_capped = payload.size_plus_capped or job.size_plus_capped
     job.size_plus_base_area = payload.size_plus_base_area or job.size_plus_base_area
     job.size_plus_area = payload.size_plus_area or job.size_plus_area
+    job.homing = payload.homing or job.homing
+    job.homing_mode = payload.homing_mode or job.homing_mode
+    job.homing_force = payload.homing_force or job.homing_force
+    job.homing_field = payload.homing_field or job.homing_field
+    job.homing_target_id = payload.homing_target_id or job.homing_target_id
+    job.homing_target_kind = payload.homing_target_kind or job.homing_target_kind
+    job.homing_force_key = payload.homing_force_key or job.homing_force_key
+    job.homing_direction_key = payload.homing_direction_key or job.homing_direction_key
     job.trace = job.trace or {}
     job.trace[#job.trace + 1] = tostring(job_kind or job.kind) .. " launchSpell accepted"
     return true, nil, nil

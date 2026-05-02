@@ -7,7 +7,10 @@ local FNV_PRIME_32 = 16777619
 
 local function sortedKeys(tbl)
     local keys = {}
-    for k in pairs(tbl or {}) do
+    if type(tbl) ~= "table" then
+        return keys
+    end
+    for k in pairs(tbl) do
         keys[#keys + 1] = k
     end
     table.sort(keys)

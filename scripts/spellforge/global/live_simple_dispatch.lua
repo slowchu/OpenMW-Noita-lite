@@ -11,7 +11,9 @@ local nested_trigger_timer = require("scripts.spellforge.global.nested_trigger_t
 local chain_target_provider = require("scripts.spellforge.global.chain_target_provider")
 local chain_targeting = require("scripts.spellforge.global.chain_targeting")
 local chaos_budget = require("scripts.spellforge.global.chaos_budget")
+local live_bounce = require("scripts.spellforge.global.live_bounce")
 local live_chain = require("scripts.spellforge.global.live_chain")
+local live_homing = require("scripts.spellforge.global.live_homing")
 local live_size_plus = require("scripts.spellforge.global.live_size_plus")
 local live_speed_plus = require("scripts.spellforge.global.live_speed_plus")
 local live_timer = require("scripts.spellforge.global.live_timer")
@@ -24,6 +26,7 @@ local next_live_cast_index = 1
 local seen_cast_ids = {}
 local CHAOS_HIGH_FANOUT_COUNT = limits.MAX_PAYLOAD_FANOUT_CHAOS
 local CHAOS_OVER_CAP_FANOUT_COUNT = limits.MAX_PAYLOAD_FANOUT_CHAOS + 1
+local CHAOS_CHAIN_MULTICAST_FANOUT_COUNT = limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS
 
 local SIMPLE_FIRE_DAMAGE_TARGET = {
     { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
@@ -61,6 +64,118 @@ local TRIGGER_FIRE_FROST_TARGET = {
     { id = "spellforge_trigger" },
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
+
+local BOUNCE_FIRE_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+local BOUNCE_TRIGGER_FIRE_FROST_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+local BOUNCE_TRIGGER_CHAIN_FROST_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+local BOUNCE_OVER_CAP_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = limits.MAX_BOUNCE_COUNT + 1 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+local BOUNCE_MULTICAST_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "spellforge_multicast", params = { count = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+local BOUNCE_TIMER_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_timer", params = { seconds = 1.0 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+local BOUNCE_CHAIN_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+local BOUNCE_SPEED_PLUS_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+local BOUNCE_SIZE_PLUS_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+local function applyBounceProbeMode(mode, opts)
+    if mode == "bounce_disabled" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
+        opts.force_bounce_disabled = true
+        opts.force_trigger_enabled = true
+    elseif mode == "bounce_source_only_dry_run" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_FIRE_TARGET }
+        opts.force_bounce_enabled = true
+    elseif mode == "bounce_dry_run" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+    elseif mode == "bounce_launch" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.dry_run = false
+    elseif mode == "bounce_chain_payload_dry_run" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_chain_runtime_enabled = true
+    elseif mode == "bounce_chain_payload_launch" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_chain_runtime_enabled = true
+        opts.dry_run = false
+    elseif mode == "bounce_over_cap" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_OVER_CAP_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+    elseif mode == "bounce_fanout_deferred" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_MULTICAST_TARGET }
+        opts.force_bounce_enabled = true
+    elseif mode == "bounce_timer_deferred" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TIMER_TARGET }
+        opts.force_bounce_enabled = true
+    elseif mode == "bounce_chain_deferred" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_CHAIN_TARGET }
+        opts.force_bounce_enabled = true
+    elseif mode == "bounce_speed_plus_deferred" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_SPEED_PLUS_TARGET }
+        opts.force_bounce_enabled = true
+    elseif mode == "bounce_size_plus_deferred" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_SIZE_PLUS_TARGET }
+        opts.force_bounce_enabled = true
+    else
+        return false
+    end
+    return true
+end
 
 local TIMER_FIRE_FROST_TARGET = {
     { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
@@ -135,6 +250,13 @@ local CHAIN_MULTICAST_TARGET = {
     { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
     { id = "spellforge_chain", params = { hops = 3 } },
     { id = "spellforge_multicast", params = { count = 3 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+local CHAIN_MULTICAST_X8_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_multicast", params = { count = CHAOS_CHAIN_MULTICAST_FANOUT_COUNT } },
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
 
@@ -234,6 +356,14 @@ local TRIGGER_CHAIN_MULTICAST_TARGET = {
     { id = "spellforge_trigger" },
     { id = "spellforge_chain", params = { hops = 3 } },
     { id = "spellforge_multicast", params = { count = 3 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+local TRIGGER_CHAIN_MULTICAST_X8_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_multicast", params = { count = CHAOS_CHAIN_MULTICAST_FANOUT_COUNT } },
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
 
@@ -554,8 +684,11 @@ local PRESENTATION_METADATA_FIELDS = {
 
 local function cloneParams(params)
     local out = {}
+    if type(params) ~= "table" then
+        return out
+    end
     local keys = {}
-    for key in pairs(params or {}) do
+    for key in pairs(params) do
         keys[#keys + 1] = key
     end
     table.sort(keys)
@@ -597,6 +730,28 @@ end
 local function firstErrorMessage(result)
     local first = result and result.errors and result.errors[1]
     return first and first.message or (result and result.error) or "unknown error"
+end
+
+local function firstPresent(...)
+    for i = 1, select("#", ...) do
+        local value = select(i, ...)
+        if value ~= nil then
+            return value
+        end
+    end
+    return nil
+end
+
+local function bounceDetonateOnActorHit(job, payload)
+    if job == nil then
+        return nil
+    end
+    return firstPresent(
+        job.detonateOnActorHit,
+        payload and payload.detonateOnActorHit,
+        job.bounce_detonate_on_actor_hit,
+        payload and payload.bounce_detonate_on_actor_hit
+    )
 end
 
 local function fallback(reason, details)
@@ -690,12 +845,19 @@ local function adapterLaunchFieldsProbe(payload)
         muteLight = true,
         speed = 1200,
         maxSpeed = 1800,
+        minSpeed = 100,
         accelerationExp = 0,
+        forceVec = { x = 0, y = 0, z = 100 },
+        maxLifetime = 5,
+        spawnOffset = 24,
+        muteCastGlow = true,
         areaVfxRecId = "spellforge_test_area_static",
         areaVfxScale = 1.25,
         vfxRecId = "spellforge_test_bolt_vfx",
         boltModel = "meshes/spellforge/test_bolt.nif",
         hitModel = "meshes/spellforge/test_impact.nif",
+        boltSound = "destruction bolt",
+        spinSpeed = 1.5,
     })
     local ordinary = sfp_adapter.forwardedLaunchFields({
         attacker = payload and (payload.actor or payload.sender) or true,
@@ -709,12 +871,19 @@ local function adapterLaunchFieldsProbe(payload)
             and fields.muteLight == true
             and fields.speed == true
             and fields.maxSpeed == true
+            and fields.minSpeed == true
             and fields.accelerationExp == true
+            and fields.forceVec == true
+            and fields.maxLifetime == true
+            and fields.spawnOffset == true
+            and fields.muteCastGlow == true
             and fields.areaVfxRecId == true
             and fields.areaVfxScale == true
             and fields.vfxRecId == true
             and fields.boltModel == true
             and fields.hitModel == true
+            and fields.boltSound == true
+            and fields.spinSpeed == true
             and ordinary.speed ~= true
             and ordinary.maxSpeed ~= true
             and ordinary.accelerationExp ~= true,
@@ -776,7 +945,12 @@ local function timerDetonationAuditProbe(payload)
         runtime_stats.inc("timer_source_detonation_blocked")
     end
     audit.request_id = payload and payload.request_id
-    audit.ok = audit.status == "blocked" or audit.status == "implementable" or audit.status == "pending"
+    audit.ok = audit.status == "blocked"
+        or audit.status == "implementable"
+        or audit.status == "pending"
+        or audit.status == "pending_projectile"
+        or audit.status == "pending_projectile_state"
+        or audit.status == "ready"
     audit.mode = "timer_detonation_audit"
     audit.timer_gameplay_delay_smoke = "implemented"
     audit.deterministic_fast_forward_smoke = "implemented"
@@ -1078,6 +1252,8 @@ local function chainHopCandidates(case_name)
         or case_name == "trigger_chain_speed_plus_3"
         or case_name == "direct_chain_size_plus_3"
         or case_name == "trigger_chain_size_plus_3"
+        or case_name == "direct_chain_multicast_8"
+        or case_name == "trigger_chain_multicast_8"
         or case_name == "simple" then
         return {
             [1] = {
@@ -1341,45 +1517,45 @@ local function simulateChainRuntime(dispatch, payload, provider, opts)
     end
 
     local source_hit = chainHitPayloadForJob(source_job, options.source_target_id or "A", payload, "source")
-    local hop_result = live_chain.handleHitPayload(source_hit, {
-        force_enabled = true,
-        candidate_provider = provider,
-    })
-    result.source_hit_result = hop_result
-    result.duplicate_source_result = live_chain.handleHitPayload(source_hit, {
-        force_enabled = true,
-        candidate_provider = provider,
-    })
-    local branch_source_hit = chainHitPayloadForJob(source_job, "B", payload, "source-branch")
-    branch_source_hit.projectileId = tostring(source_hit.projectileId or "source") .. ":branch"
-    result.branch_source_result = live_chain.handleHitPayload(branch_source_hit, {
-        force_enabled = true,
-        candidate_provider = provider,
-    })
-
-    while hop_result and hop_result.ok == true and hop_result.launch_count == 1 do
-        result.completed_hops = result.completed_hops + 1
-        result.chain_payload_launch_count = result.chain_payload_launch_count + 1
-        result.selected_target_ids[#result.selected_target_ids + 1] = hop_result.selected_target_id
-        local payload_job = hop_result.payload_job or (hop_result.jobs and hop_result.jobs[1])
-        result.chain_payload_jobs[#result.chain_payload_jobs + 1] = payload_job
-
-        local hit_payload = chainHitPayloadForJob(payload_job, hop_result.selected_target_id, payload, "hop" .. tostring(hop_result.chain_hop_index))
-        local next_result = live_chain.handleHitPayload(hit_payload, {
+    local probe_virtual_fanout_after = nil
+    if dispatch and dispatch.has_multicast_payload == true then
+        -- The smoke needs every branch's metadata, but only the first sibling can continue the Chain.
+        probe_virtual_fanout_after = tonumber(options.probe_virtual_fanout_after) or 1
+    end
+    local function chainHitOptions()
+        return {
             force_enabled = true,
             candidate_provider = provider,
-        })
+            simulate_update_ticks = true,
+            probe_virtual_fanout_after = probe_virtual_fanout_after,
+        }
+    end
+    local hop_result = live_chain.handleHitPayload(source_hit, chainHitOptions())
+    result.source_hit_result = hop_result
+    result.duplicate_source_result = live_chain.handleHitPayload(source_hit, chainHitOptions())
+    local branch_source_hit = chainHitPayloadForJob(source_job, "B", payload, "source-branch")
+    branch_source_hit.projectileId = tostring(source_hit.projectileId or "source") .. ":branch"
+    result.branch_source_result = live_chain.handleHitPayload(branch_source_hit, chainHitOptions())
+
+    while hop_result and hop_result.ok == true and (tonumber(hop_result.launch_count) or 0) >= 1 do
+        local launch_count = tonumber(hop_result.launch_count) or 1
+        result.completed_hops = result.completed_hops + 1
+        result.chain_payload_launch_count = result.chain_payload_launch_count + launch_count
+        result.selected_target_ids[#result.selected_target_ids + 1] = hop_result.selected_target_id
+        local payload_job = hop_result.payload_job or (hop_result.jobs and hop_result.jobs[1])
+        for _, job in ipairs(hop_result.jobs or { payload_job }) do
+            if job ~= nil then
+                result.chain_payload_jobs[#result.chain_payload_jobs + 1] = job
+            end
+        end
+
+        local hit_payload = chainHitPayloadForJob(payload_job, hop_result.selected_target_id, payload, "hop" .. tostring(hop_result.chain_hop_index))
+        local next_result = live_chain.handleHitPayload(hit_payload, chainHitOptions())
         if hop_result.chain_hop_index == 1 then
-            result.duplicate_hop_result = live_chain.handleHitPayload(hit_payload, {
-                force_enabled = true,
-                candidate_provider = provider,
-            })
+            result.duplicate_hop_result = live_chain.handleHitPayload(hit_payload, chainHitOptions())
             local branch_hit = chainHitPayloadForJob(payload_job, "C", payload, "hop-branch" .. tostring(hop_result.chain_hop_index))
             branch_hit.projectileId = tostring(hit_payload.projectileId or "hop") .. ":branch"
-            result.branch_hop_result = live_chain.handleHitPayload(branch_hit, {
-                force_enabled = true,
-                candidate_provider = provider,
-            })
+            result.branch_hop_result = live_chain.handleHitPayload(branch_hit, chainHitOptions())
         end
         hop_result = next_result
     end
@@ -1389,6 +1565,40 @@ local function simulateChainRuntime(dispatch, payload, provider, opts)
     end
     result.stop_reason = hop_result and hop_result.stop_reason or nil
     return result
+end
+
+local function chainPayloadJobsHaveFanoutMetadata(jobs, fanout_count)
+    if type(jobs) ~= "table" or #jobs == 0 then
+        return false
+    end
+    local expected = tonumber(fanout_count) or 1
+    if expected <= 1 then
+        return true
+    end
+    local saw_first = false
+    for _, job in ipairs(jobs) do
+        local user_data = job and job.launch_user_data or nil
+        if type(user_data) ~= "table" then
+            return false
+        end
+        if user_data.chain_runtime ~= true
+            or user_data.chain_role ~= "payload"
+            or user_data.branch_kind ~= "chain_multicast"
+            or tonumber(user_data.branch_count) ~= expected
+            or type(user_data.branch_id) ~= "string"
+            or type(user_data.branch_parent_id) ~= "string"
+            or type(user_data.chain_continuation_group_id) ~= "string" then
+            return false
+        end
+        local branch_index = tonumber(user_data.branch_index)
+        if branch_index == 1 then
+            saw_first = true
+        end
+        if branch_index == nil or branch_index < 1 or branch_index > expected then
+            return false
+        end
+    end
+    return saw_first
 end
 
 local function chainPayloadJobsHaveModifier(jobs, kind)
@@ -1486,6 +1696,23 @@ local function chainRuntimeProbe(payload)
         effects = TRIGGER_CHAIN_SIZE_PLUS_FROST_TARGET
         opts.force_trigger_enabled = true
         opts.force_size_plus_enabled = true
+    elseif chain_case == "direct_chain_multicast_8" then
+        effects = CHAIN_MULTICAST_X8_TARGET
+        opts.force_chaos_budget_enabled = true
+        opts.force_chain_multicast_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.max_chain_multicast_fanout = CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        opts.max_chain_jobs = limits.MAX_CHAIN_HOPS_CHAOS * CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        opts.max_live_launches_per_tick = limits.MAX_LIVE_LAUNCHES_PER_TICK_CHAOS
+    elseif chain_case == "trigger_chain_multicast_8" then
+        effects = TRIGGER_CHAIN_MULTICAST_X8_TARGET
+        opts.force_chaos_budget_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_chain_multicast_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.max_chain_multicast_fanout = CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        opts.max_chain_jobs = limits.MAX_CHAIN_HOPS_CHAOS * CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        opts.max_live_launches_per_tick = limits.MAX_LIVE_LAUNCHES_PER_TICK_CHAOS
     elseif chain_case == "chain_speed_plus_no_valid" then
         effects = CHAIN_SPEED_PLUS_FROST_TARGET
         provider = chainLiveCandidates("hop_no_target")
@@ -1540,6 +1767,7 @@ local function chainRuntimeProbe(payload)
         effects = CHAIN_OVER_CAP_TARGET
     elseif chain_case == "multicast" then
         effects = CHAIN_MULTICAST_TARGET
+        opts.force_chain_multicast_disabled = true
     elseif chain_case == "pattern" then
         effects = CHAIN_BURST_MULTICAST_TARGET
     elseif chain_case == "trigger_timer" then
@@ -1547,6 +1775,7 @@ local function chainRuntimeProbe(payload)
     elseif chain_case == "trigger_chain_multicast" then
         effects = TRIGGER_CHAIN_MULTICAST_TARGET
         opts.force_trigger_enabled = true
+        opts.force_chain_multicast_disabled = true
     elseif chain_case == "nested_payload" then
         effects = TRIGGER_CHAIN_PAYLOAD_TARGET
         opts.force_trigger_enabled = true
@@ -1595,6 +1824,8 @@ local function chainRuntimeProbe(payload)
         chain_shape = dispatch and dispatch.chain_shape or nil,
         chain_id = dispatch and dispatch.chain_id or nil,
         payload_modifier_kind = dispatch and dispatch.payload_modifier_kind or nil,
+        has_multicast_payload = dispatch and dispatch.has_multicast_payload == true or false,
+        chain_multicast_fanout_count = dispatch and dispatch.chain_multicast_fanout_count or 1,
         max_hops = dispatch and dispatch.max_hops or nil,
         requested_hops = dispatch and dispatch.requested_hops or nil,
         source_jobs = dispatch and dispatch.source_jobs or nil,
@@ -1638,7 +1869,11 @@ local function chainRuntimeProbe(payload)
         or chain_case == "trigger_chain_speed_plus_3"
         or chain_case == "direct_chain_size_plus_3"
         or chain_case == "trigger_chain_size_plus_3"
+        or chain_case == "direct_chain_multicast_8"
+        or chain_case == "trigger_chain_multicast_8"
         or chain_case == "filters"
+    local expected_fanout_count = (chain_case == "direct_chain_multicast_8"
+        or chain_case == "trigger_chain_multicast_8") and CHAOS_CHAIN_MULTICAST_FANOUT_COUNT or 1
     local expected_modifier_kind = nil
     if string.find(chain_case, "speed_plus", 1, true) then
         expected_modifier_kind = "speed_plus"
@@ -1657,7 +1892,11 @@ local function chainRuntimeProbe(payload)
         probe.ok = dispatch and dispatch.ok == true
             and dispatch.live_mode == "chain"
             and (expected_modifier_kind == nil or dispatch.payload_modifier_kind == expected_modifier_kind)
-            and probe.chain_payload_launch_count == 3
+            and probe.chain_payload_launch_count == 3 * expected_fanout_count
+            and (expected_fanout_count == 1
+                or (dispatch.has_multicast_payload == true
+                    and dispatch.chain_multicast_fanout_count == expected_fanout_count
+                    and chainPayloadJobsHaveFanoutMetadata(probe.chain_payload_jobs, expected_fanout_count)))
             and table.concat(probe.selected_target_ids or {}, ",") == "B,A,B"
             and probe.duplicate_source_suppressed == true
             and probe.branch_source_suppressed == true
@@ -1719,12 +1958,13 @@ local function chainRuntimeProbe(payload)
 
     local marker = probe.ok and "SPELLFORGE_CHAIN_RUNTIME_PROBE_OK" or "SPELLFORGE_CHAIN_RUNTIME_PROBE_REJECTED"
     log.info(string.format(
-        "%s chain_case=%s live_mode=%s chain_shape=%s payload_modifier_kind=%s requested_hops=%s completed_hops=%s selected_target_ids=%s stop_reason=%s rejection_reason=%s",
+        "%s chain_case=%s live_mode=%s chain_shape=%s payload_modifier_kind=%s fanout_count=%s requested_hops=%s completed_hops=%s selected_target_ids=%s stop_reason=%s rejection_reason=%s",
         marker,
         tostring(chain_case),
         tostring(probe.live_mode),
         tostring(probe.chain_shape),
         tostring(probe.payload_modifier_kind),
+        tostring(probe.chain_multicast_fanout_count),
         tostring(probe.requested_hops),
         tostring(probe.completed_hops),
         table.concat(probe.selected_target_ids or {}, ","),
@@ -1814,6 +2054,22 @@ local function chainRuntimeRejected(reason, details, counter_name)
     return rejected(reason, details)
 end
 
+local function bounceRejected(reason, details, counter_name)
+    runtime_stats.inc("live_bounce_rejected")
+    if counter_name then
+        runtime_stats.inc(counter_name)
+    end
+    log.info(string.format(
+        "SPELLFORGE_LIVE_BOUNCE_REJECTED reason=%s plan_recipe_id=%s source_slot_id=%s payload_slot_id=%s bounce_max=%s",
+        tostring(reason),
+        tostring(details and details.plan_recipe_id or nil),
+        tostring(details and details.source_slot_id or nil),
+        tostring(details and details.payload_slot_id or nil),
+        tostring(details and details.bounce_max or nil)
+    ))
+    return rejected(reason, details)
+end
+
 local function nestedTriggerTimerRejected(reason, details, counter_name)
     local result = details or {}
     result.nested_trigger_timer_rejected = true
@@ -1865,6 +2121,14 @@ end
 
 local function sizePlusRejected(reason, details, counter_name)
     runtime_stats.inc("live_size_plus_rejected")
+    if counter_name then
+        runtime_stats.inc(counter_name)
+    end
+    return rejected(reason, details)
+end
+
+local function homingRejected(reason, details, counter_name)
+    runtime_stats.inc("live_homing_rejected")
     if counter_name then
         runtime_stats.inc(counter_name)
     end
@@ -1993,8 +2257,10 @@ local function effectListHasOperator(effects, opcode)
     local wanted = opcode == "Timer" and "spellforge_timer"
         or opcode == "Trigger" and "spellforge_trigger"
         or opcode == "Chain" and "spellforge_chain"
+        or opcode == "Bounce" and "spellforge_bounce"
         or opcode == "Speed+" and "spellforge_speed_plus"
         or opcode == "Size+" and "spellforge_size_plus"
+        or opcode == "Homing" and "spellforge_homing"
         or nil
     if not wanted then
         return false
@@ -2297,7 +2563,7 @@ local function computePatternInfo(live_mode, pattern_kind, pattern_op, selected_
     }, nil
 end
 
-local function buildJobInputs(selected_helpers, compiled_recipe_id, cast_id, launch_payload, pattern_info, size_info, speed_info)
+local function buildJobInputs(selected_helpers, compiled_recipe_id, cast_id, launch_payload, pattern_info, size_info, speed_info, homing_info)
     local jobs = {}
     local fanout_count = #selected_helpers
     for index, pair in ipairs(selected_helpers) do
@@ -2310,6 +2576,9 @@ local function buildJobInputs(selected_helpers, compiled_recipe_id, cast_id, lau
         if pattern_info and pattern_info.direction_by_slot_id then
             launch_direction = pattern_info.direction_by_slot_id[helper.slot_id] or launch_direction
             pattern_direction_key = pattern_info.key_by_slot_id and pattern_info.key_by_slot_id[helper.slot_id] or nil
+        end
+        if homing_info and homing_info.direction then
+            launch_direction = homing_info.direction
         end
         jobs[#jobs + 1] = {
             kind = orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND,
@@ -2346,6 +2615,20 @@ local function buildJobInputs(selected_helpers, compiled_recipe_id, cast_id, lau
             speed_plus_max_speed = speed_info and speed_info.speed_plus_max_speed or nil,
             speed_plus_field = speed_info and speed_info.speed_plus_field or nil,
             speed_plus_capped = speed_info and speed_info.speed_plus_capped or nil,
+            forceVec = homing_info and homing_info.forceVec or nil,
+            homing = homing_info and true or nil,
+            homing_mode = homing_info and homing_info.homing_mode or nil,
+            homing_force = homing_info and homing_info.homing_force or nil,
+            homing_field = homing_info and homing_info.homing_field or nil,
+            homing_target_id = homing_info and homing_info.homing_target_id or nil,
+            homing_target_provider = homing_info and homing_info.homing_target_provider or nil,
+            homing_target_kind = homing_info and homing_info.homing_target_kind or nil,
+            homing_candidate_count = homing_info and homing_info.homing_candidate_count or nil,
+            homing_actor_candidate_count = homing_info and homing_info.homing_actor_candidate_count or nil,
+            homing_creature_candidate_count = homing_info and homing_info.homing_creature_candidate_count or nil,
+            homing_npc_candidate_count = homing_info and homing_info.homing_npc_candidate_count or nil,
+            homing_force_key = homing_info and homing_info.homing_force_key or nil,
+            homing_direction_key = homing_info and homing_info.homing_direction_key or nil,
             payload = {
                 actor = launch_payload.actor or launch_payload.sender,
                 start_pos = launch_payload.start_pos,
@@ -2380,6 +2663,20 @@ local function buildJobInputs(selected_helpers, compiled_recipe_id, cast_id, lau
                 speed_plus_max_speed = speed_info and speed_info.speed_plus_max_speed or nil,
                 speed_plus_field = speed_info and speed_info.speed_plus_field or nil,
                 speed_plus_capped = speed_info and speed_info.speed_plus_capped or nil,
+                forceVec = homing_info and homing_info.forceVec or nil,
+                homing = homing_info and true or nil,
+                homing_mode = homing_info and homing_info.homing_mode or nil,
+                homing_force = homing_info and homing_info.homing_force or nil,
+                homing_field = homing_info and homing_info.homing_field or nil,
+                homing_target_id = homing_info and homing_info.homing_target_id or nil,
+                homing_target_provider = homing_info and homing_info.homing_target_provider or nil,
+                homing_target_kind = homing_info and homing_info.homing_target_kind or nil,
+                homing_candidate_count = homing_info and homing_info.homing_candidate_count or nil,
+                homing_actor_candidate_count = homing_info and homing_info.homing_actor_candidate_count or nil,
+                homing_creature_candidate_count = homing_info and homing_info.homing_creature_candidate_count or nil,
+                homing_npc_candidate_count = homing_info and homing_info.homing_npc_candidate_count or nil,
+                homing_force_key = homing_info and homing_info.homing_force_key or nil,
+                homing_direction_key = homing_info and homing_info.homing_direction_key or nil,
             },
         }
     end
@@ -2414,11 +2711,34 @@ local function jobSummary(job_id)
         chain_hop_index = job and (job.chain_hop_index or (payload and payload.chain_hop_index)) or nil,
         chain_max_hops = job and (job.chain_max_hops or (payload and payload.chain_max_hops)) or nil,
         chain_targeting_mode = job and (job.chain_targeting_mode or (payload and payload.chain_targeting_mode)) or nil,
+        branch_scope = job and (job.branch_scope or (payload and payload.branch_scope)) or nil,
+        branch_id = job and (job.branch_id or (payload and payload.branch_id)) or nil,
+        branch_parent_id = job and (job.branch_parent_id or (payload and payload.branch_parent_id)) or nil,
+        branch_kind = job and (job.branch_kind or (payload and payload.branch_kind)) or nil,
+        branch_index = job and (job.branch_index or (payload and payload.branch_index)) or nil,
+        branch_count = job and (job.branch_count or (payload and payload.branch_count)) or nil,
+        chain_continuation_group_id = job and (job.chain_continuation_group_id or (payload and payload.chain_continuation_group_id)) or nil,
         current_hit_target_id = job and (job.current_hit_target_id or (payload and payload.current_hit_target_id)) or nil,
         selected_target_id = job and (job.selected_target_id or (payload and payload.selected_target_id)) or nil,
         previous_projectile_id = job and (job.previous_projectile_id or (payload and payload.previous_projectile_id)) or nil,
+        bounce_runtime = job and firstPresent(job.bounce_runtime, payload and payload.bounce_runtime) or nil,
+        bounce_role = job and firstPresent(job.bounce_role, payload and payload.bounce_role) or nil,
+        bounce_id = job and firstPresent(job.bounce_id, payload and payload.bounce_id) or nil,
+        bounce_max = job and firstPresent(job.bounce_max, payload and payload.bounce_max) or nil,
+        bounce_power = job and firstPresent(job.bounce_power, payload and payload.bounce_power) or nil,
+        bounceEnabled = job and firstPresent(job.bounceEnabled, payload and payload.bounceEnabled) or nil,
+        bounceMax = job and firstPresent(job.bounceMax, payload and payload.bounceMax) or nil,
+        bouncePower = job and firstPresent(job.bouncePower, payload and payload.bouncePower) or nil,
+        detonateOnActorHit = bounceDetonateOnActorHit(job, payload),
+        post_launch_bounce_attempted = job and job.post_launch_bounce_attempted == true or false,
+        post_launch_bounce_ok = job and job.post_launch_bounce_ok == true or false,
+        post_launch_bounce_error = job and job.post_launch_bounce_error or nil,
+        post_launch_detonate_on_actor_attempted = job and job.post_launch_detonate_on_actor_attempted == true or false,
+        post_launch_detonate_on_actor_ok = job and job.post_launch_detonate_on_actor_ok == true or false,
+        post_launch_detonate_on_actor_error = job and job.post_launch_detonate_on_actor_error or nil,
         payload_modifier_kind = job and (job.payload_modifier_kind or (payload and payload.payload_modifier_kind)) or nil,
         source_slot_id = job and job.source_slot_id or nil,
+        source_prefix_opcode = job and (job.source_prefix_opcode or (payload and payload.source_prefix_opcode)) or nil,
         source_helper_engine_id = job and job.source_helper_engine_id or nil,
         source_postfix_opcode = job and job.source_postfix_opcode or nil,
         payload_slot_id = job and job.payload_slot_id or nil,
@@ -2456,6 +2776,20 @@ local function jobSummary(job_id)
         speed_plus_max_speed = job and (job.speed_plus_max_speed or (payload and payload.speed_plus_max_speed)) or nil,
         speed_plus_field = job and (job.speed_plus_field or (payload and payload.speed_plus_field)) or nil,
         speed_plus_capped = job and (job.speed_plus_capped or (payload and payload.speed_plus_capped)) or nil,
+        forceVec = job and (job.forceVec or (payload and payload.forceVec)) or nil,
+        homing = job and (job.homing or (payload and payload.homing)) or nil,
+        homing_mode = job and (job.homing_mode or (payload and payload.homing_mode)) or nil,
+        homing_force = job and (job.homing_force or (payload and payload.homing_force)) or nil,
+        homing_field = job and (job.homing_field or (payload and payload.homing_field)) or nil,
+        homing_target_id = job and (job.homing_target_id or (payload and payload.homing_target_id)) or nil,
+        homing_target_provider = job and (job.homing_target_provider or (payload and payload.homing_target_provider)) or nil,
+        homing_target_kind = job and (job.homing_target_kind or (payload and payload.homing_target_kind)) or nil,
+        homing_candidate_count = job and (job.homing_candidate_count or (payload and payload.homing_candidate_count)) or nil,
+        homing_actor_candidate_count = job and (job.homing_actor_candidate_count or (payload and payload.homing_actor_candidate_count)) or nil,
+        homing_creature_candidate_count = job and (job.homing_creature_candidate_count or (payload and payload.homing_creature_candidate_count)) or nil,
+        homing_npc_candidate_count = job and (job.homing_npc_candidate_count or (payload and payload.homing_npc_candidate_count)) or nil,
+        homing_force_key = job and (job.homing_force_key or (payload and payload.homing_force_key)) or nil,
+        homing_direction_key = job and (job.homing_direction_key or (payload and payload.homing_direction_key)) or nil,
         launch_accepted = job and job.launch_accepted == true or false,
         projectile_id = job and job.projectile_id or nil,
         projectile_id_source = job and job.projectile_id_source or nil,
@@ -2511,6 +2845,329 @@ local function effectListFromRoot(root)
         return cloneEffects(root.real_effects)
     end
     return nil
+end
+
+local function tryHomingDispatch(compiled, launch_payload, options)
+    runtime_stats.inc("live_homing_attempts")
+    if options.force_homing_disabled == true then
+        return homingRejected("live_homing_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_homing_disabled_rejections")
+    end
+    if options.force_homing_enabled ~= true and not dev.liveHomingEnabled() then
+        return homingRejected("live_homing_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_homing_disabled_rejections")
+    end
+
+    local homing_plan, homing_reason, homing_counter = live_homing.selectV0Plan(compiled.plan)
+    if not homing_plan then
+        return homingRejected(homing_reason or "homing_v0_rejected", {
+            plan_recipe_id = compiled.recipe_id,
+        }, homing_counter)
+    end
+
+    local group = compiled.plan and compiled.plan.groups and compiled.plan.groups[1] or nil
+    if type(group) ~= "table" or not isTargetRange(group.range) then
+        return homingRejected("not_target_range", {
+            plan_recipe_id = compiled.recipe_id,
+        })
+    end
+
+    local attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
+    if not attached.ok then
+        return homingRejected("helper_records_failed", {
+            plan_recipe_id = compiled.recipe_id,
+            error = firstErrorMessage(attached),
+            errors = attached.errors,
+        })
+    end
+
+    local selected_helpers, materialized_reason = collectPrimaryHelpers(attached.plan)
+    if not selected_helpers then
+        local counter = nil
+        if string.find(tostring(materialized_reason), "payload", 1, true)
+            or string.find(tostring(materialized_reason), "postfix", 1, true)
+            or string.find(tostring(materialized_reason), "source", 1, true)
+            or string.find(tostring(materialized_reason), "parent", 1, true) then
+            counter = "live_homing_payload_rejections"
+        end
+        return homingRejected(materialized_reason or "helper_selection_failed", {
+            plan_recipe_id = compiled.recipe_id,
+        }, counter)
+    end
+    if #selected_helpers ~= 1 then
+        return homingRejected("slot_count_not_one", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_homing_unsupported_combo_rejections")
+    end
+
+    local homing_info, homing_err = live_homing.computeLaunchAssist(launch_payload, homing_plan.mutation)
+    if not homing_info then
+        return homingRejected(homing_err or "homing_target_missing", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_homing_target_rejections")
+    end
+    local use_soft_homing = options.soft_homing_probe == true
+        or options.force_soft_homing_enabled == true
+        or (options.force_soft_homing_disabled ~= true and dev.liveSoftHomingEnabled())
+    local launch_homing_info = homing_info
+    if use_soft_homing then
+        launch_homing_info = {}
+        for key, value in pairs(homing_info) do
+            launch_homing_info[key] = value
+        end
+        launch_homing_info.forceVec = nil
+        launch_homing_info.direction = nil
+        launch_homing_info.homing_mode = options.soft_homing_probe == true and "soft_redirect_probe" or "soft_redirect"
+        launch_homing_info.homing_field = "redirectSpell"
+        launch_homing_info.homing_force = nil
+        launch_homing_info.homing_force_key = nil
+    end
+
+    local source_recipe_id = options.source_recipe_id or launch_payload.recipe_id
+    local result_recipe_id = source_recipe_id or compiled.recipe_id
+    local cast_id = nextCastId(result_recipe_id, compiled.recipe_id)
+    runtime_stats.inc("live_2_2c_qualified")
+    runtime_stats.inc("live_homing_qualified")
+
+    local job_inputs = buildJobInputs(selected_helpers, compiled.recipe_id, cast_id, launch_payload, nil, nil, nil, launch_homing_info)
+    local slot_ids = {}
+    local helper_engine_ids = {}
+    local emission_indexes = {}
+    for index, pair in ipairs(selected_helpers) do
+        slot_ids[index] = pair.helper.slot_id
+        helper_engine_ids[index] = pair.helper.engine_id
+        emission_indexes[index] = pair.slot.emission_index or pair.helper.emission_index or index
+    end
+
+    log.info(string.format(
+        "SPELLFORGE_LIVE_HOMING_QUALIFIED recipe_id=%s plan_recipe_id=%s cast_id=%s slot_id=%s helper_engine_id=%s homing_mode=%s homing_field=%s homing_force=%s homing_target_id=%s homing_target_provider=%s homing_target_kind=%s homing_candidate_count=%s homing_actor_candidate_count=%s homing_creature_candidate_count=%s homing_npc_candidate_count=%s force_key=%s",
+        tostring(result_recipe_id),
+        tostring(compiled.recipe_id),
+        tostring(cast_id),
+        tostring(slot_ids[1]),
+        tostring(helper_engine_ids[1]),
+        tostring(launch_homing_info.homing_mode),
+        tostring(launch_homing_info.homing_field),
+        tostring(launch_homing_info.homing_force),
+        tostring(launch_homing_info.homing_target_id),
+        tostring(launch_homing_info.homing_target_provider),
+        tostring(launch_homing_info.homing_target_kind),
+        tostring(launch_homing_info.homing_candidate_count),
+        tostring(launch_homing_info.homing_actor_candidate_count),
+        tostring(launch_homing_info.homing_creature_candidate_count),
+        tostring(launch_homing_info.homing_npc_candidate_count),
+        tostring(launch_homing_info.homing_force_key)
+    ))
+
+    if options.dry_run == true then
+        return {
+            ok = true,
+            used_live_2_2c = true,
+            dry_run = true,
+            recipe_id = result_recipe_id,
+            plan_recipe_id = compiled.recipe_id,
+            slot_id = slot_ids[1],
+            helper_engine_id = helper_engine_ids[1],
+            slot_ids = slot_ids,
+            helper_engine_ids = helper_engine_ids,
+            emission_indexes = emission_indexes,
+            slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
+            helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
+            dispatch_count = #selected_helpers,
+            fanout_count = #selected_helpers,
+            homing_mode = homing_info.homing_mode,
+            homing_force = homing_info.homing_force,
+            homing_field = homing_info.homing_field,
+            homing_target_id = homing_info.homing_target_id,
+            homing_target_provider = homing_info.homing_target_provider,
+            homing_target_kind = homing_info.homing_target_kind,
+            homing_candidate_count = homing_info.homing_candidate_count,
+            homing_actor_candidate_count = homing_info.homing_actor_candidate_count,
+            homing_creature_candidate_count = homing_info.homing_creature_candidate_count,
+            homing_npc_candidate_count = homing_info.homing_npc_candidate_count,
+            homing_force_key = homing_info.homing_force_key,
+            homing_direction_key = homing_info.homing_direction_key,
+            simple_note = "homing_v0",
+            live_mode = "homing",
+            cast_id = cast_id,
+        }
+    end
+
+    local job_ids = {}
+    for _, job_input in ipairs(job_inputs) do
+        local enqueue = orchestrator.enqueue(job_input)
+        if not enqueue.ok then
+            runtime_stats.inc("live_2_2c_dispatch_failed")
+            return homingRejected("enqueue_failed", {
+                recipe_id = result_recipe_id,
+                plan_recipe_id = compiled.recipe_id,
+                slot_id = job_input.slot_id,
+                helper_engine_id = job_input.helper_engine_id,
+                error = enqueue.error or "enqueue failed",
+                cast_id = cast_id,
+            })
+        end
+        job_ids[#job_ids + 1] = enqueue.job_id
+    end
+    runtime_stats.inc("live_homing_jobs_mutated", #job_ids)
+    chaos_budget.observe({
+        jobs = #job_ids,
+        queue = orchestrator.queueLength(),
+        projectiles = #selected_helpers,
+    })
+
+    local tick_result = tickUntilJobsSettled(job_ids, options)
+    local jobs = {}
+    local projectile_ids = {}
+    local projectile_id_count = 0
+    for index, job_id in ipairs(job_ids) do
+        local summary = jobSummary(job_id)
+        jobs[index] = summary
+        if summary.projectile_id ~= nil then
+            projectile_ids[#projectile_ids + 1] = summary.projectile_id
+            projectile_id_count = projectile_id_count + 1
+        end
+        if summary.job_status == "queued" then
+            orchestrator.cancel(job_id)
+        end
+        if summary.job_status ~= "complete" or summary.launch_accepted ~= true then
+            runtime_stats.inc("live_2_2c_dispatch_failed")
+            return bridgeError(summary.error or "homing helper launch job did not complete", {
+                stage = "homing_launch_job",
+                recipe_id = result_recipe_id,
+                plan_recipe_id = compiled.recipe_id,
+                slot_id = summary.slot_id,
+                helper_engine_id = summary.helper_engine_id,
+                job_id = job_id,
+                job_ids = job_ids,
+                job_status = summary.job_status,
+                tick_result = tick_result,
+                cast_id = cast_id,
+                fallback_allowed = false,
+            })
+        end
+    end
+
+    local first_job = jobs[1] or {}
+    log.info(string.format(
+        "SPELLFORGE_LIVE_HOMING_APPLIED recipe_id=%s plan_recipe_id=%s cast_id=%s slot_id=%s helper_engine_id=%s homing_mode=%s homing_field=%s homing_force=%s homing_target_id=%s homing_target_provider=%s homing_target_kind=%s homing_candidate_count=%s homing_actor_candidate_count=%s homing_creature_candidate_count=%s homing_npc_candidate_count=%s force_key=%s job_id=%s projectile_id=%s",
+        tostring(result_recipe_id),
+        tostring(compiled.recipe_id),
+        tostring(cast_id),
+        tostring(slot_ids[1]),
+        tostring(helper_engine_ids[1]),
+        tostring(launch_homing_info.homing_mode),
+        tostring(launch_homing_info.homing_field),
+        tostring(launch_homing_info.homing_force),
+        tostring(launch_homing_info.homing_target_id),
+        tostring(launch_homing_info.homing_target_provider),
+        tostring(launch_homing_info.homing_target_kind),
+        tostring(launch_homing_info.homing_candidate_count),
+        tostring(launch_homing_info.homing_actor_candidate_count),
+        tostring(launch_homing_info.homing_creature_candidate_count),
+        tostring(launch_homing_info.homing_npc_candidate_count),
+        tostring(launch_homing_info.homing_force_key),
+        tostring(job_ids[1]),
+        tostring(first_job.projectile_id)
+    ))
+    log.info(string.format(
+        "SPELLFORGE_LIVE_HOMING_DISPATCH_OK recipe_id=%s plan_recipe_id=%s dispatch_count=%s first_slot_id=%s first_helper_engine_id=%s homing_mode=%s homing_field=%s homing_force=%s homing_target_id=%s homing_target_provider=%s homing_target_kind=%s homing_candidate_count=%s homing_actor_candidate_count=%s homing_creature_candidate_count=%s homing_npc_candidate_count=%s force_key=%s projectile_count=%s",
+        tostring(result_recipe_id),
+        tostring(compiled.recipe_id),
+        tostring(#job_ids),
+        tostring(slot_ids[1]),
+        tostring(helper_engine_ids[1]),
+        tostring(launch_homing_info.homing_mode),
+        tostring(launch_homing_info.homing_field),
+        tostring(launch_homing_info.homing_force),
+        tostring(launch_homing_info.homing_target_id),
+        tostring(launch_homing_info.homing_target_provider),
+        tostring(launch_homing_info.homing_target_kind),
+        tostring(launch_homing_info.homing_candidate_count),
+        tostring(launch_homing_info.homing_actor_candidate_count),
+        tostring(launch_homing_info.homing_creature_candidate_count),
+        tostring(launch_homing_info.homing_npc_candidate_count),
+        tostring(launch_homing_info.homing_force_key),
+        tostring(projectile_id_count)
+    ))
+    local soft_homing_probe = nil
+    local soft_homing_runtime = nil
+    if use_soft_homing then
+        local live_soft_homing = require("scripts.spellforge.global.live_soft_homing")
+        local register_payload = {
+            projectile_id = first_job.projectile_id,
+            recipe_id = result_recipe_id,
+            cast_id = cast_id,
+            slot_id = slot_ids[1],
+            helper_engine_id = helper_engine_ids[1],
+            job_id = job_ids[1],
+            caster = launch_payload.actor or launch_payload.sender,
+            target_id = homing_info.homing_target_id,
+            target_object = homing_info.homing_target_object,
+            target_position = homing_info.homing_target_position,
+            target_provider = homing_info.homing_target_provider,
+            target_kind = homing_info.homing_target_kind,
+            max_lifetime = options.soft_homing_max_lifetime_seconds,
+        }
+        if options.soft_homing_probe == true then
+            soft_homing_probe = live_soft_homing.registerProbe(register_payload)
+        else
+            soft_homing_runtime = live_soft_homing.registerRuntime(register_payload)
+        end
+    end
+    runtime_stats.inc("live_2_2c_dispatch_ok")
+
+    return {
+        ok = true,
+        used_live_2_2c = true,
+        recipe_id = result_recipe_id,
+        plan_recipe_id = compiled.recipe_id,
+        slot_id = slot_ids[1],
+        helper_engine_id = helper_engine_ids[1],
+        slot_ids = slot_ids,
+        helper_engine_ids = helper_engine_ids,
+        emission_indexes = emission_indexes,
+        projectile_id = first_job.projectile_id,
+        projectile_ids = projectile_ids,
+        projectile_id_source = first_job.projectile_id_source,
+        projectile_registered = first_job.projectile_registered == true,
+        job_id = job_ids[1],
+        job_ids = job_ids,
+        jobs = jobs,
+        job_status = first_job.job_status,
+        cast_id = cast_id,
+        runtime = "2.2c_live_helper",
+        fallback = false,
+        dispatch_count = #job_ids,
+        fanout_count = #selected_helpers,
+        slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
+        helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
+        effect_id = selected_helpers[1] and selected_helpers[1].slot.effects and selected_helpers[1].slot.effects[1] and selected_helpers[1].slot.effects[1].id or nil,
+        homing_mode = launch_homing_info.homing_mode,
+        homing_force = launch_homing_info.homing_force,
+        homing_field = launch_homing_info.homing_field,
+        homing_target_id = launch_homing_info.homing_target_id,
+        homing_target_provider = launch_homing_info.homing_target_provider,
+        homing_target_kind = launch_homing_info.homing_target_kind,
+        homing_candidate_count = launch_homing_info.homing_candidate_count,
+        homing_actor_candidate_count = launch_homing_info.homing_actor_candidate_count,
+        homing_creature_candidate_count = launch_homing_info.homing_creature_candidate_count,
+        homing_npc_candidate_count = launch_homing_info.homing_npc_candidate_count,
+        homing_force_key = launch_homing_info.homing_force_key,
+        homing_direction_key = launch_homing_info.homing_direction_key,
+        soft_homing_probe = soft_homing_probe,
+        soft_homing_probe_registered = soft_homing_probe and soft_homing_probe.ok == true or false,
+        soft_homing_probe_entry_id = soft_homing_probe and soft_homing_probe.entry_id or nil,
+        soft_homing_probe_error = soft_homing_probe and soft_homing_probe.error or nil,
+        soft_homing_runtime = soft_homing_runtime,
+        soft_homing_runtime_registered = soft_homing_runtime and soft_homing_runtime.ok == true or false,
+        soft_homing_runtime_entry_id = soft_homing_runtime and soft_homing_runtime.entry_id or nil,
+        soft_homing_runtime_error = soft_homing_runtime and soft_homing_runtime.error or nil,
+        simple_note = "homing_v0",
+        live_mode = "homing",
+    }
 end
 
 local function trySpeedPlusDispatch(compiled, launch_payload, options)
@@ -3528,6 +4185,8 @@ local function tryNestedTriggerTimerDispatch(compiled, launch_payload, options)
             })
         end
         root_binding.source_job_id = enqueue.job_id
+        root_binding.source_projectile_id = summary.projectile_id
+        root_binding.source_user_data = summary.launch_user_data
         root_binding.resolution = resolution
         schedule = live_timer.schedulePayload(root_binding, {
             duplicate_key_suffix = root_binding.duplicate_key_suffix,
@@ -3729,7 +4388,14 @@ local function tryChainDispatch(compiled, launch_payload, options)
         max_jobs = options.max_chain_jobs,
         max_candidates = options.max_chain_scan_candidates,
         scan_radius = options.chain_scan_radius,
+        allow_chain_multicast = options.force_chain_multicast_enabled == true
+            or options.chain_multicast_enabled == true
+            or dev.liveChainMulticastEnabled(),
+        max_chain_multicast_fanout = options.max_chain_multicast_fanout,
         apply_size_to_specs = true,
+        force_chain_multicast_enabled = options.force_chain_multicast_enabled,
+        force_chain_multicast_disabled = options.force_chain_multicast_disabled,
+        chain_multicast_enabled = dev.liveChainMulticastEnabled() == true,
         force_speed_plus_enabled = options.force_speed_plus_enabled,
         force_speed_plus_disabled = options.force_speed_plus_disabled,
         force_size_plus_enabled = options.force_size_plus_enabled,
@@ -3742,16 +4408,32 @@ local function tryChainDispatch(compiled, launch_payload, options)
         or modifier_audit.has_size_plus_payload == true) then
         runtime_stats.inc("chain_modifier_attempts")
     end
+    if modifier_audit and modifier_audit.has_multicast_payload == true then
+        runtime_stats.inc("chain_multicast_attempts")
+    end
     if not modifier_plan then
         local details = modifier_audit or {}
         details.recipe_id = result_recipe_id
         details.plan_recipe_id = compiled.recipe_id
-        details.rejection_reason = modifier_reason or details.rejection_reason
-        countChainModifierRejection(modifier_reason or details.rejection_reason, details)
+        local rejection_reason = modifier_reason or details.rejection_reason
+        if options.force_chain_multicast_disabled == true
+            and (details.has_multicast_payload == true or details.has_chain_with_multicast == true) then
+            rejection_reason = "chain_multicast_disabled"
+        end
+        details.rejection_reason = rejection_reason
+        countChainModifierRejection(rejection_reason, details)
+        if details.has_multicast_payload == true or details.has_chain_with_multicast == true then
+            runtime_stats.inc("chain_multicast_rejected")
+            if tostring(rejection_reason):find("disabled", 1, true) then
+                runtime_stats.inc("chain_multicast_disabled_reject")
+            elseif tostring(rejection_reason):find("cap", 1, true) then
+                runtime_stats.inc("chain_multicast_fanout_cap_reject")
+            end
+        end
         local reject_counter = details.has_chain_with_pattern == true
             and "chain_runtime_pattern_reject"
-            or chainRuntimeRejectCounter(modifier_reason or details.rejection_reason)
-        return chainRuntimeRejected(modifier_reason or "unsupported_chain_shape", details, reject_counter)
+            or chainRuntimeRejectCounter(rejection_reason)
+        return chainRuntimeRejected(rejection_reason or "unsupported_chain_shape", details, reject_counter)
     end
     if modifier_plan.payload_modifier_kind ~= nil then
         runtime_stats.inc("chain_modifier_qualified")
@@ -3761,6 +4443,9 @@ local function tryChainDispatch(compiled, launch_payload, options)
             runtime_stats.inc("chain_modifier_size_qualified")
             runtime_stats.inc("chain_modifier_size_specs_mutated", modifier_plan.size_plus_apply_result and modifier_plan.size_plus_apply_result.specs_mutated or 0)
         end
+    end
+    if modifier_plan.has_multicast_payload == true then
+        runtime_stats.inc("chain_multicast_qualified")
     end
 
     local attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
@@ -3778,7 +4463,14 @@ local function tryChainDispatch(compiled, launch_payload, options)
         max_jobs = options.max_chain_jobs,
         max_candidates = options.max_chain_scan_candidates,
         scan_radius = options.chain_scan_radius,
+        allow_chain_multicast = options.force_chain_multicast_enabled == true
+            or options.chain_multicast_enabled == true
+            or dev.liveChainMulticastEnabled(),
+        max_chain_multicast_fanout = options.max_chain_multicast_fanout,
         prepared_modifier = modifier_plan,
+        force_chain_multicast_enabled = options.force_chain_multicast_enabled,
+        force_chain_multicast_disabled = options.force_chain_multicast_disabled,
+        chain_multicast_enabled = dev.liveChainMulticastEnabled() == true,
         force_speed_plus_enabled = options.force_speed_plus_enabled,
         force_speed_plus_disabled = options.force_speed_plus_disabled,
         force_size_plus_enabled = options.force_size_plus_enabled,
@@ -3790,12 +4482,25 @@ local function tryChainDispatch(compiled, launch_payload, options)
         local details = chain_audit or {}
         details.recipe_id = result_recipe_id
         details.plan_recipe_id = compiled.recipe_id
-        details.rejection_reason = chain_reason or details.rejection_reason
-        countChainModifierRejection(chain_reason or details.rejection_reason, details)
+        local rejection_reason = chain_reason or details.rejection_reason
+        if options.force_chain_multicast_disabled == true
+            and (details.has_multicast_payload == true or details.has_chain_with_multicast == true) then
+            rejection_reason = "chain_multicast_disabled"
+        end
+        details.rejection_reason = rejection_reason
+        countChainModifierRejection(rejection_reason, details)
+        if details.has_multicast_payload == true or details.has_chain_with_multicast == true then
+            runtime_stats.inc("chain_multicast_rejected")
+            if tostring(rejection_reason):find("disabled", 1, true) then
+                runtime_stats.inc("chain_multicast_disabled_reject")
+            elseif tostring(rejection_reason):find("cap", 1, true) then
+                runtime_stats.inc("chain_multicast_fanout_cap_reject")
+            end
+        end
         local reject_counter = details.has_chain_with_pattern == true
             and "chain_runtime_pattern_reject"
-            or chainRuntimeRejectCounter(chain_reason or details.rejection_reason)
-        return chainRuntimeRejected(chain_reason or "unsupported_chain_shape", details, reject_counter)
+            or chainRuntimeRejectCounter(rejection_reason)
+        return chainRuntimeRejected(rejection_reason or "unsupported_chain_shape", details, reject_counter)
     end
     if chain_plan.chain_shape == "trigger_payload_chain"
         and options.force_trigger_enabled ~= true
@@ -3830,6 +4535,8 @@ local function tryChainDispatch(compiled, launch_payload, options)
         payload_helper_engine_id = chain_plan.payload_helper_engine_id,
         payload_effect_id = chain_plan.payload_effect_id,
         payload_modifier_kind = chain_plan.payload_modifier_kind,
+        has_multicast_payload = chain_plan.has_multicast_payload == true,
+        chain_multicast_fanout_count = chain_plan.chain_multicast_fanout_count or 1,
         speed_plus_mutation = chain_plan.speed_plus_mutation,
         size_plus_mutation = chain_plan.size_plus_mutation,
         payload_emission_index = chain_plan.payload.slot.emission_index or chain_plan.payload.helper.emission_index,
@@ -3869,6 +4576,21 @@ local function tryChainDispatch(compiled, launch_payload, options)
             tostring(chain_plan.payload_modifier_kind)
         ))
     end
+    if chain_plan.has_multicast_payload == true then
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_MULTICAST_QUALIFIED recipe_id=%s plan_recipe_id=%s cast_id=%s chain_id=%s chain_shape=%s source_slot_id=%s payload_slot_id=%s requested_hops=%s max_hops=%s fanout_count=%s",
+            tostring(result_recipe_id),
+            tostring(compiled.recipe_id),
+            tostring(cast_id),
+            tostring(chain_id),
+            tostring(chain_plan.chain_shape),
+            tostring(chain_plan.source_slot_id),
+            tostring(chain_plan.payload_slot_id),
+            tostring(chain_plan.requested_hops),
+            tostring(chain_plan.max_hops),
+            tostring(chain_plan.chain_multicast_fanout_count or 1)
+        ))
+    end
 
     local job_inputs = buildJobInputs({ chain_plan.source }, compiled.recipe_id, cast_id, launch_payload)
     local source_job = job_inputs[1]
@@ -3898,6 +4620,8 @@ local function tryChainDispatch(compiled, launch_payload, options)
             max_hops = chain_plan.max_hops,
             targeting_mode = "no_immediate_repeat",
             payload_modifier_kind = chain_plan.payload_modifier_kind,
+            has_multicast_payload = chain_plan.has_multicast_payload == true,
+            chain_multicast_fanout_count = chain_plan.chain_multicast_fanout_count or 1,
             speed_plus = chain_plan.payload_modifier_kind == "speed_plus" or nil,
             speed_plus_mode = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_mode or nil,
             speed_plus_value = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_value or nil,
@@ -3919,7 +4643,8 @@ local function tryChainDispatch(compiled, launch_payload, options)
             payload_helper_engine_id = chain_plan.payload_helper_engine_id,
             dispatch_count = 1,
             source_dispatch_count = 1,
-            fanout_count = 1,
+            fanout_count = chain_plan.chain_multicast_fanout_count or 1,
+            would_launch_payloads = (chain_plan.chain_multicast_fanout_count or 1) * (chain_plan.max_hops or 0),
             slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
             helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
             cast_id = cast_id,
@@ -3988,6 +4713,8 @@ local function tryChainDispatch(compiled, launch_payload, options)
         max_hops = chain_plan.max_hops,
         targeting_mode = "no_immediate_repeat",
         payload_modifier_kind = chain_plan.payload_modifier_kind,
+        has_multicast_payload = chain_plan.has_multicast_payload == true,
+        chain_multicast_fanout_count = chain_plan.chain_multicast_fanout_count or 1,
         speed_plus = chain_plan.payload_modifier_kind == "speed_plus" or nil,
         speed_plus_mode = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_mode or nil,
         speed_plus_value = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_value or nil,
@@ -4021,7 +4748,7 @@ local function tryChainDispatch(compiled, launch_payload, options)
         fallback = false,
         dispatch_count = 1,
         source_dispatch_count = 1,
-        fanout_count = 1,
+        fanout_count = chain_plan.chain_multicast_fanout_count or 1,
         slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
         helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
         simple_note = "chain_runtime_v0",
@@ -4191,6 +4918,8 @@ local function tryTimerDispatch(compiled, launch_payload, options)
     end
 
     binding.source_job_id = enqueue.job_id
+    binding.source_projectile_id = summary.projectile_id
+    binding.source_user_data = summary.launch_user_data
     local schedule = live_timer.schedulePayload(binding, {
         delay_ticks_override = options.timer_delay_ticks_override,
         delay_seconds_override = options.timer_delay_seconds_override,
@@ -4300,6 +5029,363 @@ local function tryTimerDispatch(compiled, launch_payload, options)
         effect_id = timer_plan.source.slot.effects and timer_plan.source.slot.effects[1] and timer_plan.source.slot.effects[1].id or nil,
         simple_note = "timer_v0",
         live_mode = "timer",
+    }
+end
+
+local function tryBounceDispatch(compiled, launch_payload, options)
+    runtime_stats.inc("live_bounce_attempts")
+    if options.force_bounce_disabled == true then
+        return bounceRejected("live_bounce_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_bounce_disabled_rejections")
+    end
+    if options.force_bounce_enabled ~= true and not dev.liveBounceEnabled() then
+        return bounceRejected("live_bounce_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_bounce_disabled_rejections")
+    end
+
+    local capabilities = sfp_adapter.capabilities()
+    if not capabilities.has_setSpellBounce
+        or not capabilities.has_setSpellDetonateOnActor
+        or not capabilities.has_detonateSpellAtPos
+        or not capabilities.has_cancelSpell then
+        return bounceRejected("sfp_bounce_missing", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_bounce_capability_rejections")
+    end
+
+    local attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
+    if not attached.ok then
+        return bounceRejected("helper_records_failed", {
+            plan_recipe_id = compiled.recipe_id,
+            error = firstErrorMessage(attached),
+            errors = attached.errors,
+        })
+    end
+
+    local bounce_plan, bounce_reason = live_bounce.selectV0Plan(attached.plan, {
+        max_depth = options.max_nested_payload_depth,
+        max_jobs = options.max_nested_payload_jobs,
+        max_projectiles = options.max_projectiles,
+        max_bounce_count = options.max_bounce_count,
+        max_chain_hops = options.max_chain_hops,
+        max_chain_jobs = options.max_chain_jobs,
+        max_chain_scan_candidates = options.max_chain_scan_candidates,
+        chain_scan_radius = options.chain_scan_radius,
+    })
+    if not bounce_plan then
+        return bounceRejected(bounce_reason or "bounce_v0_rejected", {
+            plan_recipe_id = compiled.recipe_id,
+        })
+    end
+    if bounce_plan.has_trigger_payload == true
+        and options.force_trigger_enabled ~= true
+        and not dev.liveTriggerEnabled() then
+        return bounceRejected("live_trigger_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+            source_slot_id = bounce_plan.source_slot_id,
+            payload_slot_id = bounce_plan.payload_slot_id,
+            bounce_max = bounce_plan.bounce_max,
+        }, "live_trigger_disabled_rejections")
+    end
+    if bounce_plan.has_chain_payload == true
+        and options.force_chain_runtime_enabled ~= true
+        and not dev.liveChainRuntimeEnabled() then
+        return bounceRejected("bounce_chain_payload_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+            source_slot_id = bounce_plan.source_slot_id,
+            payload_slot_id = bounce_plan.payload_slot_id,
+            bounce_max = bounce_plan.bounce_max,
+            chain_max_hops = bounce_plan.chain_max_hops,
+        }, "live_bounce_chain_reject")
+    end
+
+    local source_recipe_id = options.source_recipe_id or launch_payload.recipe_id
+    local result_recipe_id = source_recipe_id or compiled.recipe_id
+    local cast_id = nextCastId(result_recipe_id, compiled.recipe_id)
+    local bounce_id = string.format(
+        "bounce:%s:%s:%s",
+        tostring(cast_id),
+        tostring(bounce_plan.source_slot_id),
+        tostring(bounce_plan.bounce_max)
+    )
+    local chain_id = nil
+    if bounce_plan.has_chain_payload == true then
+        chain_id = string.format(
+            "chain:%s:%s:%s:%s:bounce",
+            tostring(cast_id),
+            tostring(bounce_plan.source_slot_id),
+            tostring(bounce_plan.payload_slot_id),
+            tostring(bounce_plan.chain_max_hops)
+        )
+    end
+    runtime_stats.inc("live_2_2c_qualified")
+    runtime_stats.inc("live_bounce_qualified")
+    if bounce_plan.has_trigger_payload == true then
+        runtime_stats.inc("live_bounce_trigger_qualified")
+    end
+    if bounce_plan.has_chain_payload == true then
+        runtime_stats.inc("chain_runtime_qualified")
+        runtime_stats.inc("chain_runtime_trigger_chain_qualified")
+        log.info(string.format(
+            "SPELLFORGE_LIVE_BOUNCE_CHAIN_PAYLOAD_QUALIFIED recipe_id=%s plan_recipe_id=%s cast_id=%s bounce_id=%s chain_id=%s source_slot_id=%s payload_slot_id=%s requested_hops=%s max_hops=%s",
+            tostring(result_recipe_id),
+            tostring(compiled.recipe_id),
+            tostring(cast_id),
+            tostring(bounce_id),
+            tostring(chain_id),
+            tostring(bounce_plan.source_slot_id),
+            tostring(bounce_plan.payload_slot_id),
+            tostring(bounce_plan.chain_requested_hops),
+            tostring(bounce_plan.chain_max_hops)
+        ))
+    end
+
+    local selected_helpers = { bounce_plan.source }
+    local job_inputs = buildJobInputs(selected_helpers, compiled.recipe_id, cast_id, launch_payload, nil)
+    local source_job = job_inputs[1]
+    local binding = {
+        recipe_id = compiled.recipe_id,
+        cast_id = cast_id,
+        bounce_id = bounce_id,
+        source_slot_id = bounce_plan.source_slot_id,
+        source_helper_engine_id = bounce_plan.source_helper_engine_id,
+        payload_slot_id = bounce_plan.payload_slot_id,
+        payload_helper_engine_id = bounce_plan.payload_helper_engine_id,
+        payloads = bounce_plan.payloads,
+        payload_slot_ids = bounce_plan.payload_slot_ids,
+        payload_helper_engine_ids = bounce_plan.payload_helper_engine_ids,
+        payload_count = bounce_plan.payload_count,
+        payload_group_key = bounce_plan.payload_group_key,
+        has_trigger_payload = bounce_plan.has_trigger_payload == true,
+        has_chain_payload = bounce_plan.has_chain_payload == true,
+        chain_id = chain_id,
+        chain_shape = bounce_plan.chain_shape,
+        chain_requested_hops = bounce_plan.chain_requested_hops,
+        chain_max_hops = bounce_plan.chain_max_hops,
+        chain_targeting_mode = "no_immediate_repeat",
+        chain_candidate_provider = options.chain_candidate_provider or options.candidate_provider,
+        candidate_cap = options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
+        scan_radius = options.chain_scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
+        max_chain_ticks = options.max_chain_ticks,
+        max_jobs_per_tick = options.max_jobs_per_tick,
+        force_chain_runtime_enabled = options.force_chain_runtime_enabled == true,
+        bounce_max = bounce_plan.bounce_max,
+        bounce_power = bounce_plan.bounce_power,
+        actor = launch_payload.actor or launch_payload.sender,
+        start_pos = launch_payload.start_pos,
+        direction = launch_payload.direction,
+        mute_audio = launch_payload.mute_audio or launch_payload.muteAudio,
+        mute_light = launch_payload.mute_light or launch_payload.muteLight,
+        max_live_launches_per_tick = options.max_live_launches_per_tick,
+        chaos_budget_profile = options.chaos_budget_profile,
+    }
+    live_bounce.decorateSourceJob(source_job, binding)
+    local chain_binding = nil
+    if bounce_plan.has_chain_payload == true then
+        chain_binding = {
+            recipe_id = compiled.recipe_id,
+            display_recipe_id = result_recipe_id,
+            cast_id = cast_id,
+            chain_id = chain_id,
+            chain_shape = "trigger_payload_chain",
+            source_slot_id = bounce_plan.source_slot_id,
+            source_helper_engine_id = bounce_plan.source_helper_engine_id,
+            payload_slot_id = bounce_plan.payload_slot_id,
+            payload_helper_engine_id = bounce_plan.payload_helper_engine_id,
+            payload_effect_id = bounce_plan.payload_effect_id,
+            payload_emission_index = bounce_plan.chain_plan
+                and bounce_plan.chain_plan.payload
+                and (bounce_plan.chain_plan.payload.slot.emission_index or bounce_plan.chain_plan.payload.helper.emission_index)
+                or nil,
+            payload_group_index = bounce_plan.chain_plan
+                and bounce_plan.chain_plan.payload
+                and (bounce_plan.chain_plan.payload.slot.group_index or bounce_plan.chain_plan.payload.helper.group_index)
+                or nil,
+            root_source_slot_id = bounce_plan.source_slot_id,
+            requested_hops = bounce_plan.chain_requested_hops,
+            max_hops = bounce_plan.chain_max_hops,
+            candidate_cap = options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
+            targeting_mode = "no_immediate_repeat",
+            actor = launch_payload.actor or launch_payload.sender,
+            candidate_provider = options.chain_candidate_provider or options.candidate_provider,
+            scan_radius = options.chain_scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
+            max_jobs_per_tick = options.max_jobs_per_tick,
+            max_live_launches_per_tick = options.max_live_launches_per_tick,
+            force_enabled = options.force_chain_runtime_enabled == true,
+        }
+        live_chain.decorateSourceJob(source_job, chain_binding)
+    end
+
+    if options.dry_run == true then
+        return {
+            ok = true,
+            used_live_2_2c = true,
+            dry_run = true,
+            recipe_id = result_recipe_id,
+            plan_recipe_id = compiled.recipe_id,
+            slot_id = bounce_plan.source_slot_id,
+            helper_engine_id = bounce_plan.source_helper_engine_id,
+            slot_ids = { bounce_plan.source_slot_id },
+            helper_engine_ids = { bounce_plan.source_helper_engine_id },
+            bounce_id = bounce_id,
+            bounce_max = bounce_plan.bounce_max,
+            bounce_power = bounce_plan.bounce_power,
+            bounce_detonate_on_actor_hit = false,
+            bounce_trigger_payload_slot_id = bounce_plan.payload_slot_id,
+            trigger_payload_slot_id = bounce_plan.payload_slot_id,
+            trigger_payload_helper_engine_id = bounce_plan.payload_helper_engine_id,
+            trigger_payload_count = bounce_plan.payload_count,
+            payload_projectile_launches = 0,
+            payload_detonation_mode = bounce_plan.has_chain_payload == true
+                and "bounce_chain_runtime"
+                or (bounce_plan.has_trigger_payload == true and "bounce_detonate_at_pos" or nil),
+            payload_chain_runtime = bounce_plan.has_chain_payload == true,
+            chain_id = chain_id,
+            chain_shape = bounce_plan.chain_shape,
+            chain_requested_hops = bounce_plan.chain_requested_hops,
+            chain_max_hops = bounce_plan.chain_max_hops,
+            targeting_mode = bounce_plan.has_chain_payload == true and "no_immediate_repeat" or nil,
+            expected_bounce_event_count = bounce_plan.bounce_max,
+            slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
+            helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
+            dispatch_count = 1,
+            source_dispatch_count = 1,
+            fanout_count = 1,
+            payload_fanout_count = bounce_plan.payload_count,
+            simple_note = "bounce_v0",
+            live_mode = "bounce",
+            cast_id = cast_id,
+        }
+    end
+
+    local enqueue = orchestrator.enqueue(source_job)
+    if not enqueue.ok then
+        runtime_stats.inc("live_2_2c_dispatch_failed")
+        return bounceRejected("enqueue_failed", {
+            recipe_id = result_recipe_id,
+            plan_recipe_id = compiled.recipe_id,
+            slot_id = bounce_plan.source_slot_id,
+            helper_engine_id = bounce_plan.source_helper_engine_id,
+            payload_slot_id = bounce_plan.payload_slot_id,
+            bounce_max = bounce_plan.bounce_max,
+            error = enqueue.error or "enqueue failed",
+            cast_id = cast_id,
+        })
+    end
+
+    binding.source_job_id = enqueue.job_id
+    live_bounce.registerBinding(binding)
+    if chain_binding then
+        chain_binding.source_job_id = enqueue.job_id
+        if not live_chain.registerBinding(chain_binding) then
+            orchestrator.cancel(enqueue.job_id)
+            return bounceRejected("bounce_chain_binding_failed", {
+                recipe_id = result_recipe_id,
+                plan_recipe_id = compiled.recipe_id,
+                source_slot_id = bounce_plan.source_slot_id,
+                payload_slot_id = bounce_plan.payload_slot_id,
+                chain_id = chain_id,
+                cast_id = cast_id,
+            }, "live_bounce_chain_reject")
+        end
+    end
+    runtime_stats.inc("live_bounce_source_jobs_enqueued")
+
+    local tick_result = tickUntilJobsSettled({ enqueue.job_id }, options)
+    local summary = jobSummary(enqueue.job_id)
+    if summary.job_status == "queued" then
+        orchestrator.cancel(enqueue.job_id)
+    end
+    if summary.job_status ~= "complete" or summary.launch_accepted ~= true then
+        runtime_stats.inc("live_2_2c_dispatch_failed")
+        return bridgeError(summary.error or "bounce source launch job did not complete", {
+            stage = "bounce_source_launch_job",
+            recipe_id = result_recipe_id,
+            plan_recipe_id = compiled.recipe_id,
+            slot_id = bounce_plan.source_slot_id,
+            helper_engine_id = bounce_plan.source_helper_engine_id,
+            job_id = enqueue.job_id,
+            job_ids = { enqueue.job_id },
+            job_status = summary.job_status,
+            tick_result = tick_result,
+            cast_id = cast_id,
+            fallback_allowed = false,
+        })
+    end
+
+    log.info(string.format(
+        "SPELLFORGE_LIVE_BOUNCE_SOURCE_OK recipe_id=%s plan_recipe_id=%s cast_id=%s bounce_id=%s source_slot_id=%s payload_slot_id=%s bounce_max=%s bounce_power=%s projectile_id=%s bounce_enabled=%s detonate_on_actor_hit=%s post_launch_bounce_ok=%s post_launch_actor_toggle_ok=%s post_launch_bounce_error=%s post_launch_actor_toggle_error=%s",
+        tostring(result_recipe_id),
+        tostring(compiled.recipe_id),
+        tostring(cast_id),
+        tostring(bounce_id),
+        tostring(bounce_plan.source_slot_id),
+        tostring(bounce_plan.payload_slot_id),
+        tostring(bounce_plan.bounce_max),
+        tostring(bounce_plan.bounce_power),
+        tostring(summary.projectile_id),
+        tostring(summary.bounceEnabled == true),
+        tostring(summary.detonateOnActorHit),
+        tostring(summary.post_launch_bounce_ok == true),
+        tostring(summary.post_launch_detonate_on_actor_ok == true),
+        tostring(summary.post_launch_bounce_error),
+        tostring(summary.post_launch_detonate_on_actor_error)
+    ))
+    runtime_stats.inc("live_2_2c_dispatch_ok")
+
+    return {
+        ok = true,
+        used_live_2_2c = true,
+        recipe_id = result_recipe_id,
+        plan_recipe_id = compiled.recipe_id,
+        slot_id = bounce_plan.source_slot_id,
+        helper_engine_id = bounce_plan.source_helper_engine_id,
+        slot_ids = { bounce_plan.source_slot_id },
+        helper_engine_ids = { bounce_plan.source_helper_engine_id },
+        bounce_id = bounce_id,
+        bounce_max = bounce_plan.bounce_max,
+        bounce_power = bounce_plan.bounce_power,
+        bounce_detonate_on_actor_hit = false,
+        post_launch_bounce_ok = summary.post_launch_bounce_ok == true,
+        post_launch_detonate_on_actor_ok = summary.post_launch_detonate_on_actor_ok == true,
+        post_launch_bounce_error = summary.post_launch_bounce_error,
+        post_launch_detonate_on_actor_error = summary.post_launch_detonate_on_actor_error,
+        trigger_payload_slot_id = bounce_plan.payload_slot_id,
+        trigger_payload_helper_engine_id = bounce_plan.payload_helper_engine_id,
+        trigger_payload_count = bounce_plan.payload_count,
+        payload_projectile_launches = 0,
+        payload_detonation_mode = bounce_plan.has_chain_payload == true
+            and "bounce_chain_runtime"
+            or (bounce_plan.has_trigger_payload == true and "bounce_detonate_at_pos" or nil),
+        payload_chain_runtime = bounce_plan.has_chain_payload == true,
+        chain_id = chain_id,
+        chain_shape = bounce_plan.chain_shape,
+        chain_requested_hops = bounce_plan.chain_requested_hops,
+        chain_max_hops = bounce_plan.chain_max_hops,
+        targeting_mode = bounce_plan.has_chain_payload == true and "no_immediate_repeat" or nil,
+        expected_bounce_event_count = bounce_plan.bounce_max,
+        projectile_id = summary.projectile_id,
+        projectile_ids = summary.projectile_id and { summary.projectile_id } or {},
+        projectile_id_source = summary.projectile_id_source,
+        projectile_registered = summary.projectile_registered == true,
+        job_id = enqueue.job_id,
+        job_ids = { enqueue.job_id },
+        jobs = { summary },
+        job_status = summary.job_status,
+        cast_id = cast_id,
+        runtime = "2.2c_live_helper",
+        fallback = false,
+        dispatch_count = 1,
+        source_dispatch_count = 1,
+        fanout_count = 1,
+        payload_fanout_count = bounce_plan.payload_count,
+        slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
+        helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
+        effect_id = bounce_plan.source.slot.effects and bounce_plan.source.slot.effects[1] and bounce_plan.source.slot.effects[1].id or nil,
+        simple_note = "bounce_v0",
+        live_mode = "bounce",
     }
 end
 
@@ -4600,8 +5686,10 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
     local has_timer_effect = effectListHasOperator(effects, "Timer")
     local has_trigger_effect = effectListHasOperator(effects, "Trigger")
     local has_chain_effect = effectListHasOperator(effects, "Chain")
+    local has_bounce_effect = effectListHasOperator(effects, "Bounce")
     local has_size_plus_effect = effectListHasOperator(effects, "Size+")
     local has_speed_plus_effect = effectListHasOperator(effects, "Speed+")
+    local has_homing_effect = effectListHasOperator(effects, "Homing")
     local estimated_ops = estimateFirstGroupOperators(effects)
     local estimated_multicast_count = estimated_ops.multicast_count or 1
     local estimated_multicast_fanout = estimated_ops.has_multicast and estimated_multicast_count > 1
@@ -4685,6 +5773,10 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
             end
             return speedPlusRejected("compile_failed", details)
         end
+        if has_homing_effect then
+            runtime_stats.inc("live_homing_attempts")
+            return homingRejected("compile_failed", details)
+        end
         if has_timer_effect then
             runtime_stats.inc("live_timer_attempts")
             if errorsMentionTimerDelay(compiled.errors) then
@@ -4696,6 +5788,10 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
             runtime_stats.inc("chain_runtime_attempts")
             return chainRuntimeRejected("compile_failed", details, "chain_runtime_context_reject")
         end
+        if has_bounce_effect then
+            runtime_stats.inc("live_bounce_attempts")
+            return bounceRejected("compile_failed", details)
+        end
         if estimated_pattern_kind ~= nil then
             return patternRejected(estimated_pattern_kind, "compile_failed", details)
         end
@@ -4705,8 +5801,17 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
         return rejected("compile_failed", details)
     end
 
-    if has_chain_effect or (compiled.plan and compiled.plan.bounds and compiled.plan.bounds.has_chain) then
+    local compiled_bounds = compiled.plan and compiled.plan.bounds or nil
+    if compiled_bounds and compiled_bounds.has_bounce then
+        return tryBounceDispatch(compiled, launch_payload, options)
+    end
+
+    if has_chain_effect or (compiled_bounds and compiled_bounds.has_chain) then
         return tryChainDispatch(compiled, launch_payload, options)
+    end
+
+    if has_bounce_effect then
+        return tryBounceDispatch(compiled, launch_payload, options)
     end
 
     if has_timer_effect and has_trigger_effect then
@@ -4719,6 +5824,10 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
 
     if compiled.plan and compiled.plan.bounds and compiled.plan.bounds.has_speed_plus then
         return trySpeedPlusDispatch(compiled, launch_payload, options)
+    end
+
+    if compiled.plan and compiled.plan.bounds and compiled.plan.bounds.has_homing then
+        return tryHomingDispatch(compiled, launch_payload, options)
     end
 
     if compiled.plan and compiled.plan.bounds and compiled.plan.bounds.has_timer then
@@ -5038,6 +6147,8 @@ function live_simple_dispatch.onProbe(payload)
     end
 
     local mode = payload and payload.mode or "qualifying_dry_run"
+    -- Smoke probes run back-to-back in script callbacks; treat each probe as a fresh update for launch-density accounting.
+    orchestrator.advanceTime(0)
     local probe_entry = { node_metadata = { { logical_id = "probe" } } }
     local probe_root = { real_effects = SIMPLE_FIRE_DAMAGE_TARGET }
     local opts = {
@@ -5158,6 +6269,7 @@ function live_simple_dispatch.onProbe(payload)
             force_enabled = true,
             force_timer_enabled = true,
             allow_pending_launch_jobs = payload and payload.allow_pending_launch_jobs == true,
+            simulate_update_ticks = true,
         }
         local first = live_trigger.handleHitPayload(hit_payload, hit_opts)
         local duplicate = live_trigger.handleHitPayload(hit_payload, hit_opts)
@@ -5259,6 +6371,7 @@ function live_simple_dispatch.onProbe(payload)
                 local hit_opts = {
                     force_enabled = true,
                     allow_pending_launch_jobs = allow_pending_launch_jobs == true,
+                    simulate_update_ticks = true,
                 }
                 nested_trigger_hit = live_trigger.handleHitPayload(hit_payload, hit_opts)
                 nested_trigger_duplicate = live_trigger.handleHitPayload(hit_payload, hit_opts)
@@ -5290,6 +6403,12 @@ function live_simple_dispatch.onProbe(payload)
             timer_delay_seconds = status and status.timer_delay_seconds or nil,
             timer_due_tick = status and status.timer_due_tick or nil,
             timer_due_seconds = status and status.timer_due_seconds or nil,
+            timer_source_projectile_id = status and status.source_projectile_id or nil,
+            timer_source_detonation_status = status and status.source_detonation_status or nil,
+            timer_source_detonation_ok = status and status.source_detonation_ok == true or false,
+            timer_source_cancel_ok = status and status.source_cancel_ok == true or false,
+            timer_source_projectile_already_hit = status and status.source_projectile_already_hit == true or false,
+            timer_source_detonation_error = status and status.source_detonation_error or nil,
             tick_result = tick_result,
             tick_results = tick_results,
             callback_payload_count = payload_count,
@@ -5390,6 +6509,9 @@ function live_simple_dispatch.onProbe(payload)
         probe_root = { real_effects = TRIGGER_FIRE_FROST_TARGET }
         opts.force_trigger_enabled = true
         opts.dry_run = false
+    elseif applyBounceProbeMode(mode, opts) then
+        probe_root = opts._spellforge_probe_root
+        opts._spellforge_probe_root = nil
     elseif mode == "trigger_payload_multicast_disabled" then
         probe_root = { real_effects = TRIGGER_PAYLOAD_MULTICAST_X3_TARGET }
         opts.force_trigger_enabled = true
@@ -5619,6 +6741,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.force_chaos_budget_enabled = true
         opts.force_chain_runtime_enabled = true
         opts.force_payload_multicast_enabled = true
+        opts.force_chain_multicast_disabled = true
     elseif mode == "speed_plus_disabled" then
         probe_root = { real_effects = SPEED_PLUS_FIRE_DAMAGE_TARGET }
         opts.force_speed_plus_disabled = true
@@ -5639,6 +6762,55 @@ function live_simple_dispatch.onProbe(payload)
         probe_root = { real_effects = SIZE_PLUS_FIRE_DAMAGE_TARGET }
         opts.force_size_plus_enabled = true
         opts.dry_run = false
+    elseif mode == "homing_disabled" then
+        probe_root = {
+            real_effects = {
+                { id = "spellforge_homing" },
+                { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+            },
+        }
+        opts.force_homing_disabled = true
+    elseif mode == "homing_dry_run" then
+        probe_root = {
+            real_effects = {
+                { id = "spellforge_homing" },
+                { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+            },
+        }
+        opts.force_homing_enabled = true
+        opts.force_soft_homing_disabled = true
+    elseif mode == "homing_launch" then
+        probe_root = {
+            real_effects = {
+                { id = "spellforge_homing" },
+                { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+            },
+        }
+        opts.force_homing_enabled = true
+        opts.force_soft_homing_disabled = true
+        opts.dry_run = false
+    elseif mode == "homing_soft_launch" then
+        probe_root = {
+            real_effects = {
+                { id = "spellforge_homing" },
+                { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+            },
+        }
+        opts.force_homing_enabled = true
+        opts.force_soft_homing_enabled = true
+        opts.dry_run = false
+        opts.soft_homing_max_lifetime_seconds = limits.HOMING_MAX_LIFETIME_SECONDS
+    elseif mode == "homing_soft_probe" then
+        probe_root = {
+            real_effects = {
+                { id = "spellforge_homing" },
+                { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+            },
+        }
+        opts.force_homing_enabled = true
+        opts.dry_run = false
+        opts.soft_homing_probe = true
+        opts.soft_homing_max_lifetime_seconds = limits.HOMING_MAX_LIFETIME_SECONDS
     elseif mode == "non_qualifying" then
         probe_root = { real_effects = NON_QUALIFYING_CHAIN_FIRE_DAMAGE_TARGET }
     elseif mode ~= "qualifying_dry_run" then
@@ -5675,7 +6847,7 @@ function live_simple_dispatch.onProbe(payload)
             hitPos = payload and payload.start_pos,
             target = payload and payload.hit_object,
         }
-        local hit_opts = { force_enabled = true }
+        local hit_opts = { force_enabled = true, simulate_update_ticks = true }
         if mode == "nested_trigger_timer_sequence" then
             hit_opts.force_timer_enabled = true
         elseif mode == "nested_trigger_timer_final_multicast_sequence"
@@ -5759,7 +6931,7 @@ function live_simple_dispatch.onProbe(payload)
         result.expected_payload_count = expected_payload_count
     end
     local ok = false
-    if mode == "non_qualifying" or mode == "multicast_disabled" or mode == "spread_disabled" or mode == "burst_disabled" or mode == "trigger_disabled" or mode == "timer_disabled" or mode == "speed_plus_disabled" or mode == "size_plus_disabled" or mode == "payload_multicast_disabled" or mode == "trigger_payload_multicast_disabled" or mode == "timer_payload_multicast_disabled" or mode == "trigger_payload_pattern_disabled" or mode == "timer_payload_pattern_disabled" or mode == "nested_trigger_timer_disabled" or mode == "nested_tt_depth_reject" or mode == "nested_tt_same_kind_reject" or mode == "nested_tt_fanout_reject" or mode == "nested_final_fanout_disabled" or mode == "nested_final_fanout_cap_reject" or mode == "chaos_multicast_over_cap" or mode == "chaos_nested_final_fanout_over_cap" or mode == "chaos_chain_multicast_still_deferred" then
+    if mode == "non_qualifying" or mode == "multicast_disabled" or mode == "spread_disabled" or mode == "burst_disabled" or mode == "trigger_disabled" or mode == "timer_disabled" or mode == "speed_plus_disabled" or mode == "size_plus_disabled" or mode == "homing_disabled" or mode == "bounce_disabled" or mode == "bounce_over_cap" or mode == "bounce_fanout_deferred" or mode == "bounce_timer_deferred" or mode == "bounce_chain_deferred" or mode == "bounce_speed_plus_deferred" or mode == "bounce_size_plus_deferred" or mode == "payload_multicast_disabled" or mode == "trigger_payload_multicast_disabled" or mode == "timer_payload_multicast_disabled" or mode == "trigger_payload_pattern_disabled" or mode == "timer_payload_pattern_disabled" or mode == "nested_trigger_timer_disabled" or mode == "nested_tt_depth_reject" or mode == "nested_tt_same_kind_reject" or mode == "nested_tt_fanout_reject" or mode == "nested_final_fanout_disabled" or mode == "nested_final_fanout_cap_reject" or mode == "chaos_multicast_over_cap" or mode == "chaos_nested_final_fanout_over_cap" or mode == "chaos_chain_multicast_still_deferred" then
         ok = result.ok == false and result.used_live_2_2c == false and type(result.fallback_reason) == "string"
     elseif mode == "speed_plus_dry_run" then
         ok = result.ok == true
@@ -5828,6 +7000,87 @@ function live_simple_dispatch.onProbe(payload)
         if ok then
             runtime_stats.inc("live_size_plus_smoke_observed")
         end
+    elseif mode == "homing_dry_run" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "homing"
+            and result.dispatch_count == 1
+            and result.homing_field == "forceVec"
+            and type(result.homing_target_provider) == "string"
+            and tonumber(result.homing_force) ~= nil
+            and tonumber(result.homing_force) > 0
+            and type(result.homing_force_key) == "string"
+            and type(result.homing_direction_key) == "string"
+    elseif mode == "homing_launch" then
+        local job = result.jobs and result.jobs[1] or nil
+        local user_data = job and job.launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "homing"
+            and result.dispatch_count == 1
+            and result.homing_field == "forceVec"
+            and type(result.homing_target_provider) == "string"
+            and job
+            and job.job_status == "complete"
+            and job.launch_accepted == true
+            and job.forceVec ~= nil
+            and job.homing == true
+            and type(user_data) == "table"
+            and user_data.runtime == "2.2c_live_helper"
+            and user_data.homing == true
+            and user_data.homing_mode == "launch_force_vec"
+            and user_data.homing_field == "forceVec"
+            and type(user_data.homing_target_provider) == "string"
+            and tonumber(user_data.homing_force) ~= nil
+            and type(user_data.homing_force_key) == "string"
+            and type(user_data.homing_direction_key) == "string"
+        if ok then
+            runtime_stats.inc("live_homing_smoke_observed")
+        end
+    elseif mode == "homing_soft_probe" then
+        local job = result.jobs and result.jobs[1] or nil
+        local user_data = job and job.launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "homing"
+            and result.dispatch_count == 1
+            and job
+            and job.job_status == "complete"
+            and job.launch_accepted == true
+            and job.forceVec == nil
+            and type(user_data) == "table"
+            and user_data.runtime == "2.2c_live_helper"
+            and user_data.homing == true
+            and user_data.homing_mode == "soft_redirect_probe"
+            and user_data.homing_field == "redirectSpell"
+            and result.soft_homing_probe_registered == true
+            and type(result.soft_homing_probe_entry_id) == "string"
+        if ok then
+            runtime_stats.inc("live_homing_smoke_observed")
+        end
+    elseif mode == "homing_soft_launch" then
+        local job = result.jobs and result.jobs[1] or nil
+        local user_data = job and job.launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "homing"
+            and result.dispatch_count == 1
+            and result.homing_field == "redirectSpell"
+            and job
+            and job.job_status == "complete"
+            and job.launch_accepted == true
+            and job.forceVec == nil
+            and type(user_data) == "table"
+            and user_data.runtime == "2.2c_live_helper"
+            and user_data.homing == true
+            and user_data.homing_mode == "soft_redirect"
+            and user_data.homing_field == "redirectSpell"
+            and result.soft_homing_runtime_registered == true
+            and type(result.soft_homing_runtime_entry_id) == "string"
+        if ok then
+            runtime_stats.inc("live_homing_smoke_observed")
+        end
     elseif mode == "multicast_dry_run" or mode == "chaos_multicast_high_dry_run" then
         local expected_count = mode == "chaos_multicast_high_dry_run" and CHAOS_HIGH_FANOUT_COUNT or 3
         ok = result.ok == true
@@ -5880,6 +7133,89 @@ function live_simple_dispatch.onProbe(payload)
             and result.live_mode == "trigger"
             and result.dispatch_count == 1
             and type(result.trigger_payload_slot_id) == "string"
+    elseif mode == "bounce_source_only_dry_run" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and tonumber(result.bounce_max) == 3
+            and result.bounce_detonate_on_actor_hit == false
+            and result.trigger_payload_slot_id == nil
+            and result.payload_fanout_count == nil
+    elseif mode == "bounce_dry_run" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and tonumber(result.bounce_max) == 3
+            and result.bounce_detonate_on_actor_hit == false
+            and type(result.trigger_payload_slot_id) == "string"
+            and tonumber(result.trigger_payload_count) == 1
+            and result.payload_projectile_launches == 0
+            and result.payload_detonation_mode == "bounce_detonate_at_pos"
+    elseif mode == "bounce_chain_payload_dry_run" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and tonumber(result.bounce_max) == 3
+            and result.bounce_detonate_on_actor_hit == false
+            and type(result.trigger_payload_slot_id) == "string"
+            and tonumber(result.trigger_payload_count) == 1
+            and result.payload_projectile_launches == 0
+            and result.payload_detonation_mode == "bounce_chain_runtime"
+            and result.payload_chain_runtime == true
+            and result.chain_shape == "trigger_payload_chain"
+            and tonumber(result.chain_max_hops) == 3
+            and result.targeting_mode == "no_immediate_repeat"
+    elseif mode == "bounce_chain_payload_launch" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.source_dispatch_count == 1
+            and tonumber(result.bounce_max) == 3
+            and result.bounce_detonate_on_actor_hit == false
+            and type(result.trigger_payload_slot_id) == "string"
+            and tonumber(result.trigger_payload_count) == 1
+            and result.payload_projectile_launches == 0
+            and result.payload_detonation_mode == "bounce_chain_runtime"
+            and result.payload_chain_runtime == true
+            and result.chain_shape == "trigger_payload_chain"
+            and tonumber(result.chain_max_hops) == 3
+            and result.targeting_mode == "no_immediate_repeat"
+    elseif mode == "bounce_launch" then
+        local job = result.jobs and result.jobs[1] or nil
+        local user_data = job and job.launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.source_dispatch_count == 1
+            and result.fanout_count == 1
+            and result.payload_projectile_launches == 0
+            and result.payload_detonation_mode == "bounce_detonate_at_pos"
+            and tonumber(result.bounce_max) == 3
+            and job
+            and job.job_status == "complete"
+            and job.launch_accepted == true
+            and job.helper_engine_id == result.helper_engine_id
+            and result.trigger_payload_helper_engine_id ~= result.helper_engine_id
+            and job.bounceEnabled == true
+            and tonumber(job.bounceMax) == 3
+            and job.detonateOnActorHit == false
+            and job.post_launch_bounce_ok == true
+            and job.post_launch_detonate_on_actor_ok == true
+            and type(user_data) == "table"
+            and user_data.bounce_runtime == true
+            and user_data.bounce_role == "source"
+            and user_data.bounce_detonate_on_actor_hit == false
+            and user_data.bounce_trigger_payload_slot_id == result.trigger_payload_slot_id
+            and user_data.source_prefix_opcode == "Bounce"
+            and user_data.source_postfix_opcode == "Trigger"
     elseif mode == "trigger_post_hit" or mode == "trigger_post_hit_fallback" then
         local user_data = result.trigger_payload_launch_user_data
         ok = result.ok == true

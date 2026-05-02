@@ -4,12 +4,16 @@ local compiler = require("scripts.spellforge.global.compiler")
 local dev_launch = require("scripts.spellforge.global.dev_launch")
 local executor = require("scripts.spellforge.global.executor")
 local events = require("scripts.spellforge.shared.events")
+local helper_records = require("scripts.spellforge.global.helper_records")
 local live_timer = require("scripts.spellforge.global.live_timer")
 local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
 local live_chain = require("scripts.spellforge.global.live_chain")
+local live_soft_homing = require("scripts.spellforge.global.live_soft_homing")
 local records = require("scripts.spellforge.global.records")
 local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
 local sfp_smoke = require("scripts.spellforge.global.sfp_smoke")
+local ui_catalog = require("scripts.spellforge.global.ui_catalog")
+local ui_contract = require("scripts.spellforge.global.ui_contract")
 local log = require("scripts.spellforge.shared.log").new("global.init")
 local did_records_probe = false
 
@@ -101,16 +105,50 @@ local function onCompileRecipe(payload)
     sender:sendEvent(events.COMPILE_RESULT, result)
 end
 
-local function onDeleteCompiled(payload)
-    local deleted = false
-    if payload and payload.recipe_id then
-        records.put(payload.recipe_id, nil)
-        deleted = true
-    elseif payload and payload.spell_id then
-        deleted = records.deleteBySpellId(payload.spell_id)
+local function onValidateRecipe(payload)
+    local sender = getSender(payload, events.VALIDATE_RECIPE)
+    if not sender then
+        return
     end
 
-    log.info(string.format("delete request handled deleted=%s", tostring(deleted)))
+    sender:sendEvent(events.VALIDATE_RESULT, ui_contract.validateRecipe(payload or {}))
+end
+
+local function onPreviewRecipe(payload)
+    local sender = getSender(payload, events.PREVIEW_RECIPE)
+    if not sender then
+        return
+    end
+
+    sender:sendEvent(events.PREVIEW_RESULT, ui_contract.previewRecipe(payload or {}))
+end
+
+local function onQueryUiCatalog(payload)
+    local sender = getSender(payload, events.QUERY_UI_CATALOG)
+    if not sender then
+        return
+    end
+
+    sender:sendEvent(events.UI_CATALOG_RESULT, ui_catalog.build(payload or {}))
+end
+
+local function onDeleteCompiled(payload)
+    local deleted = false
+    local recipe_id = nil
+    if payload and payload.recipe_id then
+        recipe_id = payload.recipe_id
+        deleted = records.deleteByRecipeId(recipe_id)
+    elseif payload and payload.spell_id then
+        deleted, recipe_id = records.deleteBySpellId(payload.spell_id)
+    end
+
+    local helper_records_cleared = recipe_id and helper_records.clearForRecipe(recipe_id) or 0
+    log.info(string.format(
+        "delete request handled deleted=%s recipe_id=%s helper_records_cleared=%s",
+        tostring(deleted),
+        tostring(recipe_id),
+        tostring(helper_records_cleared)
+    ))
 end
 
 
@@ -133,10 +171,18 @@ local function onQuerySpellMetadata(payload)
     })
 end
 
+local function onSfpSpellState(payload)
+    sfp_smoke.onSpellState(payload)
+    live_soft_homing.onSpellState(payload)
+end
+
 return {
     eventHandlers = {
         [events.CHECK_BACKEND] = onCheckBackend,
         [events.COMPILE_RECIPE] = onCompileRecipe,
+        [events.VALIDATE_RECIPE] = onValidateRecipe,
+        [events.PREVIEW_RECIPE] = onPreviewRecipe,
+        [events.QUERY_UI_CATALOG] = onQueryUiCatalog,
         [events.DELETE_COMPILED] = onDeleteCompiled,
         [events.QUERY_SPELL_METADATA] = onQuerySpellMetadata,
         [events.CAST_REQUEST] = executor.onCastRequest,
@@ -161,7 +207,8 @@ return {
         [events.RUNTIME_STATS_REQUEST] = executor.onRuntimeStatsRequest,
         [events.CHAIN_LOS_RESULT] = live_chain.onLosResult,
         MagExp_OnMagicHit = executor.onMagicHit,
-        MagExp_SpellState = sfp_smoke.onSpellState,
+        MagExp_OnProjectileBounce = executor.onProjectileBounce,
+        MagExp_SpellState = onSfpSpellState,
     },
     engineHandlers = {
         -- OpenMW engine handlers docs (global scripts): onPlayerAdded/onUpdate are documented;

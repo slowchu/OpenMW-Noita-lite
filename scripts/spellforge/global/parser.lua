@@ -1,5 +1,6 @@
 local limits = require("scripts.spellforge.shared.limits")
 local opcodes = require("scripts.spellforge.shared.opcodes")
+local validation = require("scripts.spellforge.shared.validation_contract")
 
 local parser = {}
 
@@ -10,6 +11,8 @@ local DEFAULT_OPERATOR_ID_TO_OPCODE = {
     spellforge_speed_plus = "Speed+",
     spellforge_size_plus = "Size+",
     spellforge_chain = "Chain",
+    spellforge_bounce = "Bounce",
+    spellforge_homing = "Homing",
     spellforge_trigger = "Trigger",
     spellforge_timer = "Timer",
 }
@@ -21,6 +24,8 @@ local PREFIX_OPS = {
     ["Speed+"] = true,
     ["Size+"] = true,
     Chain = true,
+    Bounce = true,
+    Homing = true,
 }
 
 local POSTFIX_OPS = {
@@ -28,11 +33,13 @@ local POSTFIX_OPS = {
     Timer = true,
 }
 
-local function appendError(errors, index, message)
-    errors[#errors + 1] = {
-        path = string.format("effects[%d]", index),
-        message = message,
-    }
+local function appendError(errors, index, message, code, details)
+    errors[#errors + 1] = validation.error(
+        string.format("effects[%d]", index),
+        message,
+        code,
+        details
+    )
 end
 
 local function cloneEffect(effect)
@@ -68,39 +75,73 @@ end
 local function validateParam(errors, index, opcode_name, key, spec, value)
     if spec.type == "integer" then
         if type(value) ~= "number" or value % 1 ~= 0 then
-            appendError(errors, index, string.format("%s.%s must be an integer", opcode_name, key))
+            appendError(errors, index, string.format("%s.%s must be an integer", opcode_name, key), "invalid_opcode_parameter", {
+                opcode = opcode_name,
+                parameter = key,
+                expected = "integer",
+            })
             return
         end
     elseif spec.type == "number" then
         if type(value) ~= "number" then
-            appendError(errors, index, string.format("%s.%s must be a number", opcode_name, key))
+            appendError(errors, index, string.format("%s.%s must be a number", opcode_name, key), "invalid_opcode_parameter", {
+                opcode = opcode_name,
+                parameter = key,
+                expected = "number",
+            })
             return
         end
     end
 
     if spec.min ~= nil and value < spec.min then
-        appendError(errors, index, string.format("%s.%s must be >= %s", opcode_name, key, tostring(spec.min)))
+        appendError(errors, index, string.format("%s.%s must be >= %s", opcode_name, key, tostring(spec.min)), "invalid_opcode_parameter", {
+            opcode = opcode_name,
+            parameter = key,
+            min = spec.min,
+            value = value,
+        })
     end
     if spec.max ~= nil and value > spec.max then
-        appendError(errors, index, string.format("%s.%s must be <= %s", opcode_name, key, tostring(spec.max)))
+        appendError(errors, index, string.format("%s.%s must be <= %s", opcode_name, key, tostring(spec.max)), "invalid_opcode_parameter", {
+            opcode = opcode_name,
+            parameter = key,
+            max = spec.max,
+            value = value,
+        })
     end
 end
 
 local function validateOpcodeParams(errors, index, opcode_name, effect)
     local def = opcodes[opcode_name]
     if not def then
-        appendError(errors, index, string.format("Unknown opcode: %s", tostring(opcode_name)))
+        appendError(errors, index, string.format("Unknown opcode: %s", tostring(opcode_name)), "unknown_opcode", {
+            opcode = opcode_name,
+        })
         return
     end
-    local params = effect.params or {}
+    local params = type(effect.params) == "table" and effect.params or {}
     for key, spec in pairs(def.parameters or {}) do
         local value = params[key]
         if value == nil then
-            appendError(errors, index, string.format("Missing parameter %s for %s", key, opcode_name))
+            appendError(errors, index, string.format("Missing parameter %s for %s", key, opcode_name), "missing_opcode_parameter", {
+                opcode = opcode_name,
+                parameter = key,
+            })
         else
             validateParam(errors, index, opcode_name, key, spec, value)
         end
     end
+end
+
+local function cloneParams(params)
+    local out = {}
+    if type(params) ~= "table" then
+        return out
+    end
+    for key, value in pairs(params) do
+        out[key] = value
+    end
+    return out
 end
 
 local function computeEmissionCount(prefix_ops)
@@ -121,7 +162,7 @@ function parser.parseEffectList(effects, opts)
     if type(effects) ~= "table" then
         return {
             ok = false,
-            errors = { { path = "effects", message = "effects must be an array" } },
+            errors = { validation.error("effects", "effects must be an array", "effects_not_array") },
             warnings = {},
         }
     end
@@ -159,16 +200,22 @@ function parser.parseEffectList(effects, opts)
             end
         end
         if has_pattern and not has_multicast then
-            appendError(errors, index, "Burst/Spread requires Multicast in the same prefix chain")
+            appendError(errors, index, "Burst/Spread requires Multicast in the same prefix chain", "pattern_requires_multicast")
         end
 
         local emission_count_static = computeEmissionCount(prefix_for_group)
         if emission_count_static > max_projectiles then
-            appendError(errors, index, string.format("Emitter group static emissions exceed MAX_PROJECTILES_PER_CAST (%d)", max_projectiles))
+            appendError(errors, index, string.format("Emitter group static emissions exceed MAX_PROJECTILES_PER_CAST (%d)", max_projectiles), "static_emission_cap_exceeded", {
+                limit = max_projectiles,
+                count = emission_count_static,
+            })
         end
         total_static_emissions = total_static_emissions + emission_count_static
         if total_static_emissions > max_projectiles then
-            appendError(errors, index, string.format("Recipe static emission estimate exceeds MAX_PROJECTILES_PER_CAST (%d)", max_projectiles))
+            appendError(errors, index, string.format("Recipe static emission estimate exceeds MAX_PROJECTILES_PER_CAST (%d)", max_projectiles), "recipe_static_emission_cap_exceeded", {
+                limit = max_projectiles,
+                count = total_static_emissions,
+            })
         end
 
         local group = {
@@ -187,7 +234,7 @@ function parser.parseEffectList(effects, opts)
     local stop_after_payload = false
     for index, effect in ipairs(effects) do
         if type(effect) ~= "table" then
-            appendError(errors, index, "Effect must be a table")
+            appendError(errors, index, "Effect must be a table", "effect_not_table")
         else
             local effect_id_norm = normalizeId(effect.id)
             local opcode_name = effect_id_norm and operator_id_to_opcode[effect_id_norm] or nil
@@ -198,18 +245,20 @@ function parser.parseEffectList(effects, opts)
                     pending_prefix_ops[#pending_prefix_ops + 1] = {
                         opcode = opcode_name,
                         effect_id = effect.id,
-                        params = effect.params or {},
+                        params = cloneParams(effect.params),
                         index = index,
                     }
                 elseif POSTFIX_OPS[opcode_name] then
                     local last_group = groups[#groups]
                     if not last_group then
-                        appendError(errors, index, string.format("%s has no preceding emitter group", opcode_name))
+                        appendError(errors, index, string.format("%s has no preceding emitter group", opcode_name), "postfix_missing_source", {
+                            opcode = opcode_name,
+                        })
                     else
                         local op = {
                             opcode = opcode_name,
                             effect_id = effect.id,
-                            params = effect.params or {},
+                            params = cloneParams(effect.params),
                             index = index,
                             payload_scope = "remaining_effect_list_segment",
                         }
@@ -224,7 +273,9 @@ function parser.parseEffectList(effects, opts)
                 end
             else
                 if isSpellforgeLookingId(effect_id_norm) then
-                    appendError(errors, index, string.format("Unknown Spellforge operator effect ID: %s", tostring(effect.id)))
+                    appendError(errors, index, string.format("Unknown Spellforge operator effect ID: %s", tostring(effect.id)), "unknown_spellforge_operator", {
+                        effect_id = effect.id,
+                    })
                 end
                 flushEmitter(effect, index)
             end
@@ -236,11 +287,13 @@ function parser.parseEffectList(effects, opts)
 
     if #pending_prefix_ops > 0 then
         local first = pending_prefix_ops[1]
-        appendError(errors, first.index or #effects, string.format("%s must be followed by an emitter group", tostring(first.opcode)))
+        appendError(errors, first.index or #effects, string.format("%s must be followed by an emitter group", tostring(first.opcode)), "prefix_missing_emitter", {
+            opcode = first.opcode,
+        })
     end
 
     if #groups == 0 then
-        appendError(errors, 1, "Recipe has no emitter groups")
+        appendError(errors, 1, "Recipe has no emitter groups", "recipe_has_no_emitter_groups")
     end
 
     if #errors > 0 then

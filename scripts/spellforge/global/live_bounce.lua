@@ -1,0 +1,1066 @@
+local dev = require("scripts.spellforge.shared.dev")
+local limits = require("scripts.spellforge.shared.limits")
+local log = require("scripts.spellforge.shared.log").new("global.live_bounce")
+local chain_target_provider = require("scripts.spellforge.global.chain_target_provider")
+local helper_records = require("scripts.spellforge.global.helper_records")
+local live_chain = require("scripts.spellforge.global.live_chain")
+local payload_multicast = require("scripts.spellforge.global.payload_multicast")
+local runtime_stats = require("scripts.spellforge.global.runtime_stats")
+local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
+local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
+
+local live_bounce = {}
+
+local MAX_BINDINGS = 128
+local MAX_DUPLICATE_KEYS = 512
+
+local bindings_by_cast_source = {}
+local bindings_by_latest_source = {}
+local binding_order = {}
+local duplicate_keys = {}
+local duplicate_order = {}
+
+local function appendBounded(order, key, max_count, on_evict)
+    order[#order + 1] = key
+    while #order > max_count do
+        local evicted = table.remove(order, 1)
+        if on_evict then
+            on_evict(evicted)
+        end
+    end
+end
+
+local function castSourceKey(recipe_id, slot_id, cast_id)
+    return string.format("%s::%s::%s", tostring(recipe_id), tostring(slot_id), tostring(cast_id))
+end
+
+local function recipeSlotKey(recipe_id, slot_id)
+    return string.format("%s::%s", tostring(recipe_id), tostring(slot_id))
+end
+
+local function readField(value, key)
+    if value == nil then
+        return nil
+    end
+    local ok, result = pcall(function()
+        return value[key]
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+local function bounceBranchRoot(binding)
+    if type(binding.branch_id) == "string" and binding.branch_id ~= "" then
+        return binding.branch_id
+    end
+    if type(binding.bounce_id) == "string" and binding.bounce_id ~= "" then
+        return binding.bounce_id
+    end
+    return string.format(
+        "bounce:%s:%s",
+        tostring(binding.cast_id or "no-cast"),
+        tostring(binding.source_slot_id or "no-source")
+    )
+end
+
+local function bounceBranchScope(binding)
+    if type(binding.branch_scope) == "string" and binding.branch_scope ~= "" then
+        return binding.branch_scope
+    end
+    return bounceBranchRoot(binding)
+end
+
+local function bounceBranchParentId(binding)
+    return bounceBranchRoot(binding)
+end
+
+local function sourceBranchInfo(binding)
+    local parent_id = bounceBranchParentId(binding)
+    return {
+        branch_scope = bounceBranchScope(binding),
+        branch_parent_id = parent_id,
+        branch_id = parent_id .. ":source",
+        branch_kind = "bounce_source",
+        branch_index = 1,
+        branch_count = 1,
+    }
+end
+
+local function eventBranchInfo(binding, route, kind)
+    local bounce_index = tonumber(route and route.bounce_index) or 0
+    local parent_id = bounceBranchParentId(binding)
+    local role = kind or "event"
+    return {
+        branch_scope = string.format(
+            "%s:b%s",
+            tostring(bounceBranchScope(binding)),
+            tostring(bounce_index)
+        ),
+        branch_parent_id = parent_id,
+        branch_id = string.format("%s:b%s:%s", tostring(parent_id), tostring(bounce_index), tostring(role)),
+        branch_kind = "bounce_" .. tostring(role),
+        branch_index = bounce_index,
+        branch_count = tonumber(binding.bounce_max) or 1,
+    }
+end
+
+local function copyBranchFields(target, branch)
+    if type(target) ~= "table" or type(branch) ~= "table" then
+        return
+    end
+    target.branch_scope = branch.branch_scope
+    target.branch_id = branch.branch_id
+    target.branch_parent_id = branch.branch_parent_id
+    target.branch_kind = branch.branch_kind
+    target.branch_index = branch.branch_index
+    target.branch_count = branch.branch_count
+    target.chain_continuation_group_id = branch.chain_continuation_group_id
+end
+
+local function hasOps(ops)
+    return type(ops) == "table" and #ops > 0
+end
+
+local function countOpcode(ops, opcode)
+    local count = 0
+    local first = nil
+    for _, op in ipairs(ops or {}) do
+        if op and op.opcode == opcode then
+            count = count + 1
+            first = first or op
+        end
+    end
+    return count, first
+end
+
+local function helperBySlotId(helpers)
+    local by_slot = {}
+    for _, helper in ipairs(helpers or {}) do
+        if type(helper) == "table" and type(helper.slot_id) == "string" then
+            by_slot[helper.slot_id] = helper
+        end
+    end
+    return by_slot
+end
+
+local function postfixIsEmptyOrTrigger(value)
+    local ops = value and value.postfix_ops or nil
+    if not hasOps(ops) then
+        return true
+    end
+    return #ops == 1 and ops[1] and ops[1].opcode == "Trigger"
+end
+
+local function hasTriggerPostfix(value)
+    local count = countOpcode(value and value.postfix_ops or nil, "Trigger")
+    return count == 1
+end
+
+local function clampBounceCount(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        n = 1
+    end
+    n = math.floor(n)
+    if n < 1 then
+        n = 1
+    end
+    local max = tonumber(limits.MAX_BOUNCE_COUNT_HARD) or 12
+    if n > max then
+        n = max
+    end
+    return n
+end
+
+local function clampBouncePower(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        n = tonumber(limits.BOUNCE_POWER_DEFAULT) or 0.72
+    end
+    local min_value = tonumber(limits.BOUNCE_POWER_MIN) or 0.2
+    local max_value = tonumber(limits.BOUNCE_POWER_MAX) or 1.25
+    if n < min_value then
+        n = min_value
+    elseif n > max_value then
+        n = max_value
+    end
+    return n
+end
+
+local function rejectSelect(reason, counter_name)
+    if counter_name then
+        runtime_stats.inc(counter_name)
+    end
+    return nil, reason
+end
+
+local function selectBounceTriggerChainPayload(plan, options)
+    local chain_plan, reason, audit = live_chain.selectV0Plan(plan, {
+        max_hops = options.max_chain_hops or limits.MAX_CHAIN_HOPS,
+        max_jobs = options.max_chain_jobs or limits.MAX_CHAIN_JOBS_PER_CAST,
+        max_candidates = options.max_chain_scan_candidates or options.candidate_cap or limits.MAX_CHAIN_SCAN_CANDIDATES,
+        scan_radius = options.chain_scan_radius or options.scan_radius,
+    })
+    if not chain_plan then
+        return nil, reason, audit
+    end
+    if chain_plan.chain_shape ~= "trigger_payload_chain" then
+        return nil, "bounce_chain_deferred", audit
+    end
+    if chain_plan.payload_modifier_kind ~= nil then
+        return nil, "bounce_chain_modifier_deferred", audit
+    end
+    return chain_plan, nil, audit
+end
+
+local function triggerPayloadHasChain(plan, source_slot_id)
+    for _, slot in ipairs(plan.emission_slots or {}) do
+        if slot
+            and slot.parent_slot_id == source_slot_id
+            and slot.source_postfix_opcode == "Trigger" then
+            local chain_count = countOpcode(slot.prefix_ops, "Chain")
+            if chain_count > 0 then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function live_bounce.selectV0Plan(plan, opts)
+    local options = opts or {}
+    if type(plan) ~= "table" then
+        return rejectSelect("missing_plan")
+    end
+
+    local bounds = plan.bounds or {}
+    local chain_payload_plan = nil
+    local chain_payload_reason = nil
+    if bounds.has_chain then
+        chain_payload_plan, chain_payload_reason = selectBounceTriggerChainPayload(plan, options)
+        if not chain_payload_plan then
+            return rejectSelect(chain_payload_reason or "bounce_chain_deferred", "live_bounce_chain_reject")
+        end
+    end
+    if bounds.has_timer then
+        return rejectSelect("bounce_timer_deferred", "live_bounce_trigger_timer_reject")
+    end
+    if bounds.has_multicast or bounds.has_pattern then
+        return rejectSelect("bounce_fanout_deferred", "live_bounce_fanout_reject")
+    end
+    if bounds.has_speed_plus or bounds.has_size_plus then
+        return rejectSelect("bounce_modifier_deferred", "live_bounce_modifier_reject")
+    end
+    if bounds.group_count ~= 1 then
+        return rejectSelect("not_single_group")
+    end
+    if tonumber(bounds.static_emission_count) ~= 1 then
+        return rejectSelect("not_single_source_emission")
+    end
+
+    local group = plan.groups and plan.groups[1] or nil
+    if type(group) ~= "table" then
+        return rejectSelect("missing_group")
+    end
+    local bounce_count, bounce_op = countOpcode(group.prefix_ops, "Bounce")
+    if bounce_count ~= 1 then
+        return rejectSelect("missing_bounce_op")
+    end
+    if hasOps(group.prefix_ops) and #group.prefix_ops ~= 1 then
+        return rejectSelect("bounce_prefix_combo_deferred", "live_bounce_modifier_reject")
+    end
+    if not postfixIsEmptyOrTrigger(group) then
+        return rejectSelect("bounce_postfix_deferred", "live_bounce_trigger_timer_reject")
+    end
+
+    local slots = plan.emission_slots or {}
+    local helpers = plan.helper_records or {}
+    local source_slot = nil
+    for _, slot in ipairs(slots) do
+        if slot.kind == "primary_emission" then
+            if source_slot then
+                return rejectSelect("multiple_bounce_sources")
+            end
+            source_slot = slot
+        end
+    end
+    if not source_slot then
+        return rejectSelect("missing_bounce_source_slot")
+    end
+    if source_slot.parent_slot_id ~= nil or source_slot.source_postfix_opcode ~= nil then
+        return rejectSelect("source_slot_not_primary")
+    end
+    local slot_bounce_count, _ = countOpcode(source_slot.prefix_ops, "Bounce")
+    if slot_bounce_count ~= 1 or (hasOps(source_slot.prefix_ops) and #source_slot.prefix_ops ~= 1) then
+        return rejectSelect("source_slot_not_bounce")
+    end
+    if not postfixIsEmptyOrTrigger(source_slot) then
+        return rejectSelect("source_slot_postfix_deferred")
+    end
+
+    local helpers_by_slot = helperBySlotId(helpers)
+    local source_helper = helpers_by_slot[source_slot.slot_id]
+    if not source_helper or type(source_helper.engine_id) ~= "string" or source_helper.engine_id == "" then
+        return rejectSelect("source_helper_missing")
+    end
+    if source_helper.parent_slot_id ~= nil or source_helper.source_postfix_opcode ~= nil then
+        return rejectSelect("source_helper_not_primary")
+    end
+    local helper_bounce_count, _ = countOpcode(source_helper.prefix_ops, "Bounce")
+    if helper_bounce_count ~= 1 or (hasOps(source_helper.prefix_ops) and #source_helper.prefix_ops ~= 1) then
+        return rejectSelect("source_helper_not_bounce")
+    end
+    if not postfixIsEmptyOrTrigger(source_helper) then
+        return rejectSelect("source_helper_postfix_deferred")
+    end
+
+    local bounce_max = clampBounceCount(bounce_op and bounce_op.params and bounce_op.params.bounces)
+    local effective_cap = tonumber(options.max_bounce_count) or limits.MAX_BOUNCE_COUNT
+    if bounce_max > effective_cap then
+        runtime_stats.inc("live_bounce_cap_reject")
+        return rejectSelect("bounce_count_cap_exceeded")
+    end
+    local bounce_power = clampBouncePower(bounce_op and bounce_op.params and bounce_op.params.power)
+    local has_trigger_payload = hasTriggerPostfix(source_slot)
+
+    if has_trigger_payload and chain_payload_plan == nil and triggerPayloadHasChain(plan, source_slot.slot_id) then
+        chain_payload_plan, chain_payload_reason = selectBounceTriggerChainPayload(plan, options)
+        if not chain_payload_plan then
+            return rejectSelect(chain_payload_reason or "bounce_chain_deferred", "live_bounce_chain_reject")
+        end
+    end
+
+    local payload_result = nil
+    if has_trigger_payload then
+        if chain_payload_plan then
+            if chain_payload_plan.source_slot_id ~= source_slot.slot_id then
+                return rejectSelect("bounce_chain_deferred", "live_bounce_chain_reject")
+            end
+            payload_result = {
+                ok = true,
+                payload_slot_id = chain_payload_plan.payload_slot_id,
+                payload_helper_engine_id = chain_payload_plan.payload_helper_engine_id,
+                payload_slots = { chain_payload_plan.payload },
+                payload_slot_ids = { chain_payload_plan.payload_slot_id },
+                payload_helper_engine_ids = { chain_payload_plan.payload_helper_engine_id },
+                payload_count = 1,
+                payload_group_key = "bounce_trigger_chain_payload",
+                payload_effect_id = chain_payload_plan.payload_effect_id,
+                chain_plan = chain_payload_plan,
+            }
+            runtime_stats.inc("live_bounce_chain_payload_qualified")
+        else
+            payload_result = payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, {
+                source_opcode = "Trigger",
+                allow_payload_multicast = false,
+                allow_payload_pattern = false,
+                max_depth = options.max_depth,
+                max_jobs = options.max_jobs,
+                max_fanout = 1,
+                max_projectiles = options.max_projectiles,
+            })
+            if payload_result.detected_payload_multicast then
+                runtime_stats.inc("payload_multicast_attempts")
+                runtime_stats.inc("live_bounce_fanout_reject")
+            end
+            if payload_result.detected_payload_pattern then
+                runtime_stats.inc("payload_pattern_attempts")
+                runtime_stats.inc("live_bounce_fanout_reject")
+            end
+            if not payload_result.ok then
+                return rejectSelect(payload_result.reason or "bounce_trigger_payload_deferred")
+            end
+            if tonumber(payload_result.payload_count) ~= 1 then
+                return rejectSelect("bounce_payload_fanout_deferred", "live_bounce_fanout_reject")
+            end
+        end
+    elseif group.payload and type(group.payload.effects) == "table" and #group.payload.effects > 0 then
+        return rejectSelect("bounce_payload_without_trigger_deferred")
+    end
+
+    return {
+        ok = true,
+        source = {
+            slot = source_slot,
+            helper = source_helper,
+        },
+        source_slot_id = source_slot.slot_id,
+        source_helper_engine_id = source_helper.engine_id,
+        bounce_op = bounce_op,
+        bounce_max = bounce_max,
+        bounce_power = bounce_power,
+        detonate_on_actor_hit = false,
+        has_trigger_payload = has_trigger_payload,
+        has_chain_payload = chain_payload_plan ~= nil,
+        chain_plan = chain_payload_plan,
+        chain_requested_hops = chain_payload_plan and chain_payload_plan.requested_hops or nil,
+        chain_max_hops = chain_payload_plan and chain_payload_plan.max_hops or nil,
+        chain_shape = chain_payload_plan and chain_payload_plan.chain_shape or nil,
+        payload_slot_id = payload_result and payload_result.payload_slot_id or nil,
+        payload_helper_engine_id = payload_result and payload_result.payload_helper_engine_id or nil,
+        payloads = payload_result and payload_result.payload_slots or nil,
+        payload_slot_ids = payload_result and payload_result.payload_slot_ids or nil,
+        payload_helper_engine_ids = payload_result and payload_result.payload_helper_engine_ids or nil,
+        payload_count = payload_result and payload_result.payload_count or 0,
+        payload_group_key = payload_result and payload_result.payload_group_key or nil,
+        payload_effect_id = payload_result and payload_result.payload_effect_id or nil,
+    }, nil
+end
+
+function live_bounce.decorateSourceJob(job, binding)
+    if type(job) ~= "table" or type(binding) ~= "table" then
+        return
+    end
+    local branch = sourceBranchInfo(binding)
+    job.bounceEnabled = true
+    job.bounceMax = binding.bounce_max
+    job.bouncePower = binding.bounce_power
+    job.detonateOnActorHit = false
+    job.bounce_runtime = true
+    job.bounce_role = "source"
+    job.bounce_id = binding.bounce_id
+    job.bounce_max = binding.bounce_max
+    job.bounce_power = binding.bounce_power
+    job.bounce_detonate_on_actor_hit = false
+    job.bounce_trigger_payload_slot_id = binding.payload_slot_id
+    job.source_prefix_opcode = "Bounce"
+    job.source_postfix_opcode = binding.has_trigger_payload and "Trigger" or nil
+    job.root_source_slot_id = binding.root_source_slot_id or binding.source_slot_id
+    job.current_source_slot_id = binding.current_source_slot_id or binding.source_slot_id
+    job.trigger_source_slot_id = binding.has_trigger_payload and binding.source_slot_id or nil
+    job.trigger_payload_slot_id = binding.payload_slot_id
+    job.trigger_payload_slot_ids = binding.payload_slot_ids
+    job.has_trigger_payload = binding.has_trigger_payload == true
+    job.has_chain_payload = binding.has_chain_payload == true
+    job.chain_runtime = binding.has_chain_payload == true or job.chain_runtime == true
+    job.chain_id = binding.chain_id
+    job.chain_hop_index = binding.has_chain_payload == true and 0 or job.chain_hop_index
+    job.chain_max_hops = binding.chain_max_hops
+    job.chain_targeting_mode = binding.chain_targeting_mode
+    job.payload_count = tonumber(binding.payload_count) or nil
+    copyBranchFields(job, branch)
+
+    job.payload = job.payload or {}
+    job.payload.bounceEnabled = true
+    job.payload.bounceMax = binding.bounce_max
+    job.payload.bouncePower = binding.bounce_power
+    job.payload.detonateOnActorHit = false
+    job.payload.bounce_runtime = true
+    job.payload.bounce_role = "source"
+    job.payload.bounce_id = binding.bounce_id
+    job.payload.bounce_max = binding.bounce_max
+    job.payload.bounce_power = binding.bounce_power
+    job.payload.bounce_detonate_on_actor_hit = false
+    job.payload.bounce_trigger_payload_slot_id = binding.payload_slot_id
+    job.payload.source_prefix_opcode = "Bounce"
+    job.payload.source_postfix_opcode = binding.has_trigger_payload and "Trigger" or nil
+    job.payload.root_source_slot_id = binding.root_source_slot_id or binding.source_slot_id
+    job.payload.current_source_slot_id = binding.current_source_slot_id or binding.source_slot_id
+    job.payload.trigger_source_slot_id = binding.has_trigger_payload and binding.source_slot_id or nil
+    job.payload.trigger_payload_slot_id = binding.payload_slot_id
+    job.payload.trigger_payload_slot_ids = binding.payload_slot_ids
+    job.payload.has_trigger_payload = binding.has_trigger_payload == true
+    job.payload.has_chain_payload = binding.has_chain_payload == true
+    job.payload.chain_runtime = binding.has_chain_payload == true or job.payload.chain_runtime == true
+    job.payload.chain_id = binding.chain_id
+    job.payload.chain_hop_index = binding.has_chain_payload == true and 0 or job.payload.chain_hop_index
+    job.payload.chain_max_hops = binding.chain_max_hops
+    job.payload.chain_targeting_mode = binding.chain_targeting_mode
+    job.payload.payload_count = tonumber(binding.payload_count) or nil
+    copyBranchFields(job.payload, branch)
+end
+
+function live_bounce.registerBinding(binding)
+    local input = binding or {}
+    if type(input.recipe_id) ~= "string" or input.recipe_id == ""
+        or type(input.source_slot_id) ~= "string" or input.source_slot_id == ""
+        or type(input.source_helper_engine_id) ~= "string" or input.source_helper_engine_id == "" then
+        return false
+    end
+    local cast_key = castSourceKey(input.recipe_id, input.source_slot_id, input.cast_id)
+    local latest_key = recipeSlotKey(input.recipe_id, input.source_slot_id)
+    bindings_by_cast_source[cast_key] = input
+    bindings_by_latest_source[latest_key] = input
+    appendBounded(binding_order, cast_key, MAX_BINDINGS, function(evicted)
+        local evicted_binding = bindings_by_cast_source[evicted]
+        bindings_by_cast_source[evicted] = nil
+        if evicted_binding then
+            local evicted_latest = recipeSlotKey(evicted_binding.recipe_id, evicted_binding.source_slot_id)
+            if bindings_by_latest_source[evicted_latest] == evicted_binding then
+                bindings_by_latest_source[evicted_latest] = nil
+            end
+        end
+    end)
+    return true
+end
+
+local function bindingForRoute(route)
+    local user_data = route.user_data or {}
+    local cast_key = castSourceKey(route.recipe_id, route.slot_id, user_data.cast_id)
+    return bindings_by_cast_source[cast_key] or bindings_by_latest_source[recipeSlotKey(route.recipe_id, route.slot_id)]
+end
+
+local function duplicateKey(route, binding)
+    return string.format(
+        "bounce:%s:%s:%s:%s:%s:%s",
+        tostring(binding.cast_id or (route.user_data and route.user_data.cast_id) or "no-cast"),
+        tostring(binding.recipe_id or route.recipe_id),
+        tostring(binding.source_slot_id or route.slot_id),
+        tostring(binding.source_helper_engine_id or route.helper_engine_id),
+        tostring(route.projectile_id or "no-projectile"),
+        tostring(route.bounce_index or "no-bounce")
+    )
+end
+
+local function rememberDuplicateKey(key)
+    duplicate_keys[key] = true
+    appendBounded(duplicate_order, key, MAX_DUPLICATE_KEYS, function(evicted)
+        duplicate_keys[evicted] = nil
+    end)
+end
+
+local function shortKey(key)
+    if type(key) == "string" and #key <= 180 then
+        return key
+    end
+    return nil
+end
+
+local function routeFromBouncePayload(payload)
+    local data = payload or {}
+    local user_data = sfp_userdata.extract(data)
+    local spellforge_user_data = sfp_userdata.isSpellforgeUserData(user_data) and user_data or nil
+    local spell_id = data.spellId or data.spell_id
+    local helper_engine_id = spellforge_user_data and spellforge_user_data.helper_engine_id or spell_id
+    local mapping = helper_records.getByEngineId(helper_engine_id) or helper_records.getByEngineId(spell_id)
+    local projectile, projectile_id, projectile_id_source = sfp_adapter.extractProjectileFromHit(data)
+    if not mapping then
+        return { ok = false, error = "bounce helper mapping missing" }
+    end
+    return {
+        ok = true,
+        source = "bounce",
+        recipe_id = mapping.recipe_id,
+        slot_id = mapping.slot_id,
+        helper_engine_id = mapping.engine_id,
+        mapping = mapping,
+        attacker = data.attacker,
+        target = data.hitObject or data.hit_object,
+        hit_pos = data.hitPos or data.hit_pos,
+        hit_normal = data.hitNormal or data.hit_normal,
+        bounce_direction = data.hitNormal or data.hit_normal,
+        bounce_index = tonumber(data.bounceCount or data.bounce_count) or 0,
+        speed = data.speed,
+        user_data = spellforge_user_data,
+        projectile = projectile,
+        projectile_id = projectile_id,
+        projectile_id_source = projectile_id_source,
+    }
+end
+
+local function objectCell(value)
+    return readField(value, "cell")
+end
+
+local function objectToken(value)
+    if value == nil then
+        return nil
+    end
+    if type(value) ~= "table" then
+        return tostring(value)
+    end
+    return readField(value, "id")
+        or readField(value, "recordId")
+        or readField(value, "refId")
+        or readField(value, "name")
+        or objectToken(readField(value, "object"))
+end
+
+local function inferBounceChainSourceTarget(route, binding)
+    if route.target ~= nil or route.hit_pos == nil or binding.chain_candidate_provider ~= nil then
+        return route.target, nil, nil
+    end
+
+    local hop_context = {
+        caster = route.attacker or binding.actor,
+        source_target = nil,
+        current_hit_target = nil,
+        current_hit_position = route.hit_pos,
+        current_cell = objectCell(route.projectile) or objectCell(route.attacker or binding.actor),
+        cast_id = binding.cast_id,
+        recipe_id = binding.recipe_id,
+        source_slot_id = binding.source_slot_id,
+        payload_slot_id = binding.payload_slot_id,
+        source_helper_engine_id = binding.source_helper_engine_id,
+        chain_id = binding.chain_id,
+        hop_index = 1,
+        max_hops = binding.chain_max_hops,
+        exclude_caster = true,
+        exclude_current_hit_target = false,
+    }
+    local provider_result = chain_target_provider.collectCandidates(hop_context, {
+        radius = binding.scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
+        max_radius = limits.MAX_CHAIN_SCAN_RADIUS,
+        candidate_cap = binding.candidate_cap or limits.MAX_CHAIN_SCAN_CANDIDATES,
+        max_vertical_delta = limits.BOUNCE_CHAIN_SOURCE_VERTICAL_DELTA or limits.MAX_CHAIN_VERTICAL_DELTA,
+        vertical_reference = "aim",
+    })
+    if not provider_result or provider_result.ok ~= true then
+        return nil, nil, provider_result
+    end
+
+    local candidates = provider_result.candidates or {}
+    local source_candidate = candidates[1]
+    local source_target = source_candidate and (source_candidate.object or source_candidate) or nil
+    if source_target ~= nil then
+        runtime_stats.inc("live_bounce_chain_source_target_inferred")
+        log.info(string.format(
+            "SPELLFORGE_LIVE_BOUNCE_CHAIN_SOURCE_TARGET_INFERRED recipe_id=%s cast_id=%s bounce_id=%s chain_id=%s bounce_index=%s source_target_id=%s candidate_count=%s radius=%s",
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(binding.bounce_id),
+            tostring(binding.chain_id),
+            tostring(route.bounce_index),
+            tostring(objectToken(source_target) or (source_candidate and source_candidate.id) or nil),
+            tostring(provider_result.candidate_count),
+            tostring(provider_result.radius)
+        ))
+    else
+        runtime_stats.inc("live_bounce_chain_source_target_missing")
+        log.info(string.format(
+            "SPELLFORGE_LIVE_BOUNCE_CHAIN_SOURCE_TARGET_MISSING recipe_id=%s cast_id=%s bounce_id=%s chain_id=%s bounce_index=%s candidate_count=%s vertical_rejected=%s radius=%s max_vertical_delta=%s",
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(binding.bounce_id),
+            tostring(binding.chain_id),
+            tostring(route.bounce_index),
+            tostring(provider_result.candidate_count),
+            tostring(provider_result.vertical_rejected),
+            tostring(provider_result.radius),
+            tostring(provider_result.max_vertical_delta)
+        ))
+    end
+    return source_target, candidates, provider_result
+end
+
+local function detonateBounceSource(route, binding, is_final)
+    local mapping = route.mapping or helper_records.getByEngineId(binding.source_helper_engine_id)
+    local presentation = mapping and mapping.presentation or nil
+    local branch = eventBranchInfo(binding, route, "source_detonation")
+    runtime_stats.inc("live_bounce_source_detonation_attempts")
+    local detonate_user_data = sfp_userdata.buildHelperUserData({
+        runtime = "2.2c_live_helper",
+        mapping = mapping,
+        recipe_id = binding.recipe_id,
+        slot_id = binding.source_slot_id,
+        helper_engine_id = binding.source_helper_engine_id,
+        job_kind = "live_bounce_source_detonation",
+        source_slot_id = binding.source_slot_id,
+        source_prefix_opcode = "Bounce",
+        source_postfix_opcode = binding.has_trigger_payload and "Trigger" or nil,
+        source_helper_engine_id = binding.source_helper_engine_id,
+        trigger_source_slot_id = binding.has_trigger_payload and binding.source_slot_id or nil,
+        trigger_payload_slot_id = binding.payload_slot_id,
+        has_trigger_payload = binding.has_trigger_payload == true,
+        cast_id = binding.cast_id,
+        bounce_runtime = true,
+        bounce_role = "source_detonation",
+        bounce_id = binding.bounce_id,
+        bounce_index = route.bounce_index,
+        bounce_max = binding.bounce_max,
+        bounce_power = binding.bounce_power,
+        bounce_detonate_on_actor_hit = false,
+        bounce_trigger_payload_slot_id = binding.payload_slot_id,
+        bounce_manual_detonation = true,
+        bounce_final = is_final == true,
+        branch_scope = branch.branch_scope,
+        branch_id = branch.branch_id,
+        branch_parent_id = branch.branch_parent_id,
+        branch_kind = branch.branch_kind,
+        branch_index = branch.branch_index,
+        branch_count = branch.branch_count,
+    })
+    local result = sfp_adapter.detonateSpellAtPos({
+        spellId = binding.source_helper_engine_id,
+        caster = route.attacker or binding.actor,
+        position = route.hit_pos,
+        cell = objectCell(route.projectile) or objectCell(route.attacker or binding.actor),
+        areaVfxRecId = presentation and presentation.areaVfxRecId or nil,
+        areaVfxScale = presentation and presentation.areaVfxScale or nil,
+        userData = detonate_user_data,
+        muteAudio = binding.mute_audio,
+        muteLight = binding.mute_light,
+    })
+    if result.ok then
+        runtime_stats.inc("live_bounce_source_detonation_ok")
+    else
+        runtime_stats.inc("live_bounce_source_detonation_failed")
+    end
+    log.info(string.format(
+        "SPELLFORGE_LIVE_BOUNCE_SOURCE_DETONATED recipe_id=%s cast_id=%s bounce_id=%s bounce_index=%s bounce_max=%s branch_scope=%s branch_id=%s helper_engine_id=%s ok=%s final=%s",
+        tostring(binding.recipe_id),
+        tostring(binding.cast_id),
+        tostring(binding.bounce_id),
+        tostring(route.bounce_index),
+        tostring(binding.bounce_max),
+        tostring(branch.branch_scope),
+        tostring(branch.branch_id),
+        tostring(binding.source_helper_engine_id),
+        tostring(result.ok == true),
+        tostring(is_final == true)
+    ))
+    return result
+end
+
+local function detonateBounceTriggerPayload(route, binding, duplicate_key, is_final)
+    local payload_mapping = helper_records.getByRecipeSlot(binding.recipe_id, binding.payload_slot_id)
+        or helper_records.getByEngineId(binding.payload_helper_engine_id)
+    if not payload_mapping or payload_mapping.engine_id ~= binding.payload_helper_engine_id then
+        runtime_stats.inc("live_bounce_trigger_payload_detonation_failed")
+        return {
+            ok = false,
+            error = "bounce trigger payload helper mapping missing",
+        }
+    end
+
+    local presentation = payload_mapping.presentation or nil
+    local branch = eventBranchInfo(binding, route, "trigger_payload")
+    runtime_stats.inc("live_bounce_trigger_payload_detonation_attempts")
+    local detonate_user_data = sfp_userdata.buildHelperUserData({
+        runtime = "2.2c_live_helper",
+        mapping = payload_mapping,
+        recipe_id = binding.recipe_id,
+        slot_id = binding.payload_slot_id,
+        helper_engine_id = binding.payload_helper_engine_id,
+        job_kind = "live_bounce_trigger_payload_detonation",
+        source_slot_id = binding.source_slot_id,
+        source_prefix_opcode = "Bounce",
+        source_postfix_opcode = "Trigger",
+        source_helper_engine_id = binding.source_helper_engine_id,
+        trigger_source_slot_id = binding.source_slot_id,
+        trigger_payload_slot_id = binding.payload_slot_id,
+        has_trigger_payload = true,
+        trigger_route = "bounce",
+        trigger_duplicate_key = shortKey(duplicate_key),
+        payload_slot_id = binding.payload_slot_id,
+        cast_id = binding.cast_id,
+        bounce_runtime = true,
+        bounce_role = "trigger_payload_detonation",
+        bounce_id = binding.bounce_id,
+        bounce_index = route.bounce_index,
+        bounce_max = binding.bounce_max,
+        bounce_power = binding.bounce_power,
+        bounce_detonate_on_actor_hit = false,
+        bounce_trigger_payload_slot_id = binding.payload_slot_id,
+        bounce_manual_detonation = true,
+        bounce_final = is_final == true,
+        branch_scope = branch.branch_scope,
+        branch_id = branch.branch_id,
+        branch_parent_id = branch.branch_parent_id,
+        branch_kind = branch.branch_kind,
+        branch_index = branch.branch_index,
+        branch_count = branch.branch_count,
+    })
+    local result = sfp_adapter.detonateSpellAtPos({
+        spellId = binding.payload_helper_engine_id,
+        caster = route.attacker or binding.actor,
+        position = route.hit_pos,
+        cell = objectCell(route.projectile) or objectCell(route.attacker or binding.actor),
+        areaVfxRecId = presentation and presentation.areaVfxRecId or nil,
+        areaVfxScale = presentation and presentation.areaVfxScale or nil,
+        userData = detonate_user_data,
+        muteAudio = binding.mute_audio,
+        muteLight = binding.mute_light,
+    })
+    if result.ok then
+        runtime_stats.inc("live_bounce_trigger_payload_detonation_ok")
+    else
+        runtime_stats.inc("live_bounce_trigger_payload_detonation_failed")
+    end
+    log.info(string.format(
+        "SPELLFORGE_LIVE_BOUNCE_TRIGGER_PAYLOAD_DETONATED recipe_id=%s cast_id=%s bounce_id=%s bounce_index=%s bounce_max=%s branch_scope=%s branch_id=%s payload_slot_id=%s helper_engine_id=%s ok=%s final=%s",
+        tostring(binding.recipe_id),
+        tostring(binding.cast_id),
+        tostring(binding.bounce_id),
+        tostring(route.bounce_index),
+        tostring(binding.bounce_max),
+        tostring(branch.branch_scope),
+        tostring(branch.branch_id),
+        tostring(binding.payload_slot_id),
+        tostring(binding.payload_helper_engine_id),
+        tostring(result.ok == true),
+        tostring(is_final == true)
+    ))
+    return {
+        ok = result.ok == true,
+        error = result.error,
+        source_slot_id = binding.source_slot_id,
+        source_helper_engine_id = binding.source_helper_engine_id,
+        payload_slot_id = binding.payload_slot_id,
+        payload_helper_engine_id = binding.payload_helper_engine_id,
+        payload_count = 1,
+        trigger_route = "bounce",
+        duplicate_key = duplicate_key,
+        launch_accepted = result.ok == true,
+        launch_count = result.ok == true and 1 or 0,
+        detonation_result = result,
+    }
+end
+
+local function routeBounceTriggerChainPayload(route, binding, duplicate_key, is_final)
+    runtime_stats.inc("live_bounce_chain_payload_attempts")
+    local chain_source_target, precollected_candidates, precollected_provider_result =
+        inferBounceChainSourceTarget(route, binding)
+    if chain_source_target == nil and route.hit_pos == nil then
+        runtime_stats.inc("live_bounce_chain_payload_ignored")
+        log.info(string.format(
+            "SPELLFORGE_LIVE_BOUNCE_CHAIN_PAYLOAD_ROUTED recipe_id=%s cast_id=%s bounce_id=%s chain_id=%s bounce_index=%s bounce_max=%s source_slot_id=%s payload_slot_id=%s ok=true ignored=true stop_reason=missing_chain_hit_position final=%s",
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(binding.bounce_id),
+            tostring(binding.chain_id),
+            tostring(route.bounce_index),
+            tostring(binding.bounce_max),
+            tostring(binding.source_slot_id),
+            tostring(binding.payload_slot_id),
+            tostring(is_final == true)
+        ))
+        return {
+            ok = true,
+            ignored = true,
+            stop_reason = "missing_chain_hit_position",
+            source_slot_id = binding.source_slot_id,
+            source_helper_engine_id = binding.source_helper_engine_id,
+            payload_slot_id = binding.payload_slot_id,
+            payload_helper_engine_id = binding.payload_helper_engine_id,
+            payload_count = 1,
+            trigger_route = "bounce_chain",
+            duplicate_key = duplicate_key,
+            chain_id = binding.chain_id,
+            launch_accepted = false,
+            launch_count = 0,
+        }
+    end
+    local branch = eventBranchInfo(binding, route, "chain_payload")
+    local chain_route = {
+        ok = true,
+        source = "bounce",
+        recipe_id = binding.recipe_id,
+        slot_id = binding.source_slot_id,
+        helper_engine_id = binding.source_helper_engine_id,
+        attacker = route.attacker or binding.actor,
+        target = chain_source_target,
+        hit_pos = route.hit_pos,
+        hit_normal = route.hit_normal,
+        projectile = route.projectile,
+        projectile_id = route.projectile_id,
+        projectile_id_source = route.projectile_id_source,
+        user_data = {
+            runtime = "2.2c_live_helper",
+            recipe_id = binding.recipe_id,
+            slot_id = binding.source_slot_id,
+            helper_engine_id = binding.source_helper_engine_id,
+            job_kind = "live_bounce_chain_source_hit",
+            job_id = binding.source_job_id,
+            source_job_id = binding.source_job_id,
+            source_slot_id = binding.source_slot_id,
+            source_prefix_opcode = "Bounce",
+            source_postfix_opcode = "Trigger",
+            source_helper_engine_id = binding.source_helper_engine_id,
+            trigger_source_slot_id = binding.source_slot_id,
+            trigger_payload_slot_id = binding.payload_slot_id,
+            has_trigger_payload = true,
+            trigger_route = "bounce",
+            trigger_duplicate_key = shortKey(duplicate_key),
+            payload_slot_id = binding.payload_slot_id,
+            cast_id = binding.cast_id,
+            chain_runtime = true,
+            chain_role = "source",
+            chain_id = binding.chain_id,
+            chain_hop_index = 0,
+            chain_max_hops = binding.chain_max_hops,
+            chain_targeting_mode = binding.chain_targeting_mode or "no_immediate_repeat",
+            bounce_chain_source_target_id = objectToken(chain_source_target),
+            bounce_chain_source_inferred = route.target == nil and chain_source_target ~= nil or nil,
+            bounce_runtime = true,
+            bounce_role = "chain_payload_source",
+            bounce_id = binding.bounce_id,
+            bounce_index = route.bounce_index,
+            bounce_max = binding.bounce_max,
+            bounce_power = binding.bounce_power,
+            bounce_detonate_on_actor_hit = false,
+            bounce_trigger_payload_slot_id = binding.payload_slot_id,
+            bounce_final = is_final == true,
+            branch_scope = branch.branch_scope,
+            branch_id = branch.branch_id,
+            branch_parent_id = branch.branch_parent_id,
+            branch_kind = branch.branch_kind,
+            branch_index = branch.branch_index,
+            branch_count = branch.branch_count,
+        },
+    }
+    local result = live_chain.handleResolvedHit(chain_route, {
+        candidate_provider = binding.chain_candidate_provider,
+        precollected_candidates = precollected_candidates,
+        precollected_provider_result = precollected_provider_result,
+        max_chain_ticks = binding.max_chain_ticks,
+        max_jobs_per_tick = binding.max_jobs_per_tick,
+        max_live_launches_per_tick = binding.max_live_launches_per_tick,
+        force_enabled = binding.force_chain_runtime_enabled == true,
+    })
+    if result and result.ok == true and result.ignored ~= true then
+        runtime_stats.inc("live_bounce_chain_payload_ok")
+    elseif result and result.ignored == true then
+        runtime_stats.inc("live_bounce_chain_payload_ignored")
+    else
+        runtime_stats.inc("live_bounce_chain_payload_failed")
+    end
+    log.info(string.format(
+        "SPELLFORGE_LIVE_BOUNCE_CHAIN_PAYLOAD_ROUTED recipe_id=%s cast_id=%s bounce_id=%s chain_id=%s bounce_index=%s bounce_max=%s branch_scope=%s branch_id=%s source_slot_id=%s payload_slot_id=%s ok=%s ignored=%s stop_reason=%s final=%s",
+        tostring(binding.recipe_id),
+        tostring(binding.cast_id),
+        tostring(binding.bounce_id),
+        tostring(binding.chain_id),
+        tostring(route.bounce_index),
+        tostring(binding.bounce_max),
+        tostring(branch.branch_scope),
+        tostring(branch.branch_id),
+        tostring(binding.source_slot_id),
+        tostring(binding.payload_slot_id),
+        tostring(result and result.ok == true),
+        tostring(result and result.ignored == true),
+        tostring(result and result.stop_reason or nil),
+        tostring(is_final == true)
+    ))
+    return {
+        ok = result and result.ok == true,
+        ignored = result and result.ignored == true or nil,
+        error = result and result.error or nil,
+        stop_reason = result and result.stop_reason or nil,
+        source_slot_id = binding.source_slot_id,
+        source_helper_engine_id = binding.source_helper_engine_id,
+        payload_slot_id = binding.payload_slot_id,
+        payload_helper_engine_id = binding.payload_helper_engine_id,
+        payload_count = 1,
+        trigger_route = "bounce_chain",
+        duplicate_key = duplicate_key,
+        chain_id = binding.chain_id,
+        chain_result = result,
+        launch_accepted = result and result.launch_count == 1 or false,
+        launch_count = result and result.launch_count or 0,
+    }
+end
+
+function live_bounce.handleBouncePayload(payload, opts)
+    local options = opts or {}
+    local route = routeFromBouncePayload(payload)
+    if route.ok ~= true then
+        return { ok = false, ignored = true, error = route.error }
+    end
+    local binding = bindingForRoute(route)
+    if not binding then
+        return { ok = true, ignored = true, reason = "no_live_bounce_binding" }
+    end
+    if route.helper_engine_id ~= binding.source_helper_engine_id then
+        return { ok = true, ignored = true, reason = "not_bounce_source_helper" }
+    end
+    if options.force_enabled ~= true and not dev.liveBounceEnabled() then
+        runtime_stats.inc("live_bounce_rejected")
+        runtime_stats.inc("live_bounce_disabled_rejections")
+        return { ok = false, disabled = true, error = "live bounce disabled" }
+    end
+
+    runtime_stats.inc("live_bounce_events")
+    local key = duplicateKey(route, binding)
+    if duplicate_keys[key] then
+        runtime_stats.inc("live_bounce_duplicate_suppressed")
+        return {
+            ok = true,
+            duplicate_suppressed = true,
+            duplicate_key = key,
+            bounce_index = route.bounce_index,
+            bounce_max = binding.bounce_max,
+        }
+    end
+    rememberDuplicateKey(key)
+
+    local is_final = tonumber(route.bounce_index) >= tonumber(binding.bounce_max)
+    detonateBounceSource(route, binding, is_final)
+
+    local trigger_result = nil
+    if binding.has_trigger_payload == true then
+        if options.force_trigger_enabled ~= true and not dev.liveTriggerEnabled() then
+            runtime_stats.inc("live_bounce_trigger_payload_detonation_failed")
+            trigger_result = { ok = false, disabled = true, error = "live trigger disabled" }
+        elseif binding.has_chain_payload == true then
+            trigger_result = routeBounceTriggerChainPayload(route, binding, key, is_final)
+        else
+            trigger_result = detonateBounceTriggerPayload(route, binding, key, is_final)
+        end
+        if trigger_result and trigger_result.ok == true and trigger_result.ignored ~= true then
+            runtime_stats.inc("live_bounce_trigger_payloads")
+        end
+    end
+
+    local cancel_result = nil
+    if is_final then
+        if route.projectile_id == nil then
+            cancel_result = { ok = false, error = "missing_projectile_id" }
+        else
+            cancel_result = sfp_adapter.cancelSpell(route.projectile_id)
+        end
+        if cancel_result.ok then
+            runtime_stats.inc("live_bounce_final_cancel_ok")
+        else
+            runtime_stats.inc("live_bounce_final_cancel_failed")
+        end
+        log.info(string.format(
+            "SPELLFORGE_LIVE_BOUNCE_FINAL_CANCELLED recipe_id=%s cast_id=%s bounce_id=%s bounce_index=%s projectile_id=%s ok=%s error=%s",
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(binding.bounce_id),
+            tostring(route.bounce_index),
+            tostring(route.projectile_id),
+            tostring(cancel_result.ok == true),
+            tostring(cancel_result.error)
+        ))
+    end
+
+    log.info(string.format(
+        "SPELLFORGE_LIVE_BOUNCE_EVENT recipe_id=%s cast_id=%s bounce_id=%s bounce_index=%s bounce_max=%s projectile_id=%s trigger_payload_slot_id=%s final=%s duplicate_key=%s",
+        tostring(binding.recipe_id),
+        tostring(binding.cast_id),
+        tostring(binding.bounce_id),
+        tostring(route.bounce_index),
+        tostring(binding.bounce_max),
+        tostring(route.projectile_id),
+        tostring(binding.payload_slot_id),
+        tostring(is_final),
+        tostring(shortKey(key) or "<long>")
+    ))
+
+    return {
+        ok = true,
+        bounce_index = route.bounce_index,
+        bounce_max = binding.bounce_max,
+        bounce_id = binding.bounce_id,
+        projectile_id = route.projectile_id,
+        final = is_final,
+        trigger_result = trigger_result,
+        trigger_payload_slot_id = binding.payload_slot_id,
+        trigger_payload_helper_engine_id = binding.payload_helper_engine_id,
+        cancel_result = cancel_result,
+    }
+end
+
+function live_bounce.clearForTests()
+    bindings_by_cast_source = {}
+    bindings_by_latest_source = {}
+    binding_order = {}
+    duplicate_keys = {}
+    duplicate_order = {}
+end
+
+return live_bounce

@@ -20,6 +20,11 @@ local KEY_ENABLE_LIVE_NESTED_TRIGGER_TIMER = "enable_live_nested_trigger_timer_v
 local KEY_ENABLE_LIVE_NESTED_FINAL_FANOUT = "enable_live_nested_final_fanout_v0"
 local KEY_ENABLE_LIVE_CHAIN_AUDIT = "enable_live_chain_audit_v0"
 local KEY_ENABLE_LIVE_CHAIN_RUNTIME = "enable_live_chain_runtime_v0"
+local KEY_ENABLE_LIVE_BOUNCE = "enable_live_bounce_v0"
+local KEY_ENABLE_LIVE_HOMING = "enable_live_homing_v0"
+local KEY_ENABLE_LIVE_SOFT_HOMING = "enable_live_soft_homing_v0"
+local KEY_ENABLE_LIVE_SOFT_HOMING_PROBE = "enable_live_soft_homing_probe"
+local KEY_ENABLE_LIVE_CHAIN_MULTICAST = "enable_live_chain_multicast_v0"
 local KEY_ENABLE_CHAOS_BUDGET = "enable_chaos_budget_v0"
 
 local DEFAULT_ENABLE_SMOKE_TESTS = false
@@ -39,6 +44,11 @@ local DEFAULT_ENABLE_LIVE_NESTED_TRIGGER_TIMER = false
 local DEFAULT_ENABLE_LIVE_NESTED_FINAL_FANOUT = false
 local DEFAULT_ENABLE_LIVE_CHAIN_AUDIT = false
 local DEFAULT_ENABLE_LIVE_CHAIN_RUNTIME = false
+local DEFAULT_ENABLE_LIVE_BOUNCE = false
+local DEFAULT_ENABLE_LIVE_HOMING = false
+local DEFAULT_ENABLE_LIVE_SOFT_HOMING = false
+local DEFAULT_ENABLE_LIVE_SOFT_HOMING_PROBE = false
+local DEFAULT_ENABLE_LIVE_CHAIN_MULTICAST = false
 local DEFAULT_ENABLE_CHAOS_BUDGET = false
 
 local function readBoolean(key, default_value)
@@ -117,6 +127,26 @@ function dev.liveChainRuntimeEnabled()
     return readBoolean(KEY_ENABLE_LIVE_CHAIN_RUNTIME, DEFAULT_ENABLE_LIVE_CHAIN_RUNTIME)
 end
 
+function dev.liveBounceEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_BOUNCE, DEFAULT_ENABLE_LIVE_BOUNCE)
+end
+
+function dev.liveHomingEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_HOMING, DEFAULT_ENABLE_LIVE_HOMING)
+end
+
+function dev.liveSoftHomingEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_SOFT_HOMING, DEFAULT_ENABLE_LIVE_SOFT_HOMING)
+end
+
+function dev.liveSoftHomingProbeEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_SOFT_HOMING_PROBE, DEFAULT_ENABLE_LIVE_SOFT_HOMING_PROBE)
+end
+
+function dev.liveChainMulticastEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_CHAIN_MULTICAST, DEFAULT_ENABLE_LIVE_CHAIN_MULTICAST)
+end
+
 function dev.chaosBudgetEnabled()
     return readBoolean(KEY_ENABLE_CHAOS_BUDGET, DEFAULT_ENABLE_CHAOS_BUDGET)
 end
@@ -187,6 +217,26 @@ end
 
 function dev.liveChainRuntimeSettingKey()
     return "SpellforgeDev.enable_live_chain_runtime_v0"
+end
+
+function dev.liveBounceSettingKey()
+    return "SpellforgeDev.enable_live_bounce_v0"
+end
+
+function dev.liveHomingSettingKey()
+    return "SpellforgeDev.enable_live_homing_v0"
+end
+
+function dev.liveSoftHomingSettingKey()
+    return "SpellforgeDev.enable_live_soft_homing_v0"
+end
+
+function dev.liveSoftHomingProbeSettingKey()
+    return "SpellforgeDev.enable_live_soft_homing_probe"
+end
+
+function dev.liveChainMulticastSettingKey()
+    return "SpellforgeDev.enable_live_chain_multicast_v0"
 end
 
 function dev.chaosBudgetSettingKey()

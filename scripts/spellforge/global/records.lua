@@ -141,6 +141,15 @@ function records.put(recipe_id, payload)
     persist()
 end
 
+function records.deleteByRecipeId(recipe_id)
+    if in_memory.by_recipe[recipe_id] ~= nil then
+        in_memory.by_recipe[recipe_id] = nil
+        persist()
+        return true
+    end
+    return false
+end
+
 function records.createRecord(draft)
     local ok, created_or_err = pcall(world.createRecord, draft)
     if not ok then

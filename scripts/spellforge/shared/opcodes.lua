@@ -51,6 +51,20 @@ local opcodes = {
             hops = { type = "integer", min = 1, max = limits.MAX_CHAIN_HOPS },
         },
     },
+    Bounce = {
+        kind = "launch_modifier",
+        display_name = "Bounce",
+        description = "Reflect the projectile off surfaces or actors up to N bounces.",
+        parameters = {
+            bounces = { type = "integer", min = 1, max = limits.MAX_BOUNCE_COUNT_HARD },
+        },
+    },
+    Homing = {
+        kind = "launch_modifier",
+        display_name = "Homing",
+        description = "Apply bounded SFP force-vector aim assist toward the launch target.",
+        parameters = {},
+    },
     Trigger = {
         kind = "scope_opener",
         display_name = "Trigger",

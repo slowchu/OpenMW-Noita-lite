@@ -1,5 +1,6 @@
 local limits = require("scripts.spellforge.shared.limits")
 local parser = require("scripts.spellforge.global.parser")
+local validation = require("scripts.spellforge.shared.validation_contract")
 
 local emission_slots = {}
 local PRESENTATION_METADATA_FIELDS = {
@@ -12,8 +13,11 @@ local PRESENTATION_METADATA_FIELDS = {
 
 local function cloneParams(params)
     local out = {}
+    if type(params) ~= "table" then
+        return out
+    end
     local keys = {}
-    for key in pairs(params or {}) do
+    for key in pairs(params) do
         keys[#keys + 1] = key
     end
     table.sort(keys)
@@ -76,11 +80,8 @@ local function countMulticast(prefix_ops)
     return count
 end
 
-local function appendError(errors, path, message)
-    errors[#errors + 1] = {
-        path = path,
-        message = message,
-    }
+local function appendError(errors, path, message, code, details)
+    errors[#errors + 1] = validation.error(path, message, code, details)
 end
 
 local function hasPostfix(group, opcode)
@@ -116,17 +117,17 @@ function emission_slots.allocate(plan, opts)
     local errors = {}
 
     if type(plan) ~= "table" then
-        appendError(errors, "plan", "plan must be a table")
+        appendError(errors, "plan", "plan must be a table", "plan_not_table")
         return { ok = false, errors = errors, warnings = warnings }
     end
     if type(plan.recipe_id) ~= "string" or plan.recipe_id == "" then
-        appendError(errors, "plan.recipe_id", "plan.recipe_id must be a non-empty string")
+        appendError(errors, "plan.recipe_id", "plan.recipe_id must be a non-empty string", "plan_recipe_id_required")
     end
     if type(plan.groups) ~= "table" then
-        appendError(errors, "plan.groups", "plan.groups must be an array")
+        appendError(errors, "plan.groups", "plan.groups must be an array", "plan_groups_not_array")
     end
     if type(plan.parse_result) == "table" and plan.parse_result.ok == false then
-        appendError(errors, "plan.parse_result", "plan.parse_result.ok is false")
+        appendError(errors, "plan.parse_result", "plan.parse_result.ok is false", "plan_parse_failed")
     end
     if #errors > 0 then
         return { ok = false, errors = errors, warnings = warnings }
@@ -142,7 +143,10 @@ function emission_slots.allocate(plan, opts)
 
     local function ensureCap(next_count, path)
         if next_count > max_slots then
-            appendError(errors, path, string.format("Slot count exceeds MAX_PROJECTILES_PER_CAST (%d)", max_slots))
+            appendError(errors, path, string.format("Slot count exceeds MAX_PROJECTILES_PER_CAST (%d)", max_slots), "slot_cap_exceeded", {
+                limit = max_slots,
+                count = next_count,
+            })
             return false
         end
         return true

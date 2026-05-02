@@ -8,8 +8,10 @@ local events = require("scripts.spellforge.shared.events")
 local dev_launch = require("scripts.spellforge.global.dev_launch")
 local dev_runtime = require("scripts.spellforge.global.dev_runtime")
 local limits = require("scripts.spellforge.shared.limits")
+local live_bounce = require("scripts.spellforge.global.live_bounce")
 local live_chain = require("scripts.spellforge.global.live_chain")
 local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
+local live_soft_homing = require("scripts.spellforge.global.live_soft_homing")
 local live_timer = require("scripts.spellforge.global.live_timer")
 local live_trigger = require("scripts.spellforge.global.live_trigger")
 local log = require("scripts.spellforge.shared.log").new("global.executor")
@@ -534,12 +536,16 @@ function executor.onMagicHit(payload)
         helper_hit = runtime_hits.resolveHelperHit(payload)
     end
     local helper_mapping = helper_hit and helper_hit.ok and helper_hit.mapping or nil
-    if helper_mapping and dev.devLaunchEnabled() then
+    local skip_live_continuations = spellforge_hit_user_data
+        and spellforge_hit_user_data.bounce_manual_detonation == true
+
+    if helper_mapping and dev.devLaunchEnabled() and not skip_live_continuations then
         dev_launch.onHelperHit(helper_hit)
     end
     local chain_result = nil
     local trigger_result = nil
-    if helper_mapping and dev.liveSimpleDispatchEnabled() then
+    if helper_mapping and dev.liveSimpleDispatchEnabled() and not skip_live_continuations then
+        live_soft_homing.onResolvedHit(helper_hit)
         chain_result = live_chain.handleResolvedHit(helper_hit)
         trigger_result = live_trigger.handleResolvedHit(helper_hit)
     end
@@ -605,6 +611,13 @@ function executor.onMagicHit(payload)
             end
         end
     end
+end
+
+function executor.onProjectileBounce(payload)
+    if not dev.liveSimpleDispatchEnabled() then
+        return
+    end
+    live_bounce.handleBouncePayload(payload)
 end
 
 local function buildActiveSpellIdSet(actor)
@@ -681,6 +694,7 @@ function executor.onUpdate(dt)
     else
         orchestrator.advanceTime(dt)
     end
+    live_soft_homing.onUpdate(dt)
 end
 
 function executor.onCastDiagSignal(payload)
@@ -710,6 +724,8 @@ function executor.onRuntimeStatsRequest(payload)
         live_timer.clearForTests()
         live_trigger.clearForTests()
         live_chain.clearForTests()
+        live_bounce.clearForTests()
+        live_soft_homing.clearForTests()
     end
     sender:sendEvent(events.RUNTIME_STATS_RESULT, {
         request_id = payload and payload.request_id,

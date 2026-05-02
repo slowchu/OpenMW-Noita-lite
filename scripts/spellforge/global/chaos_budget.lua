@@ -37,10 +37,12 @@ local function effectiveLimits(profile)
     local max_nested_final_fanout = choose(profile, limits.MAX_NESTED_FINAL_FANOUT_DEFAULT, limits.MAX_NESTED_FINAL_FANOUT_CHAOS)
     local max_jobs_per_tick = choose(profile, limits.MAX_JOBS_PER_TICK_DEFAULT, limits.MAX_JOBS_PER_TICK_CHAOS)
     local max_live_launches_per_tick = choose(profile, limits.MAX_LIVE_LAUNCHES_PER_TICK_DEFAULT, limits.MAX_LIVE_LAUNCHES_PER_TICK_CHAOS)
+    local max_live_launches_initial_burst = choose(profile, limits.MAX_LIVE_LAUNCHES_INITIAL_BURST_DEFAULT, limits.MAX_LIVE_LAUNCHES_INITIAL_BURST_CHAOS)
     local max_nested_jobs = choose(profile, limits.MAX_NESTED_PAYLOAD_JOBS_DEFAULT, limits.MAX_NESTED_PAYLOAD_JOBS_CHAOS)
     local max_cast_jobs = choose(profile, limits.MAX_CAST_TOTAL_JOB_BUDGET_DEFAULT, limits.MAX_CAST_TOTAL_JOB_BUDGET_CHAOS)
     local max_chain_scan_candidates = choose(profile, limits.MAX_CHAIN_SCAN_CANDIDATES_DEFAULT, limits.MAX_CHAIN_SCAN_CANDIDATES_CHAOS)
     local max_chain_branches = choose(profile, limits.MAX_CHAIN_BRANCHES_DEFAULT, limits.MAX_CHAIN_BRANCHES_CHAOS)
+    local max_chain_multicast_fanout = choose(profile, limits.MAX_CHAIN_MULTICAST_FANOUT_DEFAULT, limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS)
 
     return {
         MAX_RECURSION_DEPTH = limits.MAX_RECURSION_DEPTH,
@@ -56,10 +58,12 @@ local function effectiveLimits(profile)
         MAX_CHAIN_SCAN_CANDIDATES = max_chain_scan_candidates,
         MAX_CHAIN_VERTICAL_DELTA = limits.MAX_CHAIN_VERTICAL_DELTA,
         CHAIN_AIM_HEIGHT = limits.CHAIN_AIM_HEIGHT,
-        MAX_CHAIN_JOBS_PER_CAST = max_chain_hops,
+        MAX_CHAIN_JOBS_PER_CAST = max_chain_hops * math.max(1, math.min(max_chain_multicast_fanout, limits.MAX_CHAIN_MULTICAST_FANOUT_HARD)),
         MAX_CHAIN_BRANCHES = max_chain_branches,
+        MAX_CHAIN_MULTICAST_FANOUT = math.min(max_chain_multicast_fanout, limits.MAX_CHAIN_MULTICAST_FANOUT_HARD),
         MAX_JOBS_PER_TICK = max_jobs_per_tick,
         MAX_LIVE_LAUNCHES_PER_TICK = max_live_launches_per_tick,
+        MAX_LIVE_LAUNCHES_INITIAL_BURST = math.min(max_live_launches_initial_burst, limits.MAX_LIVE_LAUNCHES_INITIAL_BURST_HARD),
         MAX_NESTED_PAYLOAD_JOBS = max_nested_jobs,
         MAX_NESTED_PAYLOAD_DEPTH = limits.MAX_NESTED_PAYLOAD_DEPTH,
         MAX_NESTED_PAYLOAD_FANOUT = math.min(max_payload_fanout, limits.MAX_PAYLOAD_FANOUT_HARD),
@@ -92,6 +96,7 @@ function chaos_budget.withBudget(opts)
     out.max_payload_fanout = tonumber(out.max_payload_fanout) or budget_limits.MAX_PAYLOAD_FANOUT
     out.max_jobs_per_tick = tonumber(out.max_jobs_per_tick) or budget_limits.MAX_JOBS_PER_TICK
     out.max_live_launches_per_tick = tonumber(out.max_live_launches_per_tick) or budget_limits.MAX_LIVE_LAUNCHES_PER_TICK
+    out.max_live_launches_initial_burst = tonumber(out.max_live_launches_initial_burst) or budget_limits.MAX_LIVE_LAUNCHES_INITIAL_BURST
     out.max_nested_payload_jobs = tonumber(out.max_nested_payload_jobs) or budget_limits.MAX_NESTED_PAYLOAD_JOBS
     out.max_nested_payload_depth = tonumber(out.max_nested_payload_depth) or budget_limits.MAX_NESTED_PAYLOAD_DEPTH
     out.nested_final_fanout_max_fanout = tonumber(out.nested_final_fanout_max_fanout) or budget_limits.MAX_NESTED_FINAL_FANOUT
@@ -99,6 +104,7 @@ function chaos_budget.withBudget(opts)
     out.max_chain_jobs = tonumber(out.max_chain_jobs) or budget_limits.MAX_CHAIN_JOBS_PER_CAST
     out.max_chain_scan_candidates = tonumber(out.max_chain_scan_candidates) or budget_limits.MAX_CHAIN_SCAN_CANDIDATES
     out.max_chain_branches = tonumber(out.max_chain_branches) or budget_limits.MAX_CHAIN_BRANCHES
+    out.max_chain_multicast_fanout = tonumber(out.max_chain_multicast_fanout) or budget_limits.MAX_CHAIN_MULTICAST_FANOUT
     out.max_cast_total_jobs = tonumber(out.max_cast_total_jobs) or budget_limits.MAX_CAST_TOTAL_JOB_BUDGET
     return out
 end
@@ -117,7 +123,7 @@ function chaos_budget.report(opts)
         tostring(budget.enabled)
     ))
     log.info(string.format(
-        "SPELLFORGE_CHAOS_BUDGET_LIMITS profile=%s projectile_cap=%d job_cap=%d fanout_cap=%d nested_final_fanout_cap=%d chain_hop_cap=%d chain_branch_cap=%d chain_candidate_cap=%d jobs_per_tick=%d live_launches_per_tick=%d",
+        "SPELLFORGE_CHAOS_BUDGET_LIMITS profile=%s projectile_cap=%d job_cap=%d fanout_cap=%d nested_final_fanout_cap=%d chain_hop_cap=%d chain_branch_cap=%d chain_multicast_fanout_cap=%d chain_candidate_cap=%d jobs_per_tick=%d live_launches_per_tick=%d live_launch_initial_burst=%d",
         budget.profile,
         budget_limits.MAX_PROJECTILES_PER_CAST,
         budget_limits.MAX_CAST_TOTAL_JOB_BUDGET,
@@ -125,9 +131,11 @@ function chaos_budget.report(opts)
         budget_limits.MAX_NESTED_FINAL_FANOUT,
         budget_limits.MAX_CHAIN_HOPS,
         budget_limits.MAX_CHAIN_BRANCHES,
+        budget_limits.MAX_CHAIN_MULTICAST_FANOUT,
         budget_limits.MAX_CHAIN_SCAN_CANDIDATES,
         budget_limits.MAX_JOBS_PER_TICK,
-        budget_limits.MAX_LIVE_LAUNCHES_PER_TICK
+        budget_limits.MAX_LIVE_LAUNCHES_PER_TICK,
+        budget_limits.MAX_LIVE_LAUNCHES_INITIAL_BURST
     ))
     return budget
 end
@@ -158,6 +166,7 @@ function chaos_budget.observe(fields)
     runtime_stats.max("chaos_budget_max_queue_observed", tonumber(fields.queue) or tonumber(fields.max_queue) or 0)
     runtime_stats.max("chaos_budget_max_projectiles_observed", tonumber(fields.projectiles) or tonumber(fields.launches) or tonumber(fields.launch_count) or 0)
     runtime_stats.max("chaos_budget_max_live_launches_per_tick_observed", tonumber(fields.live_launches_per_tick) or tonumber(fields.live_launches) or 0)
+    runtime_stats.max("chaos_budget_max_live_launches_initial_burst_observed", tonumber(fields.live_launches_initial_burst) or tonumber(fields.initial_burst) or 0)
 end
 
 return chaos_budget

@@ -201,7 +201,10 @@ function chain_target_provider.makeCandidate(object, hit_context, opts)
     local vertical_delta = nil
     if origin ~= nil then
         distance = distanceBetween(origin, base_position)
-        vertical_delta = math.abs(component(origin, "z") - component(base_position, "z"))
+        local vertical_position = options.vertical_reference == "aim"
+            and elevatedPosition(base_position, limits.CHAIN_AIM_HEIGHT)
+            or base_position
+        vertical_delta = math.abs(component(origin, "z") - component(vertical_position, "z"))
     end
     local radius = tonumber(options.radius or options.scan_radius or limits.MAX_CHAIN_SCAN_RADIUS) or limits.MAX_CHAIN_SCAN_RADIUS
     if distance ~= nil and distance > radius then
@@ -300,7 +303,8 @@ function chain_target_provider.collectCandidates(hit_context, opts)
             end
             local candidate, rejection_reason = chain_target_provider.makeCandidate(object, hit_context, {
                 radius = radius,
-                max_vertical_delta = limits.MAX_CHAIN_VERTICAL_DELTA,
+                max_vertical_delta = options.max_vertical_delta or limits.MAX_CHAIN_VERTICAL_DELTA,
+                vertical_reference = options.vertical_reference,
             })
             if candidate then
                 candidates[#candidates + 1] = candidate
@@ -344,7 +348,7 @@ function chain_target_provider.collectCandidates(hit_context, opts)
     result.candidate_count = #candidates
     result.candidates = candidates
     result.vertical_rejected = vertical_rejected
-    result.max_vertical_delta = limits.MAX_CHAIN_VERTICAL_DELTA
+    result.max_vertical_delta = options.max_vertical_delta or limits.MAX_CHAIN_VERTICAL_DELTA
     runtime_stats.inc("chain_provider_candidates_seen", inspected)
     runtime_stats.inc("chain_provider_candidates_returned", result.candidate_count)
     if cap_hit then
@@ -361,7 +365,7 @@ function chain_target_provider.collectCandidates(hit_context, opts)
         tostring(radius),
         tostring(candidate_cap),
         tostring(vertical_rejected),
-        tostring(limits.MAX_CHAIN_VERTICAL_DELTA),
+        tostring(result.max_vertical_delta),
         tostring(limits.CHAIN_AIM_HEIGHT)
     ))
     return result

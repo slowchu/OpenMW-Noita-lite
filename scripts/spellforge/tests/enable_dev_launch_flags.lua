@@ -45,6 +45,11 @@ local function apply()
         setDevTrue("enable_live_nested_final_fanout_v0")
         setDevTrue("enable_live_chain_audit_v0")
         setDevTrue("enable_live_chain_runtime_v0")
+        setDevTrue("enable_live_bounce_v0")
+        setDevTrue("enable_live_homing_v0")
+        setDevTrue("enable_live_soft_homing_v0")
+        setDevTrue("enable_live_soft_homing_probe")
+        setDevTrue("enable_live_chain_multicast_v0")
         setDevTrue("enable_chaos_budget_v0")
     end)
     if not ok then
@@ -54,7 +59,7 @@ local function apply()
     end
 
     state.applied = true
-    log.info("enabled SpellforgeDev.enable_smoke_tests, SpellforgeDev.enable_dev_launch, SpellforgeDev.enable_live_2_2c_runtime, SpellforgeDev.enable_live_multicast, SpellforgeDev.enable_live_spread_burst, SpellforgeDev.enable_live_trigger, SpellforgeDev.enable_live_timer, SpellforgeDev.enable_live_speed_plus, SpellforgeDev.enable_live_size_plus, SpellforgeDev.enable_live_payload_multicast_v0, SpellforgeDev.enable_live_payload_pattern_v0, SpellforgeDev.enable_live_nested_trigger_timer_v1, SpellforgeDev.enable_live_nested_final_fanout_v0, SpellforgeDev.enable_live_chain_audit_v0, SpellforgeDev.enable_live_chain_runtime_v0, and SpellforgeDev.enable_chaos_budget_v0")
+    log.info("enabled SpellforgeDev.enable_smoke_tests, SpellforgeDev.enable_dev_launch, SpellforgeDev.enable_live_2_2c_runtime, SpellforgeDev.enable_live_multicast, SpellforgeDev.enable_live_spread_burst, SpellforgeDev.enable_live_trigger, SpellforgeDev.enable_live_timer, SpellforgeDev.enable_live_speed_plus, SpellforgeDev.enable_live_size_plus, SpellforgeDev.enable_live_payload_multicast_v0, SpellforgeDev.enable_live_payload_pattern_v0, SpellforgeDev.enable_live_nested_trigger_timer_v1, SpellforgeDev.enable_live_nested_final_fanout_v0, SpellforgeDev.enable_live_chain_audit_v0, SpellforgeDev.enable_live_chain_runtime_v0, SpellforgeDev.enable_live_bounce_v0, SpellforgeDev.enable_live_homing_v0, SpellforgeDev.enable_live_soft_homing_v0, SpellforgeDev.enable_live_soft_homing_probe, SpellforgeDev.enable_live_chain_multicast_v0, and SpellforgeDev.enable_chaos_budget_v0")
 end
 
 return {

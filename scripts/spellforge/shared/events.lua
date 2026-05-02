@@ -6,6 +6,12 @@ events.BACKEND_UNAVAILABLE = "Spellforge_BackendUnavailable"
 
 events.COMPILE_RECIPE = "Spellforge_CompileRecipe"
 events.COMPILE_RESULT = "Spellforge_CompileResult"
+events.VALIDATE_RECIPE = "Spellforge_ValidateRecipe"
+events.VALIDATE_RESULT = "Spellforge_ValidateResult"
+events.PREVIEW_RECIPE = "Spellforge_PreviewRecipe"
+events.PREVIEW_RESULT = "Spellforge_PreviewResult"
+events.QUERY_UI_CATALOG = "Spellforge_QueryUiCatalog"
+events.UI_CATALOG_RESULT = "Spellforge_UiCatalogResult"
 
 events.DELETE_COMPILED = "Spellforge_DeleteCompiled"
 
