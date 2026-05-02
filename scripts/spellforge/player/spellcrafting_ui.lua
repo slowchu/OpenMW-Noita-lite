@@ -13,10 +13,54 @@ local spellcrafting_ui = {}
 local v2 = util.vector2
 
 local LAYER_NAME = "Windows"
-local MAX_WINDOW_SIZE = v2(760, 520)
-local MIN_WINDOW_SIZE = v2(480, 400)
+local MAX_WINDOW_SIZE = v2(820, 560)
+local MIN_WINDOW_SIZE = v2(500, 420)
 local SCREEN_MARGIN = 8
-local DEFAULT_TITLE = "Spellforge Spell"
+local DEFAULT_TITLE = "New Spell"
+
+local function mkColor(r, g, b, a)
+    if util.color and util.color.rgba then
+        return util.color.rgba(r, g, b, a or 1)
+    end
+    if util.color and util.color.rgb then
+        return util.color.rgb(r, g, b)
+    end
+    return nil
+end
+
+local COLOR = {
+    title        = mkColor(0.96, 0.84, 0.52),
+    subtitle     = mkColor(0.72, 0.72, 0.78),
+    section      = mkColor(0.92, 0.82, 0.55),
+    text         = mkColor(0.93, 0.93, 0.93),
+    muted        = mkColor(0.62, 0.62, 0.66),
+    accent       = mkColor(0.65, 0.85, 1.00),
+    selected     = mkColor(1.00, 0.82, 0.45),
+    success      = mkColor(0.55, 0.92, 0.65),
+    error        = mkColor(0.98, 0.55, 0.55),
+    warning      = mkColor(0.98, 0.82, 0.50),
+    info         = mkColor(0.78, 0.86, 0.95),
+    fire         = mkColor(1.00, 0.62, 0.30),
+    frost        = mkColor(0.55, 0.85, 1.00),
+    shock        = mkColor(0.92, 0.85, 0.42),
+    poison       = mkColor(0.62, 0.92, 0.55),
+    shield       = mkColor(0.95, 0.85, 0.55),
+    restore      = mkColor(0.75, 0.95, 0.85),
+    drain        = mkColor(0.78, 0.55, 0.95),
+    op_modifier  = mkColor(0.82, 0.62, 1.00),
+    op_scope     = mkColor(0.55, 0.92, 0.92),
+}
+
+local GLYPHS = {
+    cursor  = ">>",
+    bullet  = "*",
+    sep     = "  -  ",
+    sub_sep = ", ",
+    blank   = "  ",
+}
+
+local SUBTITLE = "Compose base effects and operators into a spell."
+local BANNER_TITLE = "SPELLFORGE  --  Spellmaking"
 
 local BASE_EFFECTS = {
     {
@@ -61,7 +105,7 @@ local state = {
     effects = {},
     selected_index = nil,
     selected_saved_id = nil,
-    status = "Press Preview or Validate.",
+    status = "Welcome to the Spellforge.",
     status_kind = "info",
     preview = nil,
     last_validation = nil,
@@ -92,7 +136,7 @@ end
 
 local function shortText(value, max_len)
     local text = tostring(value or "")
-    if #text > max_len then
+    if max_len and #text > max_len then
         return string.sub(text, 1, max_len - 3) .. "..."
     end
     return text
@@ -134,27 +178,28 @@ local function layoutMetrics()
     local content_w = math.max(1, window_w - 16)
     local content_h = math.max(1, window_h - 16)
     local gap = 6
-    local palette_w = clamp(math.floor(content_w * 0.18), 100, 130)
-    local right_w = clamp(math.floor(content_w * 0.31), 170, 235)
+    local palette_w = clamp(math.floor(content_w * 0.19), 110, 145)
+    local right_w = clamp(math.floor(content_w * 0.31), 180, 245)
     local recipe_w = content_w - palette_w - right_w - gap * 2
-    if recipe_w < 210 then
-        right_w = math.max(150, right_w - (210 - recipe_w))
+    if recipe_w < 220 then
+        right_w = math.max(160, right_w - (220 - recipe_w))
         recipe_w = content_w - palette_w - right_w - gap * 2
     end
-    if recipe_w < 190 then
-        palette_w = math.max(90, palette_w - (190 - recipe_w))
+    if recipe_w < 200 then
+        palette_w = math.max(100, palette_w - (200 - recipe_w))
         recipe_w = content_w - palette_w - right_w - gap * 2
     end
-    recipe_w = math.max(160, recipe_w)
+    recipe_w = math.max(170, recipe_w)
 
-    local top_h = 26
-    local action_h = 24
-    local main_h = math.max(245, content_h - top_h - action_h - 20)
-    local effects_h = clamp(math.floor(main_h * 0.27), 96, 116)
-    local operators_h = math.max(120, main_h - effects_h - gap)
-    local saved_h = clamp(math.floor(main_h * 0.28), 92, 130)
-    local preview_h = clamp(math.floor(main_h * 0.25), 86, 112)
-    local editor_h = math.max(112, main_h - saved_h - preview_h - gap * 2)
+    local banner_h = 60
+    local status_h = 26
+    local action_h = 30
+    local main_h = math.max(240, content_h - banner_h - status_h - action_h - gap * 3)
+    local effects_h = clamp(math.floor(main_h * 0.30), 110, 132)
+    local operators_h = math.max(140, main_h - effects_h - gap)
+    local saved_h = clamp(math.floor(main_h * 0.28), 100, 140)
+    local preview_h = clamp(math.floor(main_h * 0.26), 100, 130)
+    local editor_h = math.max(130, main_h - saved_h - preview_h - gap * 2)
 
     return {
         screen = screen,
@@ -164,27 +209,28 @@ local function layoutMetrics()
         gap = gap,
         content_w = content_w,
         content_h = content_h,
-        top_h = top_h,
+        banner_h = banner_h,
         main_h = main_h,
+        status_h = status_h,
         action_h = action_h,
         palette_w = palette_w,
         palette_button_w = math.max(72, palette_w - 24),
         effects_h = effects_h,
         operators_h = operators_h,
         recipe_w = recipe_w,
-        recipe_button_w = math.max(120, recipe_w - 56),
-        recipe_list_h = math.max(120, main_h - 70),
+        recipe_button_w = math.max(140, recipe_w - 56),
+        recipe_list_h = math.max(140, main_h - 80),
         right_w = right_w,
-        right_button_w = math.max(92, right_w - 34),
+        right_button_w = math.max(110, right_w - 34),
         saved_h = saved_h,
         editor_h = editor_h,
         preview_h = preview_h,
-        title_w = math.max(150, math.min(270, content_w - 160)),
-        field_label_w = right_w < 190 and 48 or 62,
-        field_input_w = math.max(74, math.min(140, right_w - 88)),
-        number_w = right_w < 190 and 44 or 54,
+        title_w = math.max(140, math.min(260, content_w - 320)),
+        field_label_w = right_w < 200 and 56 or 70,
+        field_input_w = math.max(74, math.min(140, right_w - 96)),
+        number_w = right_w < 200 and 50 or 60,
         preview_text_w = math.max(140, right_w - 40),
-        preview_text_h = math.max(50, preview_h - 40),
+        preview_text_h = math.max(60, preview_h - 48),
     }
 end
 
@@ -217,13 +263,15 @@ local function textLayout(text, opts)
     }
 end
 
-local function paragraph(text, size)
+local function paragraph(text, size, opts)
+    local options = opts or {}
     return {
         template = template("textParagraph"),
         type = openmw_ui.TYPE.TextEdit,
         props = {
             text = tostring(text or ""),
             size = size or v2(180, 60),
+            textColor = options.color or nil,
             readOnly = true,
             multiline = true,
             wordWrap = true,
@@ -247,6 +295,7 @@ local function row(children, opts)
         props = {
             horizontal = true,
             arrange = options.arrange or openmw_ui.ALIGNMENT.Start,
+            align = options.align,
             size = options.size,
         },
         external = options.external,
@@ -261,6 +310,7 @@ local function column(children, opts)
         props = {
             horizontal = false,
             arrange = options.arrange or openmw_ui.ALIGNMENT.Start,
+            align = options.align,
             size = options.size,
         },
         external = options.external,
@@ -279,10 +329,14 @@ end
 
 local function button(label, callback, opts)
     local options = opts or {}
+    local width = options.width or 86
+    local height = options.height or 24
+    local prefix = options.bullet and (options.bullet .. " ") or ""
+    local label_text = prefix .. tostring(label)
     return {
         template = template(options.disabled and "boxTransparent" or "box"),
         props = {
-            size = options.size or v2(options.width or 86, options.height or 24),
+            size = options.size or v2(width, height),
         },
         events = options.disabled and nil or {
             mouseClick = async:callback(function()
@@ -290,9 +344,17 @@ local function button(label, callback, opts)
             end),
         },
         content = openmw_ui.content {
-            padded(textLayout(label, { box_size = v2((options.width or 86) - 8, 0) })),
+            padded(textLayout(label_text, {
+                box_size = v2(width - 8, 0),
+                color = options.color,
+                size = options.text_size,
+            })),
         },
     }
+end
+
+local function sectionHeader(title)
+    return textLayout(title, { header = true, color = COLOR.section })
 end
 
 local function section(title, body, size)
@@ -303,7 +365,7 @@ local function section(title, body, size)
         },
         content = openmw_ui.content {
             padded(column({
-                textLayout(title, { header = true }),
+                sectionHeader(title),
                 spacer(0, 4),
                 body,
             })),
@@ -320,6 +382,7 @@ local function textInput(value, onChange, opts)
         props = {
             text = current,
             size = options.size or v2(options.width or 140, 0),
+            textColor = options.color or nil,
             multiline = false,
         },
         events = {
@@ -378,6 +441,52 @@ local function opcodeForEffect(effect)
     return by_effect[effect.id]
 end
 
+local function operatorKind(opcode)
+    local def = state.catalog and state.catalog.operators_by_opcode and state.catalog.operators_by_opcode[opcode]
+    return def and def.kind or nil
+end
+
+local function operatorDisplayName(opcode)
+    local def = state.catalog and state.catalog.operators_by_opcode and state.catalog.operators_by_opcode[opcode]
+    return (def and def.display_name) or opcode
+end
+
+local function operatorDescription(opcode)
+    local def = state.catalog and state.catalog.operators_by_opcode and state.catalog.operators_by_opcode[opcode]
+    return def and def.description or nil
+end
+
+local function colorForOpcode(opcode)
+    local kind = operatorKind(opcode)
+    if kind == "scope_opener" then
+        return COLOR.op_scope
+    end
+    return COLOR.op_modifier
+end
+
+local function colorForEffectId(effect_id)
+    local id = string.lower(tostring(effect_id or ""))
+    if id == "" then
+        return COLOR.text
+    end
+    if string.find(id, "fire", 1, true) then return COLOR.fire end
+    if string.find(id, "frost", 1, true) then return COLOR.frost end
+    if string.find(id, "shock", 1, true) or string.find(id, "lightning", 1, true) then return COLOR.shock end
+    if string.find(id, "poison", 1, true) then return COLOR.poison end
+    if string.find(id, "shield", 1, true) then return COLOR.shield end
+    if string.find(id, "restore", 1, true) or string.find(id, "heal", 1, true) then return COLOR.restore end
+    if string.find(id, "drain", 1, true) or string.find(id, "absorb", 1, true) then return COLOR.drain end
+    return COLOR.text
+end
+
+local function colorForEffect(effect)
+    local opcode = opcodeForEffect(effect)
+    if opcode then
+        return colorForOpcode(opcode)
+    end
+    return colorForEffectId(effect and effect.id)
+end
+
 local function defaultOperatorParams(opcode)
     return cloneValue(DEFAULT_OPERATOR_PARAMS[opcode] or {}, 0)
 end
@@ -420,29 +529,43 @@ local function sanitizeEffects(effects)
     return out
 end
 
+local function paramsSummary(params)
+    if type(params) ~= "table" then
+        return ""
+    end
+    local parts = {}
+    for key, value in pairs(params) do
+        parts[#parts + 1] = string.format("%s=%s", tostring(key), tostring(value))
+    end
+    if #parts == 0 then
+        return ""
+    end
+    table.sort(parts)
+    return table.concat(parts, GLYPHS.sub_sep)
+end
+
 local function effectLabel(effect, index)
     local opcode = opcodeForEffect(effect)
+    local prefix = string.format("%d.", index)
     if opcode then
-        local params = type(effect.params) == "table" and effect.params or {}
-        if next(params) ~= nil then
-            local parts = {}
-            for key, value in pairs(params) do
-                parts[#parts + 1] = string.format("%s=%s", tostring(key), tostring(value))
-            end
-            table.sort(parts)
-            return string.format("%d. %s (%s)", index, opcode, table.concat(parts, ", "))
+        local summary = paramsSummary(effect.params)
+        local name = operatorDisplayName(opcode)
+        if summary ~= "" then
+            return string.format("%s %s (%s)", prefix, name, summary)
         end
-        return string.format("%d. %s", index, opcode)
+        return string.format("%s %s", prefix, name)
     end
-    return string.format(
-        "%d. %s %s %s-%s %ss",
-        index,
+    local mag_min = tonumber(effect and effect.magnitudeMin) or 0
+    local mag_max = tonumber(effect and effect.magnitudeMax) or 0
+    local mag = (mag_min == mag_max) and tostring(mag_min) or string.format("%s-%s", tostring(mag_min), tostring(mag_max))
+    local duration = tonumber(effect and effect.duration) or 0
+    local segments = {
         tostring(effect and effect.id or "?"),
         rangeName(effect and effect.range),
-        tostring(effect and effect.magnitudeMin or 0),
-        tostring(effect and effect.magnitudeMax or 0),
-        tostring(effect and effect.duration or 0)
-    )
+        mag,
+        string.format("%ss", tostring(duration)),
+    }
+    return string.format("%s %s", prefix, table.concat(segments, GLYPHS.sep))
 end
 
 local function currentRecipe()
@@ -464,11 +587,25 @@ local function setStatus(text, kind)
     state.status_kind = kind or "info"
 end
 
+local function statusColor(kind)
+    if kind == "success" then return COLOR.success end
+    if kind == "error" then return COLOR.error end
+    if kind == "warning" then return COLOR.warning end
+    return COLOR.info
+end
+
+local function statusPrefix(kind)
+    if kind == "success" then return "[OK]" end
+    if kind == "error" then return "[!!]" end
+    if kind == "warning" then return "[!]" end
+    return "[i]"
+end
+
 local function addEffect(effect)
     state.effects[#state.effects + 1] = cloneValue(effect, 0)
     state.selected_index = #state.effects
     state.preview = nil
-    setStatus("Recipe changed.", "info")
+    setStatus(string.format("Added effect (%d total).", #state.effects), "info")
     render()
 end
 
@@ -479,10 +616,14 @@ local function addOperator(opcode)
         render()
         return
     end
-    addEffect({
+    state.effects[#state.effects + 1] = cloneValue({
         id = effect_id,
         params = cloneValue(DEFAULT_OPERATOR_PARAMS[opcode] or {}, 0),
-    })
+    }, 0)
+    state.selected_index = #state.effects
+    state.preview = nil
+    setStatus(string.format("Added %s operator.", operatorDisplayName(opcode)), "info")
+    render()
 end
 
 local function moveSelected(delta)
@@ -509,6 +650,7 @@ local function removeSelected()
         state.selected_index = #state.effects
     end
     state.preview = nil
+    setStatus("Removed effect.", "info")
     render()
 end
 
@@ -519,7 +661,7 @@ local function newRecipe()
     state.selected_saved_id = nil
     state.preview = nil
     state.last_validation = nil
-    setStatus("New recipe.", "info")
+    setStatus("New recipe started.", "info")
     render()
 end
 
@@ -530,7 +672,7 @@ local function loadSaved(saved)
     state.selected_saved_id = saved.id
     state.preview = nil
     state.last_validation = nil
-    setStatus("Loaded " .. tostring(saved.title or saved.id) .. ".", "info")
+    setStatus("Loaded \"" .. tostring(saved.title or saved.id) .. "\".", "info")
     log.info(string.format(
         "SPELLFORGE_SPELLCRAFT_UI_LOAD_OK saved_id=%s effects=%s",
         tostring(saved.id),
@@ -552,7 +694,7 @@ local function saveRecipe()
     end
     if result and result.ok then
         state.selected_saved_id = result.saved_recipe and result.saved_recipe.id or state.selected_saved_id
-        setStatus("Saved " .. tostring(result.saved_recipe and result.saved_recipe.title or state.title) .. ".", "success")
+        setStatus("Saved \"" .. tostring(result.saved_recipe and result.saved_recipe.title or state.title) .. "\".", "success")
         log.info(string.format(
             "SPELLFORGE_SPELLCRAFT_UI_SAVE_OK saved_id=%s",
             tostring(state.selected_saved_id)
@@ -596,12 +738,12 @@ local function deleteSaved()
 end
 
 local function validateRecipe()
-    setStatus("Validating...", "info")
+    setStatus("Validating recipe...", "info")
     render()
     ui_api.validateRecipe(currentRecipe(), function(result)
         state.last_validation = result
         if result and result.ok == true then
-            setStatus("Valid. recipe_id=" .. tostring(result.recipe_id), "success")
+            setStatus("Valid recipe (id " .. tostring(result.recipe_id) .. ").", "success")
             log.info(string.format("SPELLFORGE_SPELLCRAFT_UI_VALIDATE_OK recipe_id=%s", tostring(result.recipe_id)))
         else
             local first = result and result.errors and result.errors[1]
@@ -616,12 +758,12 @@ local function validateRecipe()
 end
 
 local function previewRecipe()
-    setStatus("Previewing...", "info")
+    setStatus("Previewing recipe...", "info")
     render()
     ui_api.previewRecipe(currentRecipe(), function(result)
         if result and result.ok == true then
             state.preview = result.preview
-            setStatus("Preview ready. recipe_id=" .. tostring(result.recipe_id), "success")
+            setStatus("Preview ready (id " .. tostring(result.recipe_id) .. ").", "success")
             log.info(string.format(
                 "SPELLFORGE_SPELLCRAFT_UI_PREVIEW_OK recipe_id=%s groups=%s slots=%s helpers=%s",
                 tostring(result.recipe_id),
@@ -661,13 +803,17 @@ end
 local function operatorPalette(m)
     local items = {}
     for _, entry in ipairs(state.catalog and state.catalog.operators or {}) do
-        items[#items + 1] = button(entry.display_name or entry.opcode, function()
+        local label = entry.display_name or entry.opcode
+        items[#items + 1] = button(label, function()
             addOperator(entry.opcode)
-        end, { width = m.palette_button_w })
+        end, {
+            width = m.palette_button_w,
+            color = colorForOpcode(entry.opcode),
+        })
         items[#items + 1] = spacer(0, 2)
     end
     if #items == 0 then
-        items[#items + 1] = paragraph("Catalog loading...", v2(math.max(76, m.palette_w - 28), 48))
+        items[#items + 1] = paragraph("Catalog loading...", v2(math.max(76, m.palette_w - 28), 48), { color = COLOR.muted })
     end
     return section("Operators", column(items), v2(m.palette_w, m.operators_h))
 end
@@ -677,7 +823,10 @@ local function effectPalette(m)
     for _, entry in ipairs(BASE_EFFECTS) do
         items[#items + 1] = button(entry.label, function()
             addEffect(entry.effect)
-        end, { width = m.palette_button_w })
+        end, {
+            width = m.palette_button_w,
+            color = colorForEffectId(entry.effect.id),
+        })
         items[#items + 1] = spacer(0, 2)
     end
     return section("Effects", column(items), v2(m.palette_w, m.effects_h))
@@ -686,33 +835,41 @@ end
 local function recipeStack(m)
     local items = {}
     if #state.effects == 0 then
-        items[#items + 1] = paragraph("No effects yet.", v2(math.max(120, m.recipe_w - 36), 42))
+        items[#items + 1] = paragraph(
+            "Empty recipe. Click an effect or operator on the left to add it.",
+            v2(math.max(120, m.recipe_w - 36), 56),
+            { color = COLOR.muted }
+        )
     else
         for i, effect in ipairs(state.effects) do
             local selected = i == state.selected_index
-            items[#items + 1] = button(shortText(effectLabel(effect, i), math.max(22, math.floor(m.recipe_button_w / 7))), function()
-                state.selected_index = i
-                render()
-            end, { width = m.recipe_button_w, height = 24, disabled = false })
-            if selected then
-                items[#items] = row({
-                    textLayout(">"),
-                    spacer(4, 0),
-                    items[#items],
-                }, { size = v2(math.max(130, m.recipe_w - 20), 24) })
-            end
+            local color = selected and COLOR.selected or colorForEffect(effect)
+            local label = shortText(effectLabel(effect, i), math.max(28, math.floor(m.recipe_button_w / 6)))
+            items[#items + 1] = row({
+                textLayout(selected and GLYPHS.cursor or GLYPHS.blank, {
+                    color = COLOR.selected,
+                    box_size = v2(22, 0),
+                }),
+                button(label, function()
+                    state.selected_index = i
+                    render()
+                end, {
+                    width = math.max(120, m.recipe_button_w - 24),
+                    color = color,
+                }),
+            })
             items[#items + 1] = spacer(0, 2)
         end
     end
 
     local controls = row({
-        button("Up", function() moveSelected(-1) end, { width = 42 }),
+        button("Up", function() moveSelected(-1) end, { width = 44, color = COLOR.accent }),
         spacer(4, 0),
-        button("Down", function() moveSelected(1) end, { width = 50 }),
+        button("Down", function() moveSelected(1) end, { width = 50, color = COLOR.accent }),
         spacer(4, 0),
-        button("Remove", removeSelected, { width = 62 }),
+        button("Remove", removeSelected, { width = 64, color = COLOR.error }),
         spacer(4, 0),
-        button("New", newRecipe, { width = 46 }),
+        button("New", newRecipe, { width = 50, color = COLOR.muted }),
     })
 
     return section("Spell Recipe", column({
@@ -723,30 +880,34 @@ local function recipeStack(m)
 end
 
 local function rangeButtons(effect, m)
-    local self_w = m.right_w < 190 and 40 or 48
-    local touch_w = m.right_w < 190 and 46 or 54
-    local target_w = m.right_w < 190 and 54 or 62
+    local self_w = m.right_w < 200 and 44 or 52
+    local touch_w = m.right_w < 200 and 50 or 58
+    local target_w = m.right_w < 200 and 56 or 64
+    local current = tonumber(effect.range) or 0
+    local function tab(label, range_value, width)
+        local active = current == range_value
+        return button(label, function()
+            effect.range = range_value
+            state.preview = nil
+            render()
+        end, {
+            width = width,
+            color = active and COLOR.selected or COLOR.muted,
+            bullet = active and GLYPHS.bullet or nil,
+        })
+    end
     return row({
-        button("Self", function()
-            effect.range = 0
-            render()
-        end, { width = self_w }),
+        tab("Self", 0, self_w),
         spacer(4, 0),
-        button("Touch", function()
-            effect.range = 1
-            render()
-        end, { width = touch_w }),
+        tab("Touch", 1, touch_w),
         spacer(4, 0),
-        button("Target", function()
-            effect.range = 2
-            render()
-        end, { width = target_w }),
+        tab("Target", 2, target_w),
     })
 end
 
 local function fieldLine(label, editor, m)
     return row({
-        textLayout(label, { box_size = v2(m.field_label_w, 0) }),
+        textLayout(label, { box_size = v2(m.field_label_w, 0), color = COLOR.muted }),
         spacer(4, 0),
         editor,
     })
@@ -755,11 +916,30 @@ end
 local function selectedEditor(m)
     local effect = selectedEffect()
     if not effect then
-        return section("Selected Effect", paragraph("Select a recipe row to edit it.", v2(math.max(130, m.right_w - 38), math.max(50, m.editor_h - 56))), v2(m.right_w, m.editor_h))
+        return section("Selected Effect", paragraph(
+            "Select an entry from the Spell Recipe to edit its parameters.",
+            v2(math.max(130, m.right_w - 38), math.max(50, m.editor_h - 56)),
+            { color = COLOR.muted }
+        ), v2(m.right_w, m.editor_h))
     end
 
     local opcode = opcodeForEffect(effect)
+    local color = colorForEffect(effect)
+    local heading
+    if opcode then
+        local kind = operatorKind(opcode) or "operator"
+        heading = row({
+            textLayout(GLYPHS.bullet .. " " .. operatorDisplayName(opcode), { color = color }),
+            spacer(6, 0),
+            textLayout("[" .. kind .. "]", { color = COLOR.muted }),
+        })
+    else
+        heading = textLayout(GLYPHS.bullet .. " " .. tostring(effect.id), { color = color })
+    end
+
     local lines = {
+        heading,
+        spacer(0, 4),
         fieldLine("ID", textInput(effect.id, function(value)
             effect.id = value
             state.preview = nil
@@ -768,7 +948,11 @@ local function selectedEditor(m)
     }
 
     if opcode then
-        lines[#lines + 1] = textLayout("Operator: " .. opcode)
+        local description = operatorDescription(opcode)
+        if description then
+            lines[#lines + 1] = paragraph(description, v2(math.max(130, m.right_w - 38), 36), { color = COLOR.muted })
+            lines[#lines + 1] = spacer(0, 4)
+        end
         local params = normalizedParamsForEffect(effect, opcode) or {}
         effect.params = params
         local param_defs = state.catalog and state.catalog.operators_by_opcode and state.catalog.operators_by_opcode[opcode]
@@ -778,20 +962,20 @@ local function selectedEditor(m)
         end
         table.sort(names)
         if #names == 0 then
-            lines[#lines + 1] = paragraph("No parameters.", v2(math.max(130, m.right_w - 38), 32))
+            lines[#lines + 1] = textLayout("No parameters.", { color = COLOR.muted })
         end
         for _, name in ipairs(names) do
             if params[name] == nil then
                 params[name] = (DEFAULT_OPERATOR_PARAMS[opcode] or {})[name] or 1
             end
-            lines[#lines + 1] = spacer(0, 4)
             lines[#lines + 1] = fieldLine(name, numberInput(params[name], function(value)
                 params[name] = value
                 state.preview = nil
             end, { width = m.number_w }), m)
+            lines[#lines + 1] = spacer(0, 3)
         end
     else
-        lines[#lines + 1] = textLayout("Range")
+        lines[#lines + 1] = textLayout("Range", { color = COLOR.muted })
         lines[#lines + 1] = spacer(0, 2)
         lines[#lines + 1] = rangeButtons(effect, m)
         lines[#lines + 1] = spacer(0, 4)
@@ -799,17 +983,17 @@ local function selectedEditor(m)
             effect.magnitudeMin = value
             state.preview = nil
         end, { width = m.number_w }), m)
-        lines[#lines + 1] = spacer(0, 4)
+        lines[#lines + 1] = spacer(0, 3)
         lines[#lines + 1] = fieldLine("Max", numberInput(effect.magnitudeMax or 0, function(value)
             effect.magnitudeMax = value
             state.preview = nil
         end, { width = m.number_w }), m)
-        lines[#lines + 1] = spacer(0, 4)
+        lines[#lines + 1] = spacer(0, 3)
         lines[#lines + 1] = fieldLine("Area", numberInput(effect.area or 0, function(value)
             effect.area = value
             state.preview = nil
         end, { width = m.number_w }), m)
-        lines[#lines + 1] = spacer(0, 4)
+        lines[#lines + 1] = spacer(0, 3)
         lines[#lines + 1] = fieldLine("Duration", numberInput(effect.duration or 0, function(value)
             effect.duration = value
             state.preview = nil
@@ -821,72 +1005,164 @@ end
 
 local function savedRecipes(m)
     local rows = {}
-    local saved = ui_api.getSavedRecipes()
-    for i, entry in ipairs(saved or {}) do
+    local saved = ui_api.getSavedRecipes() or {}
+    for i, entry in ipairs(saved) do
         if i > 5 then
             break
         end
-        rows[#rows + 1] = button(shortText(entry.title or entry.id, math.max(16, math.floor(m.right_button_w / 7))), function()
+        local active = entry.id == state.selected_saved_id
+        local label = shortText(entry.title or entry.id, math.max(20, math.floor(m.right_button_w / 6)))
+        rows[#rows + 1] = button(label, function()
             loadSaved(entry)
-        end, { width = m.right_button_w })
+        end, {
+            width = m.right_button_w,
+            color = active and COLOR.selected or COLOR.text,
+            bullet = active and GLYPHS.cursor or GLYPHS.bullet,
+        })
         rows[#rows + 1] = spacer(0, 2)
     end
     if #rows == 0 then
-        rows[#rows + 1] = paragraph("No saved recipes.", v2(math.max(110, m.right_w - 38), 32))
+        rows[#rows + 1] = paragraph(
+            "No saved recipes yet. Click Save to keep the current one.",
+            v2(math.max(110, m.right_w - 38), 44),
+            { color = COLOR.muted }
+        )
+    elseif #saved > 5 then
+        rows[#rows + 1] = textLayout(string.format("(+%d more)", #saved - 5), { color = COLOR.muted })
     end
-    return section("Saved", column(rows), v2(m.right_w, m.saved_h))
+    return section("Saved Recipes", column(rows), v2(m.right_w, m.saved_h))
+end
+
+local function previewLines(preview)
+    local lines = {}
+    if not preview or next(preview) == nil then
+        return {
+            { text = "No preview yet. Press Preview to compute one.", color = COLOR.muted },
+        }
+    end
+    if preview.recipe_id then
+        lines[#lines + 1] = { text = "Recipe id  : " .. tostring(preview.recipe_id), color = COLOR.text }
+    end
+    local has_counts = preview.group_count or preview.slot_count or preview.helper_spec_count
+    if has_counts then
+        lines[#lines + 1] = {
+            text = string.format(
+                "Groups: %s   Slots: %s   Helpers: %s",
+                tostring(preview.group_count or 0),
+                tostring(preview.slot_count or 0),
+                tostring(preview.helper_spec_count or 0)
+            ),
+            color = COLOR.text,
+        }
+    end
+    local matrix = preview.feature_matrix or {}
+    if matrix.live_runtime_status then
+        local rstatus = tostring(matrix.live_runtime_status)
+        local rcolor = COLOR.text
+        if rstatus == "ready" or rstatus == "ok" or rstatus == "live" then rcolor = COLOR.success
+        elseif rstatus == "deferred" then rcolor = COLOR.warning
+        elseif rstatus == "blocked" or rstatus == "error" then rcolor = COLOR.error
+        end
+        lines[#lines + 1] = { text = "Runtime    : " .. rstatus, color = rcolor }
+    end
+    if matrix.deferred_reasons and #matrix.deferred_reasons > 0 then
+        lines[#lines + 1] = { text = "Deferred   : " .. table.concat(matrix.deferred_reasons, ", "), color = COLOR.warning }
+    end
+    return lines
 end
 
 local function previewPanel(m)
-    local preview = state.preview or {}
-    local matrix = preview.feature_matrix or {}
-    local lines = {
-        "Status: " .. tostring(state.status),
-    }
-    if preview.recipe_id then
-        lines[#lines + 1] = "Recipe: " .. tostring(preview.recipe_id)
+    local lines = previewLines(state.preview)
+    local children = {}
+    for i, line in ipairs(lines) do
+        children[#children + 1] = textLayout(line.text, { color = line.color, box_size = v2(m.preview_text_w, 0) })
+        if i < #lines then
+            children[#children + 1] = spacer(0, 2)
+        end
     end
-    if preview.group_count then
-        lines[#lines + 1] = string.format("Groups: %s  Slots: %s  Helpers: %s",
-            tostring(preview.group_count),
-            tostring(preview.slot_count or 0),
-            tostring(preview.helper_spec_count or 0)
-        )
-    end
-    if matrix.live_runtime_status then
-        lines[#lines + 1] = "Runtime: " .. tostring(matrix.live_runtime_status)
-    end
-    if matrix.deferred_reasons and #matrix.deferred_reasons > 0 then
-        lines[#lines + 1] = "Deferred: " .. table.concat(matrix.deferred_reasons, ", ")
-    end
-    return section("Preview", paragraph(table.concat(lines, "\n"), v2(m.preview_text_w, m.preview_text_h)), v2(m.right_w, m.preview_h))
+    return section("Preview", column(children, { size = v2(m.preview_text_w, m.preview_text_h) }), v2(m.right_w, m.preview_h))
 end
 
 local function titleEditor(m)
     return row({
-        textLayout("Name"),
+        textLayout("Name", { color = COLOR.muted }),
         spacer(8, 0),
         textInput(state.title, function(value)
             state.title = value
-        end, { width = m.title_w }),
+        end, { width = m.title_w, color = COLOR.selected }),
     })
+end
+
+local function bannerHeader(m)
+    return {
+        template = template("box"),
+        props = {
+            size = v2(m.content_w, m.banner_h),
+        },
+        content = openmw_ui.content {
+            padded(column({
+                textLayout(BANNER_TITLE, { header = true, size = 22, color = COLOR.title }),
+                spacer(0, 2),
+                row({
+                    textLayout(SUBTITLE, { color = COLOR.subtitle }),
+                    spacer(12, 0),
+                    titleEditor(m),
+                }),
+            })),
+        },
+    }
+end
+
+local function statusBar(m)
+    local kind = state.status_kind or "info"
+    local text = string.format("%s  %s", statusPrefix(kind), state.status or "")
+    local saved_label = state.selected_saved_id
+        and string.format("Editing: %s", tostring(state.selected_saved_id))
+        or "Unsaved draft"
+    return {
+        template = template("box"),
+        props = {
+            size = v2(m.content_w, m.status_h),
+        },
+        content = openmw_ui.content {
+            padded(row({
+                textLayout(text, { color = statusColor(kind), box_size = v2(math.max(120, m.content_w - 220), 0) }),
+                spacer(8, 0),
+                textLayout(saved_label, { color = COLOR.muted }),
+            })),
+        },
+    }
+end
+
+local function actionButton(label, callback, kind, width)
+    local color
+    if kind == "primary" then
+        color = COLOR.accent
+    elseif kind == "danger" then
+        color = COLOR.error
+    elseif kind == "muted" then
+        color = COLOR.muted
+    else
+        color = COLOR.text
+    end
+    return button(label, callback, { width = width or 70, height = 26, color = color })
 end
 
 local function actionButtons()
     return row({
-        button("Save", saveRecipe, { width = 54 }),
-        spacer(5, 0),
-        button("Validate", validateRecipe, { width = 70 }),
-        spacer(5, 0),
-        button("Preview", previewRecipe, { width = 70 }),
-        spacer(5, 0),
-        button("Compile", compileDeferred, { width = 70 }),
-        spacer(5, 0),
-        button("Delete", deleteSaved, { width = 60 }),
-        spacer(5, 0),
-        button("Cancel", function()
+        actionButton("Save", saveRecipe, "primary", 60),
+        spacer(6, 0),
+        actionButton("Validate", validateRecipe, "primary", 76),
+        spacer(6, 0),
+        actionButton("Preview", previewRecipe, "primary", 76),
+        spacer(6, 0),
+        actionButton("Compile", compileDeferred, nil, 76),
+        spacer(6, 0),
+        actionButton("Delete", deleteSaved, "danger", 64),
+        spacer(6, 0),
+        actionButton("Close", function()
             spellcrafting_ui.close()
-        end, { width = 60 }),
+        end, "muted", 60),
     })
 end
 
@@ -911,11 +1187,7 @@ local function buildLayout()
                 },
                 content = openmw_ui.content {
                     padded(column({
-                        row({
-                            textLayout("Spellmaking", { header = true, size = 20 }),
-                            spacer(16, 0),
-                            titleEditor(m),
-                        }, { size = v2(m.content_w, m.top_h) }),
+                        bannerHeader(m),
                         spacer(0, m.gap),
                         row({
                             column({
@@ -927,13 +1199,15 @@ local function buildLayout()
                             recipeStack(m),
                             spacer(m.gap, 0),
                             column({
-                                savedRecipes(m),
-                                spacer(0, m.gap),
                                 selectedEditor(m),
+                                spacer(0, m.gap),
+                                savedRecipes(m),
                                 spacer(0, m.gap),
                                 previewPanel(m),
                             }),
                         }, { size = v2(m.content_w, m.main_h) }),
+                        spacer(0, m.gap),
+                        statusBar(m),
                         spacer(0, m.gap),
                         actionButtons(),
                     })),
