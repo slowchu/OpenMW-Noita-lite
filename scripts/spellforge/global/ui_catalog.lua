@@ -2,6 +2,7 @@ local events = require("scripts.spellforge.shared.events")
 local feature_matrix = require("scripts.spellforge.global.feature_matrix")
 local limits = require("scripts.spellforge.shared.limits")
 local opcodes = require("scripts.spellforge.shared.opcodes")
+local operator_params = require("scripts.spellforge.shared.operator_params")
 local recipe_model = require("scripts.spellforge.shared.recipe_model")
 
 local ui_catalog = {}
@@ -65,6 +66,14 @@ local function cloneArray(values)
         out[i] = value
     end
     return out
+end
+
+local function recipeEffectFields()
+    local fields = cloneArray(RECIPE_EFFECT_FIELDS)
+    for _, field in ipairs(operator_params.encodedFieldNames()) do
+        fields[#fields + 1] = field
+    end
+    return fields
 end
 
 local function sortedKeys(tbl)
@@ -153,7 +162,7 @@ function ui_catalog.build(payload)
         recipe_model = {
             schema_version = recipe_model.SCHEMA_VERSION,
             source_kind = recipe_model.SOURCE_KIND_EFFECT_LIST,
-            effect_fields = cloneArray(RECIPE_EFFECT_FIELDS),
+            effect_fields = recipeEffectFields(),
             generated_ui_id_prefix = "effect:",
         },
         events = {

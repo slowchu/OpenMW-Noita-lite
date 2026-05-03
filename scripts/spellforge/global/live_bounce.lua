@@ -4,7 +4,9 @@ local log = require("scripts.spellforge.shared.log").new("global.live_bounce")
 local chain_target_provider = require("scripts.spellforge.global.chain_target_provider")
 local helper_records = require("scripts.spellforge.global.helper_records")
 local live_chain = require("scripts.spellforge.global.live_chain")
+local orchestrator = require("scripts.spellforge.global.orchestrator")
 local payload_multicast = require("scripts.spellforge.global.payload_multicast")
+local payload_pattern = require("scripts.spellforge.global.payload_pattern")
 local runtime_stats = require("scripts.spellforge.global.runtime_stats")
 local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
 local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
@@ -19,6 +21,10 @@ local bindings_by_latest_source = {}
 local binding_order = {}
 local duplicate_keys = {}
 local duplicate_order = {}
+
+local compactPayloadsFromBinding
+local payloadSlotIds
+local payloadHelperEngineIds
 
 local function appendBounded(order, key, max_count, on_evict)
     order[#order + 1] = key
@@ -354,26 +360,58 @@ function live_bounce.selectV0Plan(plan, opts)
         else
             payload_result = payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, {
                 source_opcode = "Trigger",
-                allow_payload_multicast = false,
-                allow_payload_pattern = false,
+                allow_payload_multicast = options.allow_payload_multicast == true,
+                allow_payload_pattern = options.allow_payload_pattern == true,
                 max_depth = options.max_depth,
                 max_jobs = options.max_jobs,
-                max_fanout = 1,
+                max_fanout = options.max_fanout,
                 max_projectiles = options.max_projectiles,
+                allowed_primary_prefix_ops = { Bounce = true },
             })
             if payload_result.detected_payload_multicast then
                 runtime_stats.inc("payload_multicast_attempts")
-                runtime_stats.inc("live_bounce_fanout_reject")
             end
             if payload_result.detected_payload_pattern then
                 runtime_stats.inc("payload_pattern_attempts")
-                runtime_stats.inc("live_bounce_fanout_reject")
             end
             if not payload_result.ok then
-                return rejectSelect(payload_result.reason or "bounce_trigger_payload_deferred")
+                local reason = payload_result.rejection_reason or "bounce_trigger_payload_resolution_failed"
+                if payload_result.detected_payload_multicast then
+                    runtime_stats.inc("payload_multicast_rejected")
+                    if reason == "payload_multicast_disabled" then
+                        runtime_stats.inc("payload_multicast_disabled_reject")
+                    elseif reason == "payload_multicast_fanout_cap_exceeded"
+                        or reason == "payload_multicast_projectile_cap_exceeded"
+                        or reason == "payload_multicast_job_cap_exceeded" then
+                        runtime_stats.inc("payload_multicast_cap_reject")
+                    elseif reason == "payload_multicast_chain_deferred" then
+                        runtime_stats.inc("payload_multicast_chain_reject")
+                    else
+                        runtime_stats.inc("payload_multicast_nested_reject")
+                    end
+                end
+                if payload_result.detected_payload_pattern then
+                    runtime_stats.inc("payload_pattern_rejected")
+                    if reason == "payload_pattern_disabled" then
+                        runtime_stats.inc("payload_pattern_disabled_reject")
+                    elseif reason == "payload_multicast_fanout_cap_exceeded"
+                        or reason == "payload_multicast_projectile_cap_exceeded"
+                        or reason == "payload_multicast_job_cap_exceeded"
+                        or reason == "payload_pattern_fanout_missing" then
+                        runtime_stats.inc("payload_pattern_cap_reject")
+                    elseif reason == "payload_multicast_chain_deferred" then
+                        runtime_stats.inc("payload_pattern_chain_reject")
+                    else
+                        runtime_stats.inc("payload_pattern_nested_reject")
+                    end
+                end
+                return rejectSelect(reason)
             end
-            if tonumber(payload_result.payload_count) ~= 1 then
-                return rejectSelect("bounce_payload_fanout_deferred", "live_bounce_fanout_reject")
+            if payload_result.is_payload_multicast then
+                runtime_stats.inc("payload_multicast_qualified")
+            end
+            if payload_result.is_payload_pattern then
+                runtime_stats.inc("payload_pattern_qualified")
             end
         end
     elseif group.payload and type(group.payload.effects) == "table" and #group.payload.effects > 0 then
@@ -406,6 +444,18 @@ function live_bounce.selectV0Plan(plan, opts)
         payload_count = payload_result and payload_result.payload_count or 0,
         payload_group_key = payload_result and payload_result.payload_group_key or nil,
         payload_effect_id = payload_result and payload_result.payload_effect_id or nil,
+        payload_effect_ids = payload_result and payload_result.payload_effect_ids or nil,
+        payload_multicast = payload_result and payload_result.is_payload_multicast == true or false,
+        payload_pattern = payload_result and payload_result.is_payload_pattern == true or false,
+        payload_pattern_kind = payload_result and payload_result.pattern_kind or nil,
+        payload_pattern_op = payload_result and payload_result.pattern_op or nil,
+        payload_multicast_fanout_count = payload_result and payload_result.fanout_count or nil,
+        max_payload_fanout = tonumber(options.max_fanout) or limits.MAX_NESTED_PAYLOAD_FANOUT,
+        max_projectiles = tonumber(options.max_projectiles) or limits.MAX_PROJECTILES_PER_CAST,
+        max_jobs_per_tick = tonumber(options.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK,
+        max_live_launches_per_tick = tonumber(options.max_live_launches_per_tick) or limits.MAX_LIVE_LAUNCHES_PER_TICK,
+        chaos_budget_profile = options.chaos_budget_profile,
+        allow_pending_launch_jobs = options.allow_pending_launch_jobs == true,
     }, nil
 end
 
@@ -434,6 +484,9 @@ function live_bounce.decorateSourceJob(job, binding)
     job.trigger_payload_slot_ids = binding.payload_slot_ids
     job.has_trigger_payload = binding.has_trigger_payload == true
     job.has_chain_payload = binding.has_chain_payload == true
+    job.payload_multicast = binding.payload_multicast == true
+    job.payload_pattern = binding.payload_pattern == true
+    job.payload_pattern_kind = binding.payload_pattern_kind
     job.chain_runtime = binding.has_chain_payload == true or job.chain_runtime == true
     job.chain_id = binding.chain_id
     job.chain_hop_index = binding.has_chain_payload == true and 0 or job.chain_hop_index
@@ -463,6 +516,9 @@ function live_bounce.decorateSourceJob(job, binding)
     job.payload.trigger_payload_slot_ids = binding.payload_slot_ids
     job.payload.has_trigger_payload = binding.has_trigger_payload == true
     job.payload.has_chain_payload = binding.has_chain_payload == true
+    job.payload.payload_multicast = binding.payload_multicast == true
+    job.payload.payload_pattern = binding.payload_pattern == true
+    job.payload.payload_pattern_kind = binding.payload_pattern_kind
     job.payload.chain_runtime = binding.has_chain_payload == true or job.payload.chain_runtime == true
     job.payload.chain_id = binding.chain_id
     job.payload.chain_hop_index = binding.has_chain_payload == true and 0 or job.payload.chain_hop_index
@@ -474,10 +530,22 @@ end
 
 function live_bounce.registerBinding(binding)
     local input = binding or {}
+    local payloads = compactPayloadsFromBinding(input)
     if type(input.recipe_id) ~= "string" or input.recipe_id == ""
         or type(input.source_slot_id) ~= "string" or input.source_slot_id == ""
         or type(input.source_helper_engine_id) ~= "string" or input.source_helper_engine_id == "" then
         return false
+    end
+    if input.has_trigger_payload == true and #payloads == 0 then
+        return false
+    end
+    if #payloads > 0 then
+        input.payloads = payloads
+        input.payload_slot_ids = payloadSlotIds(payloads)
+        input.payload_helper_engine_ids = payloadHelperEngineIds(payloads)
+        input.payload_count = #payloads
+        input.payload_slot_id = input.payload_slot_id or payloads[1].slot_id
+        input.payload_helper_engine_id = input.payload_helper_engine_id or payloads[1].helper_engine_id
     end
     local cast_key = castSourceKey(input.recipe_id, input.source_slot_id, input.cast_id)
     local latest_key = recipeSlotKey(input.recipe_id, input.source_slot_id)
@@ -526,6 +594,85 @@ local function shortKey(key)
         return key
     end
     return nil
+end
+
+compactPayloadsFromBinding = function(binding)
+    local payloads = {}
+    if type(binding and binding.payloads) == "table" and #binding.payloads > 0 then
+        for index, payload in ipairs(binding.payloads) do
+            payloads[index] = {
+                slot_id = payload.slot_id,
+                helper_engine_id = payload.helper_engine_id,
+                effect_id = payload.effect_id,
+                emission_index = payload.emission_index,
+                group_index = payload.group_index,
+                direction = payload.direction,
+                pattern_kind = payload.pattern_kind,
+                pattern_index = payload.pattern_index,
+                pattern_count = payload.pattern_count,
+                pattern_direction_key = payload.pattern_direction_key,
+                parent_slot_id = payload.parent_slot_id,
+                root_source_slot_id = payload.root_source_slot_id,
+                current_source_slot_id = payload.current_source_slot_id,
+                payload_depth = payload.payload_depth,
+                nested_stage_kind = payload.nested_stage_kind,
+                nested_stage_index = payload.nested_stage_index,
+                has_trigger_payload = payload.has_trigger_payload,
+                has_timer_payload = payload.has_timer_payload,
+            }
+        end
+    elseif type(binding and binding.payload_slot_id) == "string" and type(binding.payload_helper_engine_id) == "string" then
+        payloads[1] = {
+            slot_id = binding.payload_slot_id,
+            helper_engine_id = binding.payload_helper_engine_id,
+            effect_id = binding.payload_effect_id,
+        }
+    end
+    return payloads
+end
+
+payloadSlotIds = function(payloads)
+    local ids = {}
+    for index, payload in ipairs(payloads or {}) do
+        ids[index] = payload.slot_id
+    end
+    return ids
+end
+
+payloadHelperEngineIds = function(payloads)
+    local ids = {}
+    for index, payload in ipairs(payloads or {}) do
+        ids[index] = payload.helper_engine_id
+    end
+    return ids
+end
+
+local function fanoutBranchInfo(binding, route, payload, index, count)
+    local bounce_index = tonumber(route and route.bounce_index) or 0
+    local parent_id = bounceBranchParentId(binding)
+    local payload_slot_id = payload and payload.slot_id or binding.payload_slot_id or "no-payload"
+    local kind = "bounce_trigger_payload_multicast"
+    if binding.payload_pattern == true then
+        kind = "bounce_trigger_payload_pattern"
+    end
+    return {
+        branch_scope = string.format(
+            "%s:b%s",
+            tostring(bounceBranchScope(binding)),
+            tostring(bounce_index)
+        ),
+        branch_parent_id = parent_id,
+        branch_id = string.format(
+            "%s:b%s:trigger_payload:%s:%s",
+            tostring(parent_id),
+            tostring(bounce_index),
+            tostring(index),
+            tostring(payload_slot_id)
+        ),
+        branch_kind = kind,
+        branch_index = index,
+        branch_count = count,
+    }
 end
 
 local function routeFromBouncePayload(payload)
@@ -809,6 +956,367 @@ local function detonateBounceTriggerPayload(route, binding, duplicate_key, is_fi
     }
 end
 
+local function routeBounceTriggerFanoutPayload(route, binding, duplicate_key, is_final, options)
+    local route_options = options or {}
+    local payloads = compactPayloadsFromBinding(binding)
+    if #payloads == 0 then
+        runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+        return {
+            ok = false,
+            error = "bounce trigger payload helper mapping missing",
+        }
+    end
+
+    local max_payload_fanout = tonumber(binding.max_payload_fanout) or limits.MAX_NESTED_PAYLOAD_FANOUT
+    local max_projectiles = tonumber(binding.max_projectiles) or limits.MAX_PROJECTILES_PER_CAST
+    if #payloads > max_payload_fanout or #payloads > max_projectiles then
+        runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+        runtime_stats.inc("payload_multicast_cap_reject")
+        return {
+            ok = false,
+            error = "bounce trigger payload multicast fanout exceeds cap",
+        }
+    end
+
+    for _, payload in ipairs(payloads) do
+        local payload_mapping = helper_records.getByRecipeSlot(binding.recipe_id, payload.slot_id)
+            or helper_records.getByEngineId(payload.helper_engine_id)
+        if not payload_mapping or payload_mapping.engine_id ~= payload.helper_engine_id then
+            runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+            return {
+                ok = false,
+                error = "bounce trigger payload helper mapping missing",
+            }
+        end
+        if payload_mapping.source_postfix_opcode ~= "Trigger"
+            or payload_mapping.trigger_source_slot_id ~= binding.source_slot_id then
+            runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+            return {
+                ok = false,
+                error = "bounce trigger payload helper mapping mismatch",
+            }
+        end
+    end
+
+    local actor = route.attacker or binding.actor
+    local start_pos = route.hit_pos
+    local direction = route.bounce_direction or route.hit_normal or binding.direction
+    if actor == nil then
+        runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+        return { ok = false, error = "missing caster for bounce trigger payload" }
+    end
+    if start_pos == nil then
+        runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+        return { ok = false, error = "missing bounce position for trigger payload" }
+    end
+    if direction == nil then
+        runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+        return { ok = false, error = "missing bounce direction for trigger payload" }
+    end
+
+    local pattern_info = nil
+    if binding.payload_pattern == true then
+        local pattern_err = nil
+        pattern_info, pattern_err = payload_pattern.compute(payloads, direction, binding.payload_pattern_kind, binding.payload_pattern_op)
+        if not pattern_info then
+            runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+            runtime_stats.inc("payload_pattern_rejected")
+            return { ok = false, error = pattern_err or "bounce trigger payload pattern direction failed" }
+        end
+        payloads = pattern_info.payloads
+    end
+
+    local source_job_id = binding.source_job_id or (route.user_data and route.user_data.job_id)
+    local job_ids = {}
+    for index, payload in ipairs(payloads) do
+        local payload_key = string.format("%s:%s", tostring(duplicate_key), tostring(payload.slot_id))
+        local branch = fanoutBranchInfo(binding, route, payload, index, #payloads)
+        local payload_launch = {
+            actor = actor,
+            start_pos = start_pos,
+            direction = payload.direction or direction,
+            hit_object = route.target,
+            cast_id = binding.cast_id,
+            source_slot_id = binding.source_slot_id,
+            source_prefix_opcode = "Bounce",
+            source_helper_engine_id = binding.source_helper_engine_id,
+            source_postfix_opcode = "Trigger",
+            root_source_slot_id = payload.root_source_slot_id or binding.root_source_slot_id or binding.source_slot_id,
+            current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
+            parent_slot_id = payload.parent_slot_id or binding.source_slot_id,
+            payload_depth = payload.payload_depth or 1,
+            nested_stage_kind = payload.nested_stage_kind,
+            nested_stage_index = payload.nested_stage_index,
+            has_trigger_payload = payload.has_trigger_payload,
+            has_timer_payload = payload.has_timer_payload,
+            payload_slot_id = payload.slot_id,
+            trigger_source_slot_id = binding.source_slot_id,
+            trigger_payload_slot_id = payload.slot_id,
+            trigger_route = "bounce",
+            trigger_duplicate_key = shortKey(duplicate_key),
+            payload_multicast = binding.payload_multicast == true,
+            payload_pattern = binding.payload_pattern == true,
+            payload_count = #payloads,
+            fanout_count = #payloads,
+            emission_index = payload.emission_index,
+            group_index = payload.group_index,
+            pattern_kind = payload.pattern_kind,
+            pattern_index = payload.pattern_index,
+            pattern_count = payload.pattern_count,
+            pattern_direction_key = payload.pattern_direction_key,
+            bounce_runtime = true,
+            bounce_role = "trigger_payload_launch",
+            bounce_id = binding.bounce_id,
+            bounce_index = route.bounce_index,
+            bounce_max = binding.bounce_max,
+            bounce_power = binding.bounce_power,
+            bounce_detonate_on_actor_hit = false,
+            bounce_trigger_payload_slot_id = payload.slot_id,
+            bounce_final = is_final == true,
+            mute_audio = binding.mute_audio,
+            mute_light = binding.mute_light,
+        }
+        copyBranchFields(payload_launch, branch)
+        local enqueue = orchestrator.enqueue({
+            kind = orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND,
+            recipe_id = binding.recipe_id,
+            slot_id = payload.slot_id,
+            helper_engine_id = payload.helper_engine_id,
+            idempotency_key = payload_key,
+            source_job_id = source_job_id,
+            parent_job_id = source_job_id,
+            depth = 1,
+            cast_id = binding.cast_id,
+            emission_index = payload.emission_index,
+            group_index = payload.group_index,
+            fanout_count = #payloads,
+            max_live_launches_per_tick = binding.max_live_launches_per_tick,
+            chaos_budget_profile = binding.chaos_budget_profile,
+            root_source_slot_id = payload.root_source_slot_id or binding.root_source_slot_id or binding.source_slot_id,
+            current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
+            parent_slot_id = payload.parent_slot_id or binding.source_slot_id,
+            payload_depth = payload.payload_depth or 1,
+            nested_stage_kind = payload.nested_stage_kind,
+            nested_stage_index = payload.nested_stage_index,
+            has_trigger_payload = payload.has_trigger_payload,
+            has_timer_payload = payload.has_timer_payload,
+            pattern_kind = payload.pattern_kind,
+            pattern_index = payload.pattern_index,
+            pattern_count = payload.pattern_count,
+            pattern_direction_key = payload.pattern_direction_key,
+            source_slot_id = binding.source_slot_id,
+            source_prefix_opcode = "Bounce",
+            source_helper_engine_id = binding.source_helper_engine_id,
+            source_postfix_opcode = "Trigger",
+            payload_slot_id = payload.slot_id,
+            bounce_runtime = true,
+            bounce_role = "trigger_payload_launch",
+            bounce_id = binding.bounce_id,
+            bounce_index = route.bounce_index,
+            bounce_max = binding.bounce_max,
+            bounce_power = binding.bounce_power,
+            bounce_detonate_on_actor_hit = false,
+            bounce_trigger_payload_slot_id = payload.slot_id,
+            bounce_final = is_final == true,
+            branch_scope = branch.branch_scope,
+            branch_id = branch.branch_id,
+            branch_parent_id = branch.branch_parent_id,
+            branch_kind = branch.branch_kind,
+            branch_index = branch.branch_index,
+            branch_count = branch.branch_count,
+            payload = payload_launch,
+        })
+        if not enqueue.ok then
+            runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+            return {
+                ok = false,
+                error = enqueue.error or "bounce trigger payload enqueue failed",
+                job_ids = job_ids,
+            }
+        end
+        job_ids[#job_ids + 1] = enqueue.job_id
+    end
+
+    runtime_stats.inc("live_bounce_trigger_payload_jobs_enqueued", #job_ids)
+    if binding.payload_multicast == true then
+        runtime_stats.inc("payload_multicast_jobs", #job_ids)
+        runtime_stats.inc("payload_multicast_bounce_trigger_jobs", #job_ids)
+        runtime_stats.inc("payload_multicast_runtime_ok")
+    end
+    if binding.payload_pattern == true then
+        runtime_stats.inc("payload_pattern_jobs", #job_ids)
+        runtime_stats.inc("payload_pattern_bounce_trigger_jobs", #job_ids)
+        runtime_stats.inc("payload_pattern_runtime_ok")
+        if binding.payload_pattern_kind == "Spread" then
+            runtime_stats.inc("payload_pattern_spread_jobs", #job_ids)
+        elseif binding.payload_pattern_kind == "Burst" then
+            runtime_stats.inc("payload_pattern_burst_jobs", #job_ids)
+        end
+    end
+
+    local marker = binding.payload_pattern == true
+        and "SPELLFORGE_BOUNCE_TRIGGER_PAYLOAD_PATTERN_ENQUEUED"
+        or "SPELLFORGE_BOUNCE_TRIGGER_PAYLOAD_MULTICAST_ENQUEUED"
+    local first_queued_job = orchestrator.getJob(job_ids[1])
+    log.info(string.format(
+        "%s recipe_id=%s cast_id=%s bounce_id=%s bounce_index=%s source_slot_id=%s payload_count=%s pattern_kind=%s first_branch_id=%s branch_kind=%s first_job_id=%s final=%s",
+        marker,
+        tostring(binding.recipe_id),
+        tostring(binding.cast_id),
+        tostring(binding.bounce_id),
+        tostring(route.bounce_index),
+        tostring(binding.source_slot_id),
+        tostring(#job_ids),
+        tostring(binding.payload_pattern_kind),
+        tostring(first_queued_job and first_queued_job.branch_id or nil),
+        tostring(first_queued_job and first_queued_job.branch_kind or nil),
+        tostring(job_ids[1]),
+        tostring(is_final == true)
+    ))
+
+    local tick = nil
+    local jobs = {}
+    for _ = 1, 3 do
+        local all_settled = true
+        for _, job_id in ipairs(job_ids) do
+            local job = orchestrator.getJob(job_id)
+            if not job or job.status == "queued" or job.status == "running" then
+                all_settled = false
+                break
+            end
+        end
+        if all_settled then
+            break
+        end
+        local tick_options = {
+            max_jobs_per_tick = tonumber(binding.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK,
+            max_live_launches_per_tick = tonumber(binding.max_live_launches_per_tick) or limits.MAX_LIVE_LAUNCHES_PER_TICK,
+        }
+        if route_options.simulate_update_ticks == true then
+            tick_options.dt_seconds = tonumber(route_options.simulated_dt_seconds) or 0
+        end
+        tick = orchestrator.tick(tick_options)
+        if binding.allow_pending_launch_jobs == true
+            and tick
+            and tonumber(tick.live_launch_throttled_count) ~= nil
+            and tonumber(tick.live_launch_throttled_count) > 0 then
+            break
+        end
+    end
+
+    local launch_ok = true
+    local launch_ok_count = 0
+    local pending_count = 0
+    local projectile_ids = {}
+    for index, job_id in ipairs(job_ids) do
+        local job = orchestrator.getJob(job_id)
+        local job_ok = job and job.status == "complete" and job.launch_accepted == true
+        local pending = job and (job.status == "queued" or job.status == "running")
+        if job_ok then
+            launch_ok_count = launch_ok_count + 1
+            if job.projectile_id ~= nil then
+                projectile_ids[#projectile_ids + 1] = job.projectile_id
+            end
+        elseif pending and binding.allow_pending_launch_jobs == true then
+            pending_count = pending_count + 1
+        else
+            launch_ok = false
+        end
+        jobs[index] = {
+            job_id = job_id,
+            job_status = job and job.status or nil,
+            slot_id = job and job.slot_id or nil,
+            helper_engine_id = job and job.helper_engine_id or nil,
+            cast_id = job and job.cast_id or nil,
+            emission_index = job and job.emission_index or nil,
+            group_index = job and job.group_index or nil,
+            fanout_count = job and job.fanout_count or nil,
+            root_source_slot_id = job and job.root_source_slot_id or nil,
+            current_source_slot_id = job and job.current_source_slot_id or nil,
+            parent_slot_id = job and job.parent_slot_id or nil,
+            payload_depth = job and job.payload_depth or nil,
+            pattern_kind = job and job.pattern_kind or nil,
+            pattern_index = job and job.pattern_index or nil,
+            pattern_count = job and job.pattern_count or nil,
+            pattern_direction_key = job and job.pattern_direction_key or nil,
+            branch_scope = job and job.branch_scope or nil,
+            branch_id = job and job.branch_id or nil,
+            branch_parent_id = job and job.branch_parent_id or nil,
+            branch_kind = job and job.branch_kind or nil,
+            branch_index = job and job.branch_index or nil,
+            branch_count = job and job.branch_count or nil,
+            source_slot_id = job and job.source_slot_id or nil,
+            source_prefix_opcode = job and job.source_prefix_opcode or nil,
+            source_helper_engine_id = job and job.source_helper_engine_id or nil,
+            source_postfix_opcode = job and job.source_postfix_opcode or nil,
+            payload_slot_id = job and job.payload_slot_id or nil,
+            trigger_route = job and job.trigger_route or nil,
+            trigger_duplicate_key = job and job.trigger_duplicate_key or nil,
+            bounce_runtime = job and job.bounce_runtime == true or false,
+            bounce_role = job and job.bounce_role or nil,
+            bounce_id = job and job.bounce_id or nil,
+            bounce_index = job and job.bounce_index or nil,
+            bounce_final = job and job.bounce_final == true or false,
+            launch_accepted = job and job.launch_accepted == true or false,
+            launch_direction = job and job.launch_direction or nil,
+            projectile_id = job and job.projectile_id or nil,
+            launch_user_data = job and job.launch_user_data or nil,
+            error = job and job.error or nil,
+        }
+    end
+    if launch_ok_count > 0 then
+        runtime_stats.inc("live_bounce_trigger_payload_launch_ok", launch_ok_count)
+        log.info(string.format(
+            "SPELLFORGE_LIVE_BOUNCE_TRIGGER_PAYLOAD_OK recipe_id=%s cast_id=%s bounce_id=%s bounce_index=%s source_slot_id=%s payload_count=%s launch_ok_count=%s first_branch_id=%s branch_kind=%s first_projectile_id=%s final=%s",
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(binding.bounce_id),
+            tostring(route.bounce_index),
+            tostring(binding.source_slot_id),
+            tostring(#payloads),
+            tostring(launch_ok_count),
+            tostring(jobs[1] and jobs[1].branch_id or nil),
+            tostring(jobs[1] and jobs[1].branch_kind or nil),
+            tostring(projectile_ids[1]),
+            tostring(is_final == true)
+        ))
+    end
+    if not launch_ok then
+        runtime_stats.inc("live_bounce_trigger_payload_launch_failed", #payloads - launch_ok_count)
+    end
+
+    return {
+        ok = launch_ok == true,
+        error = launch_ok and nil or "bounce trigger payload job did not complete",
+        source_slot_id = binding.source_slot_id,
+        source_helper_engine_id = binding.source_helper_engine_id,
+        payload_slot_id = binding.payload_slot_id,
+        payload_helper_engine_id = binding.payload_helper_engine_id,
+        payload_slot_ids = payloadSlotIds(payloads),
+        payload_helper_engine_ids = payloadHelperEngineIds(payloads),
+        payload_count = #payloads,
+        payload_multicast = binding.payload_multicast == true,
+        payload_pattern = binding.payload_pattern == true,
+        payload_pattern_kind = binding.payload_pattern_kind,
+        payload_pattern_direction_keys = pattern_info and pattern_info.direction_keys or nil,
+        trigger_route = "bounce",
+        duplicate_key = duplicate_key,
+        job_id = job_ids[1],
+        job_ids = job_ids,
+        jobs = jobs,
+        job_status = jobs[1] and jobs[1].job_status or nil,
+        launch_accepted = launch_ok == true,
+        launch_count = launch_ok_count,
+        pending_launch_jobs = pending_count > 0,
+        pending_job_count = pending_count,
+        all_launch_jobs_complete = pending_count == 0,
+        projectile_id = projectile_ids[1],
+        projectile_ids = projectile_ids,
+        launch_user_data = jobs[1] and jobs[1].launch_user_data or nil,
+        tick = tick,
+    }
+end
+
 local function routeBounceTriggerChainPayload(route, binding, duplicate_key, is_final)
     runtime_stats.inc("live_bounce_chain_payload_attempts")
     local chain_source_target, precollected_candidates, precollected_provider_result =
@@ -996,6 +1504,22 @@ function live_bounce.handleBouncePayload(payload, opts)
             trigger_result = { ok = false, disabled = true, error = "live trigger disabled" }
         elseif binding.has_chain_payload == true then
             trigger_result = routeBounceTriggerChainPayload(route, binding, key, is_final)
+        elseif binding.payload_multicast == true
+            and options.force_payload_multicast_enabled ~= true
+            and binding.force_payload_multicast_enabled ~= true
+            and not dev.livePayloadMulticastEnabled() then
+            runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+            runtime_stats.inc("payload_multicast_disabled_reject")
+            trigger_result = { ok = false, disabled = true, error = "live payload multicast disabled" }
+        elseif binding.payload_pattern == true
+            and options.force_payload_pattern_enabled ~= true
+            and binding.force_payload_pattern_enabled ~= true
+            and not dev.livePayloadPatternEnabled() then
+            runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+            runtime_stats.inc("payload_pattern_disabled_reject")
+            trigger_result = { ok = false, disabled = true, error = "live payload pattern disabled" }
+        elseif binding.payload_multicast == true or binding.payload_pattern == true then
+            trigger_result = routeBounceTriggerFanoutPayload(route, binding, key, is_final, options)
         else
             trigger_result = detonateBounceTriggerPayload(route, binding, key, is_final)
         end
@@ -1041,6 +1565,7 @@ function live_bounce.handleBouncePayload(payload, opts)
         tostring(shortKey(key) or "<long>")
     ))
 
+    local trigger_payload_result = trigger_result or {}
     return {
         ok = true,
         bounce_index = route.bounce_index,
@@ -1051,6 +1576,28 @@ function live_bounce.handleBouncePayload(payload, opts)
         trigger_result = trigger_result,
         trigger_payload_slot_id = binding.payload_slot_id,
         trigger_payload_helper_engine_id = binding.payload_helper_engine_id,
+        payload_slot_id = trigger_payload_result.payload_slot_id,
+        payload_helper_engine_id = trigger_payload_result.payload_helper_engine_id,
+        payload_slot_ids = trigger_payload_result.payload_slot_ids,
+        payload_helper_engine_ids = trigger_payload_result.payload_helper_engine_ids,
+        payload_count = trigger_payload_result.payload_count,
+        payload_multicast = trigger_payload_result.payload_multicast,
+        payload_pattern = trigger_payload_result.payload_pattern,
+        payload_pattern_kind = trigger_payload_result.payload_pattern_kind,
+        payload_pattern_direction_keys = trigger_payload_result.payload_pattern_direction_keys,
+        job_id = trigger_payload_result.job_id,
+        job_ids = trigger_payload_result.job_ids,
+        jobs = trigger_payload_result.jobs,
+        job_status = trigger_payload_result.job_status,
+        launch_accepted = trigger_payload_result.launch_accepted,
+        launch_count = trigger_payload_result.launch_count,
+        pending_launch_jobs = trigger_payload_result.pending_launch_jobs,
+        pending_job_count = trigger_payload_result.pending_job_count,
+        all_launch_jobs_complete = trigger_payload_result.all_launch_jobs_complete,
+        trigger_payload_projectile_id = trigger_payload_result.projectile_id,
+        projectile_ids = trigger_payload_result.projectile_ids,
+        launch_user_data = trigger_payload_result.launch_user_data,
+        tick = trigger_payload_result.tick,
         cancel_result = cancel_result,
     }
 end

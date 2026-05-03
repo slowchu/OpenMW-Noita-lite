@@ -64,6 +64,42 @@ local function cloneValue(value, depth)
     return out
 end
 
+local function valuesEqual(left, right, depth)
+    if left == right then
+        return true
+    end
+    if type(left) ~= type(right) then
+        return false
+    end
+    if type(left) ~= "table" then
+        return false
+    end
+    if (depth or 0) >= 6 then
+        return tostring(left) == tostring(right)
+    end
+    for k, v in pairs(left) do
+        if not valuesEqual(v, right[k], (depth or 0) + 1) then
+            return false
+        end
+    end
+    for k in pairs(right) do
+        if left[k] == nil then
+            return false
+        end
+    end
+    return true
+end
+
+local function patchTouchesRecipe(patch)
+    return type(patch) == "table" and (type(patch.recipe) == "table" or type(patch.effects) == "table")
+end
+
+local function recipesHaveSameEffects(left, right)
+    local left_effects = type(left) == "table" and left.effects or nil
+    local right_effects = type(right) == "table" and right.effects or nil
+    return valuesEqual(left_effects, right_effects, 0)
+end
+
 local function loadIndex()
     if cached_saved_recipes ~= nil then
         return cloneValue(cached_saved_recipes, 0)
@@ -208,6 +244,11 @@ function storage.update(saved_recipe_id, patch, opts)
     local updated = saved_recipe_model.update(existing, sanitized_patch, opts)
     if not updated.ok then
         return updated
+    end
+    if patchTouchesRecipe(sanitized_patch) and not recipesHaveSameEffects(existing.recipe, updated.saved_recipe.recipe) then
+        updated.saved_recipe.recipe_id = nil
+        updated.saved_recipe.last_validated_recipe_id = nil
+        updated.saved_recipe.last_previewed_recipe_id = nil
     end
 
     local index = loadIndex()

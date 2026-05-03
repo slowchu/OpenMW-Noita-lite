@@ -137,10 +137,15 @@ local function countChildrenByParent(slots)
     return counts
 end
 
-local function auditOps(slot, reasons, result)
+local function auditOps(slot, reasons, result, options)
+    local allowed_primary_prefix_ops = options.allowed_primary_prefix_ops or {}
+    local primary = isPrimary(slot)
     for _, op in ipairs(slot.prefix_ops or {}) do
         local opcode = op and op.opcode
-        if not ALLOWED_PREFIX_OPS[opcode] then
+        if primary and allowed_primary_prefix_ops[opcode] == true then
+            -- Caller-owned primary runtime, such as Bounce, can be audited while
+            -- keeping payload prefix policy strict.
+        elseif not ALLOWED_PREFIX_OPS[opcode] then
             addReason(reasons, "unsupported_prefix_" .. tostring(opcode))
         elseif opcode == "Chain" then
             result.has_chain = true
@@ -257,7 +262,7 @@ function nested_payload_audit.inspectPlan(plan, opts)
     local child_counts = countChildrenByParent(slots)
     local depth_cache = {}
     for _, slot in ipairs(slots) do
-        auditOps(slot, reasons, result)
+        auditOps(slot, reasons, result, options)
         auditEffects(slot, reasons)
 
         local primary = isPrimary(slot)

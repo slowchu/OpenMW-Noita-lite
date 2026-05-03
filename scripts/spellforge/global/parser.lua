@@ -1,5 +1,6 @@
 local limits = require("scripts.spellforge.shared.limits")
 local opcodes = require("scripts.spellforge.shared.opcodes")
+local operator_params = require("scripts.spellforge.shared.operator_params")
 local validation = require("scripts.spellforge.shared.validation_contract")
 
 local parser = {}
@@ -46,9 +47,11 @@ local function cloneEffect(effect)
     if type(effect) ~= "table" then
         return effect
     end
-    local out = {}
+    local out = operator_params.mirrorEffect(effect)
     for k, v in pairs(effect) do
-        out[k] = v
+        if out[k] == nil then
+            out[k] = v
+        end
     end
     return out
 end
@@ -111,28 +114,6 @@ local function validateParam(errors, index, opcode_name, key, spec, value)
     end
 end
 
-local function validateOpcodeParams(errors, index, opcode_name, effect)
-    local def = opcodes[opcode_name]
-    if not def then
-        appendError(errors, index, string.format("Unknown opcode: %s", tostring(opcode_name)), "unknown_opcode", {
-            opcode = opcode_name,
-        })
-        return
-    end
-    local params = type(effect.params) == "table" and effect.params or {}
-    for key, spec in pairs(def.parameters or {}) do
-        local value = params[key]
-        if value == nil then
-            appendError(errors, index, string.format("Missing parameter %s for %s", key, opcode_name), "missing_opcode_parameter", {
-                opcode = opcode_name,
-                parameter = key,
-            })
-        else
-            validateParam(errors, index, opcode_name, key, spec, value)
-        end
-    end
-end
-
 local function cloneParams(params)
     local out = {}
     if type(params) ~= "table" then
@@ -142,6 +123,33 @@ local function cloneParams(params)
         out[key] = value
     end
     return out
+end
+
+local function validateOpcodeParams(errors, index, opcode_name, effect)
+    local def = opcodes[opcode_name]
+    if not def then
+        appendError(errors, index, string.format("Unknown opcode: %s", tostring(opcode_name)), "unknown_opcode", {
+            opcode = opcode_name,
+        })
+        return nil
+    end
+    local params = operator_params.paramsForEffect(effect, opcode_name)
+    for key, spec in pairs(def.parameters or {}) do
+        local value = params[key]
+        if value == nil and spec.default ~= nil then
+            value = spec.default
+            params[key] = value
+        end
+        if value == nil then
+            appendError(errors, index, string.format("Missing parameter %s for %s", key, opcode_name), "missing_opcode_parameter", {
+                opcode = opcode_name,
+                parameter = key,
+            })
+        else
+            validateParam(errors, index, opcode_name, key, spec, value)
+        end
+    end
+    return params
 end
 
 local function computeEmissionCount(prefix_ops)
@@ -240,12 +248,12 @@ function parser.parseEffectList(effects, opts)
             local opcode_name = effect_id_norm and operator_id_to_opcode[effect_id_norm] or nil
 
             if opcode_name then
-                validateOpcodeParams(errors, index, opcode_name, effect)
+                local opcode_params = validateOpcodeParams(errors, index, opcode_name, effect)
                 if PREFIX_OPS[opcode_name] then
                     pending_prefix_ops[#pending_prefix_ops + 1] = {
                         opcode = opcode_name,
                         effect_id = effect.id,
-                        params = cloneParams(effect.params),
+                        params = opcode_params or cloneParams(effect.params),
                         index = index,
                     }
                 elseif POSTFIX_OPS[opcode_name] then
@@ -258,7 +266,7 @@ function parser.parseEffectList(effects, opts)
                         local op = {
                             opcode = opcode_name,
                             effect_id = effect.id,
-                            params = cloneParams(effect.params),
+                            params = opcode_params or cloneParams(effect.params),
                             index = index,
                             payload_scope = "remaining_effect_list_segment",
                         }

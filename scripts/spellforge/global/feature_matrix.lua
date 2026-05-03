@@ -146,7 +146,7 @@ local FEATURE_DEFS = {
         category = "targeting",
         status = "feature_gated_narrow",
         gates = { FLAG_LIVE_2_2C, FLAG_BOUNCE },
-        summary = "Source/Trigger Bounce v0 and the narrow Trigger->Chain payload bridge.",
+        summary = "Source/Trigger Bounce v0, Trigger payload fanout, and the narrow Trigger->Chain payload bridge.",
     },
     {
         id = "homing",
@@ -260,6 +260,15 @@ local function scanGroups(groups, summary, depth, payload_stack)
         local has_homing = hasOpcode(prefix, "Homing")
         local has_trigger = hasOpcode(postfix, "Trigger")
         local has_timer = hasOpcode(postfix, "Timer")
+        local payload_groups = nil
+        local has_payload_effects = group.payload and type(group.payload.effects) == "table" and #group.payload.effects > 0
+
+        if has_payload_effects then
+            local parsed = parser.parseEffectList(group.payload.effects)
+            if parsed.ok then
+                payload_groups = parsed.groups or {}
+            end
+        end
 
         for _, op in ipairs(prefix) do
             addFeature(summary, OPCODE_TO_FEATURE[op.opcode], depth)
@@ -338,7 +347,7 @@ local function scanGroups(groups, summary, depth, payload_stack)
         end
 
         local payload_opcode = firstPostfixOpcode(group)
-        if group.payload and type(group.payload.effects) == "table" and #group.payload.effects > 0 then
+        if has_payload_effects then
             summary.has_payload = true
             local child_stack = copySet(payload_stack)
             if payload_opcode then
@@ -351,9 +360,8 @@ local function scanGroups(groups, summary, depth, payload_stack)
                 addSet(child_stack, "Chain")
             end
 
-            local parsed = parser.parseEffectList(group.payload.effects)
-            if parsed.ok then
-                scanGroups(parsed.groups, summary, depth + 1, child_stack)
+            if payload_groups then
+                scanGroups(payload_groups, summary, depth + 1, child_stack)
             else
                 addSet(summary.deferred_reasons, "payload_parse_failed")
             end

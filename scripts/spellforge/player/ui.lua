@@ -1,9 +1,11 @@
 local async = require("openmw.async")
 local core = require("openmw.core")
 local self = require("openmw.self")
+local types = require("openmw.types")
 
 local events = require("scripts.spellforge.shared.events")
 local generated_lifecycle = require("scripts.spellforge.shared.generated_spell_lifecycle")
+local log = require("scripts.spellforge.shared.log").new("player.ui")
 local storage = require("scripts.spellforge.player.storage")
 
 local ui = {}
@@ -40,6 +42,67 @@ local function structuredError(code, path, message)
     }
 end
 
+local function previewDeferredReasons(preview_result)
+    local preview = preview_result and preview_result.preview or nil
+    local matrix = preview and (preview.feature_matrix or preview.support) or {}
+    if type(matrix.deferred_reasons) == "table" then
+        return matrix.deferred_reasons
+    end
+    return {}
+end
+
+local function previewIsDeferred(preview_result)
+    local preview = preview_result and preview_result.preview or nil
+    local matrix = preview and (preview.feature_matrix or preview.support) or {}
+    return matrix.live_runtime_status == "deferred" or #previewDeferredReasons(preview_result) > 0
+end
+
+local function deferredReasonSummary(preview_result)
+    local reasons = previewDeferredReasons(preview_result)
+    if #reasons > 0 then
+        return table.concat(reasons, ", ")
+    end
+    return "runtime combo deferred"
+end
+
+local function cachedPreviewForSaved(saved)
+    if type(saved) ~= "table" then
+        return nil
+    end
+    local preview_recipe_id = saved.last_previewed_recipe_id or saved.recipe_id
+    if type(preview_recipe_id) ~= "string" or preview_recipe_id == "" then
+        return nil
+    end
+    return state.preview_by_recipe_id[preview_recipe_id]
+end
+
+local persistLifecycle
+
+local function persistCompileResult(saved_recipe_id, payload)
+    if type(saved_recipe_id) ~= "string" or saved_recipe_id == "" then
+        return nil
+    end
+    local entry = state.lifecycle_by_saved_id[saved_recipe_id] or storage.getLifecycle(saved_recipe_id)
+    if not entry then
+        local saved = storage.get(saved_recipe_id)
+        entry = saved and generated_lifecycle.newEntry(saved) or nil
+    end
+    if not entry then
+        return nil
+    end
+
+    local next_entry = generated_lifecycle.applyCompileResult(entry, payload)
+    state.lifecycle_by_saved_id[saved_recipe_id] = persistLifecycle(saved_recipe_id, next_entry)
+    if payload and payload.ok == true and payload.recipe_id then
+        storage.update(saved_recipe_id, {
+            recipe_id = payload.recipe_id,
+            last_validated_recipe_id = payload.recipe_id,
+            last_previewed_recipe_id = payload.recipe_id,
+        })
+    end
+    return state.lifecycle_by_saved_id[saved_recipe_id]
+end
+
 local function finishPending(request_id, payload)
     local pending = request_id and state.pending[request_id]
     if not pending then
@@ -55,31 +118,79 @@ local function finishPending(request_id, payload)
     return true
 end
 
-local function trackPending(request_id, kind, callback)
+local function trackPending(request_id, kind, callback, meta)
+    local metadata = meta or {}
     state.pending[request_id] = {
         kind = kind,
         callback = callback,
+        saved_recipe_id = metadata.saved_recipe_id,
         timer = async:newUnsavableSimulationTimer(REQUEST_TIMEOUT_SECONDS, function()
             if not state.pending[request_id] then
                 return
             end
             local pending = state.pending[request_id]
             state.pending[request_id] = nil
+            local timeout_payload = {
+                request_id = request_id,
+                ok = false,
+                success = false,
+                errors = {
+                    structuredError("ui_request_timeout", "request_id", string.format("%s request timed out", tostring(kind))),
+                },
+            }
+            if pending.saved_recipe_id and kind == "compile" then
+                timeout_payload.error = "ui_request_timeout"
+                persistCompileResult(pending.saved_recipe_id, timeout_payload)
+            end
             if type(pending.callback) == "function" then
-                pending.callback({
-                    request_id = request_id,
-                    ok = false,
-                    success = false,
-                    errors = {
-                        structuredError("ui_request_timeout", "request_id", string.format("%s request timed out", tostring(kind))),
-                    },
-                })
+                pending.callback(timeout_payload)
             end
         end),
     }
 end
 
-local function persistLifecycle(saved_recipe_id, entry)
+local function removeSpellFromSpellbook(spell_id)
+    if type(spell_id) ~= "string" or spell_id == "" then
+        return false, "missing spell id"
+    end
+    local actor_spells = types.Actor.spells(self)
+    if not actor_spells or type(actor_spells.remove) ~= "function" then
+        return false, "ActorSpells.remove unavailable"
+    end
+    local ok, err = pcall(actor_spells.remove, actor_spells, spell_id)
+    if not ok then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
+local function requestCleanup(entry, reason)
+    local cleanup = entry and generated_lifecycle.cleanupPlan(entry) or nil
+    if not cleanup or not cleanup.needed then
+        return cleanup
+    end
+
+    local removed, remove_err = removeSpellFromSpellbook(cleanup.spell_id)
+    cleanup.remove_from_spellbook = true
+    cleanup.remove_from_spellbook_ok = removed == true
+    cleanup.remove_from_spellbook_error = remove_err
+    if not removed then
+        log.warn(string.format(
+            "SPELLFORGE_UI_SPELLBOOK_REMOVE_FAILED spell_id=%s reason=%s",
+            tostring(cleanup.spell_id),
+            tostring(remove_err)
+        ))
+    end
+
+    sendGlobal(events.DELETE_COMPILED, {
+        recipe_id = cleanup.recipe_id,
+        spell_id = cleanup.spell_id,
+        reason = reason or cleanup.reason,
+    })
+    return cleanup
+end
+
+function persistLifecycle(saved_recipe_id, entry)
     if type(saved_recipe_id) ~= "string" or saved_recipe_id == "" then
         return entry
     end
@@ -186,14 +297,7 @@ function ui.deleteRecipe(saved_recipe_id)
         state.lifecycle_by_saved_id[saved_recipe_id] = persistLifecycle(saved_recipe_id, delete_entry)
     end
 
-    local cleanup = delete_entry and generated_lifecycle.cleanupPlan(delete_entry) or nil
-    if cleanup and cleanup.needed then
-        sendGlobal(events.DELETE_COMPILED, {
-            recipe_id = cleanup.recipe_id,
-            spell_id = cleanup.spell_id,
-            reason = cleanup.reason,
-        })
-    end
+    local cleanup = requestCleanup(delete_entry, "delete_saved_recipe")
 
     local deleted = storage.delete(saved_recipe_id)
     if entry then
@@ -271,39 +375,76 @@ function ui.previewSavedRecipe(saved_recipe_id, callback, opts)
     end, opts)
 end
 
-function ui.requestCompileSavedRecipe(saved_recipe_id)
+function ui.requestCompileSavedRecipe(saved_recipe_id, callback, opts)
+    local options = opts or {}
     local saved = storage.get(saved_recipe_id)
     if not saved then
-        return {
+        local result = {
             ok = false,
             errors = {
                 structuredError("saved_recipe_not_found", "saved_recipe.id", string.format("No saved recipe found for id=%s", tostring(saved_recipe_id))),
             },
         }
+        if type(callback) == "function" then
+            callback(result)
+        end
+        return result
     end
 
     local entry = lifecycleForSaved(saved)
-    local request_id = nextRequestId("ui-compile")
+    local request_id = options.request_id or nextRequestId("ui-compile")
+    local cached_preview = cachedPreviewForSaved(saved)
+    if previewIsDeferred(cached_preview) then
+        local reason_summary = deferredReasonSummary(cached_preview)
+        local result = {
+            request_id = request_id,
+            ok = false,
+            success = false,
+            recipe_id = cached_preview.recipe_id,
+            saved_recipe_id = saved.id,
+            error = "ui_compile_deferred",
+            deferred_reasons = previewDeferredReasons(cached_preview),
+            errors = {
+                structuredError("deferred_runtime_combo", "preview.feature_matrix.deferred_reasons", "Create blocked: " .. reason_summary),
+            },
+        }
+        persistCompileResult(saved.id, result)
+        log.warn(string.format(
+            "SPELLFORGE_UI_COMPILE_DEFERRED saved_id=%s recipe_id=%s reason=%s",
+            tostring(saved.id),
+            tostring(cached_preview.recipe_id),
+            reason_summary
+        ))
+        if type(callback) == "function" then
+            callback(result)
+        end
+        return result
+    end
+
+    local cleanup = requestCleanup(entry, "recompile_saved_recipe")
     local pending_entry = generated_lifecycle.markCompileRequested(entry, request_id)
-    local failed_entry = generated_lifecycle.applyCompileResult(pending_entry, {
+    state.lifecycle_by_saved_id[saved.id] = persistLifecycle(saved.id, pending_entry)
+    trackPending(request_id, "compile", callback, { saved_recipe_id = saved.id })
+    sendGlobal(events.COMPILE_RECIPE, {
         request_id = request_id,
-        ok = false,
-        error = "ui_compile_deferred",
+        actor = self,
+        actor_id = self.recordId,
+        saved_recipe_id = saved.id,
+        title = saved.title,
+        recipe = saved.recipe,
     })
-    state.lifecycle_by_saved_id[saved.id] = persistLifecycle(saved.id, failed_entry)
     return {
-        ok = false,
+        ok = true,
         request_id = request_id,
         saved_recipe_id = saved.id,
         lifecycle = state.lifecycle_by_saved_id[saved.id],
-        errors = {
-            structuredError("ui_compile_deferred", "saved_recipe", "UI-generated spell compile is deferred until the visible spellcrafting flow is implemented"),
-        },
+        cleanup = cleanup,
+        queued = true,
     }
 end
 
-function ui.requestRecompileSavedRecipe(saved_recipe_id)
-    return ui.requestCompileSavedRecipe(saved_recipe_id)
+function ui.requestRecompileSavedRecipe(saved_recipe_id, callback, opts)
+    return ui.requestCompileSavedRecipe(saved_recipe_id, callback, opts)
 end
 
 function ui.getCachedCatalog()
@@ -347,12 +488,9 @@ function ui.handleCompileResult(payload)
     local request_id = payload and payload.request_id
     local pending = request_id and state.pending[request_id]
     if pending and pending.saved_recipe_id then
-        local entry = state.lifecycle_by_saved_id[pending.saved_recipe_id]
-        if entry then
-            local next_entry = generated_lifecycle.applyCompileResult(entry, payload)
-            state.lifecycle_by_saved_id[pending.saved_recipe_id] = persistLifecycle(pending.saved_recipe_id, next_entry)
-        end
+        persistCompileResult(pending.saved_recipe_id, payload)
     end
+    finishPending(request_id, payload)
 end
 
 function ui.clearForTests()

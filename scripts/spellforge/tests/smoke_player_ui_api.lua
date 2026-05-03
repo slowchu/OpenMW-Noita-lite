@@ -15,6 +15,7 @@ local state = {
 }
 
 local SMOKE_SAVED_ID = "saved:smoke-player-ui-api"
+local SMOKE_DEFERRED_ID = "saved:smoke-player-ui-api-deferred"
 local SMOKE_FAKE_SPELL_ID = "spellforge_smoke_player_ui_api_frontend"
 
 local function assertLine(ok, label, detail)
@@ -41,6 +42,21 @@ local function smokeRecipe()
     }
 end
 
+local function deferredRecipe()
+    return {
+        id = SMOKE_DEFERRED_ID,
+        title = "Smoke Player UI API Deferred",
+        recipe = {
+            effects = {
+                { id = "spellforge_bounce", params = { bounces = 5 } },
+                { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+                { id = "spellforge_timer", params = { seconds = 1.0 } },
+                { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+            },
+        },
+    }
+end
+
 local function findSaved(saved_recipe_id)
     for _, saved in ipairs(ui.getSavedRecipes() or {}) do
         if saved and saved.id == saved_recipe_id then
@@ -60,6 +76,15 @@ local function spellbookHas(spell_id)
     return false
 end
 
+local function containsValue(values, expected)
+    for _, value in ipairs(values or {}) do
+        if value == expected then
+            return true
+        end
+    end
+    return false
+end
+
 local function finish()
     if state.finished then
         return
@@ -69,26 +94,61 @@ local function finish()
     log.info("smoke player ui api run complete")
 end
 
-local function deleteStep()
+local function deferredCompileGuardStep()
+    ui.deleteRecipe(SMOKE_DEFERRED_ID)
+
+    local saved = ui.saveRecipe(deferredRecipe(), { now = 1001 })
+    assertLine(saved.ok == true and saved.saved_recipe and saved.saved_recipe.id == SMOKE_DEFERRED_ID, "7 deferred save recipe succeeds")
+
+    local preview_request = ui.previewSavedRecipe(SMOKE_DEFERRED_ID, function(result)
+        local preview = result and result.preview or {}
+        local matrix = preview.feature_matrix or {}
+        assertLine(result and result.ok == true, "7 deferred preview saved recipe succeeds")
+        assertLine(matrix.live_runtime_status == "deferred", "7 deferred preview marks runtime deferred")
+        assertLine(containsValue(matrix.deferred_reasons, "bounce_timer_deferred"), "7 deferred preview gives Bounce Timer reason")
+
+        local compile_callback_seen = false
+        local compile_request = ui.requestCompileSavedRecipe(SMOKE_DEFERRED_ID, function(compile_result)
+            compile_callback_seen = true
+            local lifecycle = ui.getLifecycle(SMOKE_DEFERRED_ID) or {}
+            assertLine(compile_result and compile_result.ok == false, "7 deferred compile blocks request")
+            assertLine(compile_result and compile_result.error == "ui_compile_deferred", "7 deferred compile returns readable error")
+            assertLine(lifecycle.status == generated_lifecycle.STATUS_ERROR, "7 deferred compile updates lifecycle error")
+        end, { request_id = "smoke-player-ui-api-deferred-compile" })
+        assertLine(compile_request and compile_request.ok == false, "7 deferred compile returned synchronously")
+        assertLine(compile_callback_seen == true, "7 deferred compile callback invoked synchronously")
+        ui.deleteRecipe(SMOKE_DEFERRED_ID)
+        finish()
+    end, { request_id = "smoke-player-ui-api-deferred-preview" })
+    assertLine(preview_request.ok == true and isNonEmptyString(preview_request.request_id), "7 deferred preview request queued")
+end
+
+local function deleteStep(compiled_spell_id)
     local deleted = ui.deleteRecipe(SMOKE_SAVED_ID)
     local lifecycle = ui.getLifecycle(SMOKE_SAVED_ID) or {}
     assertLine(deleted.ok == true and deleted.deleted == true, "6 delete saved recipe succeeds")
-    assertLine(deleted.cleanup and deleted.cleanup.needed == false, "6 delete avoids compiled cleanup before compile")
+    assertLine(deleted.cleanup and deleted.cleanup.needed == true, "6 delete requests compiled cleanup")
+    assertLine(deleted.cleanup and deleted.cleanup.remove_from_spellbook_ok == true, "6 delete removes compiled spell from spellbook")
     assertLine(findSaved(SMOKE_SAVED_ID) == nil, "6 delete removes saved recipe")
     assertLine(lifecycle.status == generated_lifecycle.STATUS_DELETED, "6 delete marks lifecycle deleted")
-    assertLine(spellbookHas(SMOKE_FAKE_SPELL_ID) == false, "6 delete leaves spellbook unpolluted")
-    finish()
+    async:newUnsavableSimulationTimer(0.1, function()
+        assertLine(compiled_spell_id == nil or spellbookHas(compiled_spell_id) == false, "6 delete leaves spellbook unpolluted")
+        deferredCompileGuardStep()
+    end)
 end
 
-local function compileDeferredStep()
-    local result = ui.requestCompileSavedRecipe(SMOKE_SAVED_ID)
-    local lifecycle = ui.getLifecycle(SMOKE_SAVED_ID) or {}
-    local first_error = result.errors and result.errors[1]
-    assertLine(result.ok == false, "5 compile saved recipe defers")
-    assertLine(first_error and first_error.code == "ui_compile_deferred", "5 compile defer returns structured code")
-    assertLine(lifecycle.status == generated_lifecycle.STATUS_ERROR and lifecycle.compile_generation == 1, "5 compile defer updates lifecycle")
-    assertLine(spellbookHas(SMOKE_FAKE_SPELL_ID) == false, "5 compile defer leaves spellbook unpolluted")
-    deleteStep()
+local function compileStep()
+    local request = ui.requestCompileSavedRecipe(SMOKE_SAVED_ID, function(result)
+        local lifecycle = ui.getLifecycle(SMOKE_SAVED_ID) or {}
+        assertLine(result and result.ok == true, "5 compile saved recipe succeeds")
+        assertLine(isNonEmptyString(result and result.recipe_id), "5 compile returns recipe_id")
+        assertLine(isNonEmptyString(result and result.spell_id), "5 compile returns spell_id")
+        assertLine(lifecycle.status == generated_lifecycle.STATUS_COMPILED and lifecycle.compile_generation == 1, "5 compile updates lifecycle")
+        assertLine(spellbookHas(result and result.spell_id) == true, "5 compile adds generated spell to spellbook")
+        assertLine(spellbookHas(SMOKE_FAKE_SPELL_ID) == false, "5 compile leaves unrelated spellbook entries alone")
+        deleteStep(result and result.spell_id)
+    end, { request_id = "smoke-player-ui-api-compile" })
+    assertLine(request.ok == true and isNonEmptyString(request.request_id), "5 compile request queued")
 end
 
 local function previewStep()
@@ -101,7 +161,7 @@ local function previewStep()
         assertLine(preview.materializes_records == false and preview.created_runtime_records == false, "4 preview remains dry-run")
         assertLine(lifecycle.status == generated_lifecycle.STATUS_PREVIEWED, "4 preview updates lifecycle")
         assertLine(isNonEmptyString(saved.last_previewed_recipe_id) and saved.last_previewed_recipe_id == recipe_id, "4 preview persists recipe_id")
-        compileDeferredStep()
+        compileStep()
     end, { request_id = "smoke-player-ui-api-preview" })
     assertLine(request.ok == true and isNonEmptyString(request.request_id), "4 preview request queued")
 end
@@ -161,6 +221,7 @@ local function run()
     state.running = true
 
     ui.deleteRecipe(SMOKE_SAVED_ID)
+    ui.deleteRecipe(SMOKE_DEFERRED_ID)
     catalogStep()
 end
 
@@ -169,6 +230,7 @@ return {
         [events.UI_CATALOG_RESULT] = ui.handleCatalogResult,
         [events.VALIDATE_RESULT] = ui.handleValidateResult,
         [events.PREVIEW_RESULT] = ui.handlePreviewResult,
+        [events.COMPILE_RESULT] = ui.handleCompileResult,
     },
     engineHandlers = {
         onUpdate = function()

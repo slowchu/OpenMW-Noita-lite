@@ -175,6 +175,20 @@ local function run()
             end,
         },
         {
+            label = "timer default seconds",
+            effects = {
+                { id = "firedamage", range = 2 },
+                { id = OP.timer },
+                { id = "frostdamage", range = 2 },
+            },
+            expect_ok = true,
+            check = function(result)
+                local g = result.groups and result.groups[1]
+                local op = g and g.postfix_ops and g.postfix_ops[1]
+                return result.ok and op and op.opcode == "Timer" and op.params and op.params.seconds == 1.0
+            end,
+        },
+        {
             label = "timer invalid duration",
             effects = {
                 { id = "firedamage", range = 2 },

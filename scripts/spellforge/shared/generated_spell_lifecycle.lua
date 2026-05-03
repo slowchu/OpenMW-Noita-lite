@@ -36,6 +36,13 @@ local function cloneArray(values)
     return out
 end
 
+local function firstArrayValue(values)
+    if type(values) ~= "table" then
+        return nil
+    end
+    return values[1]
+end
+
 local function nowToken(opts)
     local options = opts or {}
     if options.now ~= nil then
@@ -123,9 +130,17 @@ function lifecycle.applyCompileResult(entry, compile_result, opts)
         out.recipe_id = result.recipe_id or out.recipe_id
         out.frontend_spell_id = result.spell_id or out.frontend_spell_id
         out.frontend_logical_id = result.frontend_logical_id or out.frontend_logical_id
-        if result.spell_id ~= nil and #out.generated_engine_spell_ids == 0 then
+        if type(result.generated_spell_ids) == "table" then
+            out.generated_spell_ids = cloneArray(result.generated_spell_ids)
+        elseif result.frontend_logical_id ~= nil and #out.generated_spell_ids == 0 then
+            out.generated_spell_ids[1] = result.frontend_logical_id
+        end
+        if type(result.generated_engine_spell_ids) == "table" then
+            out.generated_engine_spell_ids = cloneArray(result.generated_engine_spell_ids)
+        elseif result.spell_id ~= nil and #out.generated_engine_spell_ids == 0 then
             out.generated_engine_spell_ids[1] = result.spell_id
         end
+        out.frontend_spell_id = out.frontend_spell_id or firstArrayValue(out.generated_engine_spell_ids)
         out.cleanup_required = false
         out.error = nil
     else
@@ -144,10 +159,15 @@ function lifecycle.markRecipeChanged(entry, saved_recipe, opts)
         out.cleanup_required = true
         out.stale_reason = "recipe_id_changed"
         out.next_recipe_id = next_recipe_id
-    elseif out.status == lifecycle.STATUS_COMPILED then
+    elseif out.status == lifecycle.STATUS_COMPILED and next_recipe_id == nil then
         out.status = lifecycle.STATUS_STALE
         out.cleanup_required = true
         out.stale_reason = "recipe_changed"
+        out.next_recipe_id = nil
+    elseif out.status == lifecycle.STATUS_COMPILED then
+        out.cleanup_required = false
+        out.stale_reason = nil
+        out.next_recipe_id = nil
     else
         out.status = lifecycle.STATUS_DRAFT
         out.cleanup_required = out.cleanup_required == true

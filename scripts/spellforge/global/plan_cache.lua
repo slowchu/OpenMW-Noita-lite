@@ -1,4 +1,5 @@
 local limits = require("scripts.spellforge.shared.limits")
+local operator_params = require("scripts.spellforge.shared.operator_params")
 local parser = require("scripts.spellforge.global.parser")
 local canonicalize_effect_list = require("scripts.spellforge.global.canonicalize_effect_list")
 local emission_slots = require("scripts.spellforge.global.emission_slots")
@@ -225,7 +226,8 @@ function plan_cache.clear()
 end
 
 function plan_cache.compileOrGet(effects, opts)
-    local canonical = canonicalize_effect_list.run(effects, opts)
+    local normalized_effects = operator_params.mirrorEffects(effects)
+    local canonical = canonicalize_effect_list.run(normalized_effects, opts)
     local cached = plan_cache.get(canonical.recipe_id)
     if cached then
         runtime_stats.inc("plans_reused")
@@ -238,7 +240,7 @@ function plan_cache.compileOrGet(effects, opts)
         }
     end
 
-    local parse_result = parser.parseEffectList(effects, opts)
+    local parse_result = parser.parseEffectList(normalized_effects, opts)
     if not parse_result.ok then
         return {
             ok = false,
@@ -250,7 +252,7 @@ function plan_cache.compileOrGet(effects, opts)
         }
     end
 
-    local plan = buildPlan(effects, parse_result, canonical)
+    local plan = buildPlan(normalized_effects, parse_result, canonical)
     plan_cache.put(plan)
     runtime_stats.inc("plans_compiled")
 

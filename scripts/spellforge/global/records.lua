@@ -53,6 +53,41 @@ local function sanitizeRealEffects(real_effects)
     return out
 end
 
+local function sanitizeParams(params)
+    local out = {}
+    if type(params) ~= "table" then
+        return nil
+    end
+    for k, v in pairs(params) do
+        if type(k) == "string" and (type(v) == "string" or type(v) == "number" or type(v) == "boolean") then
+            out[k] = v
+        end
+    end
+    return out
+end
+
+local function sanitizeEffectList(effect_list)
+    local out = {}
+    if type(effect_list) ~= "table" then
+        return out
+    end
+    for i, effect in ipairs(effect_list) do
+        if type(effect) == "table" then
+            out[i] = {
+                id = effect.id,
+                range = effect.range,
+                area = effect.area,
+                duration = effect.duration,
+                magnitudeMin = effect.magnitudeMin,
+                magnitudeMax = effect.magnitudeMax,
+                params = sanitizeParams(effect.params),
+                ui_id = type(effect.ui_id) == "string" and effect.ui_id or nil,
+            }
+        end
+    end
+    return out
+end
+
 local function sanitizeNodeMetadata(node_metadata)
     local out = {}
     if type(node_metadata) ~= "table" then
@@ -65,7 +100,9 @@ local function sanitizeNodeMetadata(node_metadata)
                 logical_id = type(node.logical_id) == "string" and node.logical_id or nil,
                 engine_id = type(node.engine_id) == "string" and node.engine_id or nil,
                 base_spell_id = type(node.base_spell_id) == "string" and node.base_spell_id or nil,
+                marker_range = node.marker_range,
                 real_effects = sanitizeRealEffects(node.real_effects),
+                effect_list = sanitizeEffectList(node.effect_list),
             }
         end
     end
@@ -85,8 +122,10 @@ local function sanitizeEntry(entry)
     local frontend_logical_id = type(entry.frontend_logical_id) == "string" and entry.frontend_logical_id or generated_spell_ids[1]
     return {
         canonical = type(entry.canonical) == "string" and entry.canonical or nil,
+        source_kind = type(entry.source_kind) == "string" and entry.source_kind or nil,
         frontend_spell_id = type(entry.frontend_spell_id) == "string" and entry.frontend_spell_id or nil,
         frontend_logical_id = frontend_logical_id,
+        frontend_name = type(entry.frontend_name) == "string" and entry.frontend_name or nil,
         generated_spell_ids = generated_spell_ids,
         generated_engine_spell_ids = generated_engine_spell_ids,
         node_metadata = sanitizeNodeMetadata(entry.node_metadata),

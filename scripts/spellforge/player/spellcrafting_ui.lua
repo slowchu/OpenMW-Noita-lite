@@ -6,6 +6,7 @@ local util = require("openmw.util")
 
 local dev = require("scripts.spellforge.shared.dev")
 local log = require("scripts.spellforge.shared.log").new("player.spellcrafting_ui")
+local operator_params = require("scripts.spellforge.shared.operator_params")
 local ui_api = require("scripts.spellforge.player.ui")
 
 local spellcrafting_ui = {}
@@ -82,7 +83,7 @@ local DEFAULT_OPERATOR_PARAMS = {
     Spread = { preset = 1 },
     Burst = { count = 5 },
     ["Speed+"] = { percent = 50 },
-    ["Size+"] = { percent = 50 },
+    ["Size+"] = { percent = 100 },
     Chain = { hops = 3 },
     Bounce = { bounces = 3 },
     Homing = {},
@@ -110,6 +111,7 @@ local state = {
     preview = nil,
     last_validation = nil,
     last_layout = nil,
+    recipe_generation = 0,
 }
 
 local function templates()
@@ -376,6 +378,20 @@ end
 local function textInput(value, onChange, opts)
     local options = opts or {}
     local current = tostring(value or "")
+    local function eventText(value)
+        if type(value) == "table" then
+            if value.text ~= nil then
+                return tostring(value.text)
+            end
+            if value.value ~= nil then
+                return tostring(value.value)
+            end
+            if type(value.props) == "table" and value.props.text ~= nil then
+                return tostring(value.props.text)
+            end
+        end
+        return tostring(value or "")
+    end
     return {
         template = template("textEditLine"),
         type = openmw_ui.TYPE.TextEdit,
@@ -387,7 +403,7 @@ local function textInput(value, onChange, opts)
         },
         events = {
             textChanged = async:callback(function(text)
-                current = tostring(text or "")
+                current = eventText(text)
                 onChange(current)
             end),
         },
@@ -397,6 +413,28 @@ end
 local function numberInput(value, onChange, opts)
     local options = opts or {}
     local current = tostring(value or 0)
+    local function eventText(value)
+        if type(value) == "table" then
+            if value.text ~= nil then
+                return tostring(value.text)
+            end
+            if value.value ~= nil then
+                return tostring(value.value)
+            end
+            if type(value.props) == "table" and value.props.text ~= nil then
+                return tostring(value.props.text)
+            end
+        end
+        return tostring(value or "")
+    end
+    local function commit()
+        local n = tonumber(current)
+        if n ~= nil then
+            onChange(n)
+            return true
+        end
+        return false
+    end
     return {
         template = template("textEditLine"),
         type = openmw_ui.TYPE.TextEdit,
@@ -407,13 +445,14 @@ local function numberInput(value, onChange, opts)
         },
         events = {
             textChanged = async:callback(function(text)
-                current = tostring(text or "")
-                local n = tonumber(current)
-                if n ~= nil then
-                    onChange(n)
-                end
+                current = eventText(text)
+                commit()
             end),
-            focusLoss = async:callback(function()
+            focusLoss = async:callback(function(text)
+                if text ~= nil then
+                    current = eventText(text)
+                end
+                commit()
                 render()
             end),
         },
@@ -488,15 +527,45 @@ local function colorForEffect(effect)
 end
 
 local function defaultOperatorParams(opcode)
+    local def = state.catalog and state.catalog.operators_by_opcode and state.catalog.operators_by_opcode[opcode]
+    local out = {}
+    if def and type(def.parameters) == "table" then
+        for name, spec in pairs(def.parameters) do
+            if type(spec) == "table" and spec.default ~= nil then
+                out[name] = spec.default
+            end
+        end
+    end
+    if next(out) ~= nil then
+        return out
+    end
     return cloneValue(DEFAULT_OPERATOR_PARAMS[opcode] or {}, 0)
 end
 
+local function operatorParamDefault(opcode, name, fallback)
+    local defaults = defaultOperatorParams(opcode)
+    if defaults[name] ~= nil then
+        return defaults[name]
+    end
+    return fallback
+end
+
+local function mergedOperatorParams(opcode, params)
+    local out = defaultOperatorParams(opcode)
+    if type(params) == "table" then
+        for key, value in pairs(params) do
+            out[key] = value
+        end
+    end
+    return out
+end
+
 local function normalizedParamsForEffect(effect, opcode)
+    if opcode then
+        return mergedOperatorParams(opcode, operator_params.paramsForEffect(effect, opcode))
+    end
     if type(effect and effect.params) == "table" then
         return cloneValue(effect.params, 0)
-    end
-    if opcode then
-        return defaultOperatorParams(opcode)
     end
     return nil
 end
@@ -515,7 +584,7 @@ local function sanitizeEffect(effect, index)
 
     local opcode = opcodeForEffect(out)
     out.params = normalizedParamsForEffect(out, opcode)
-    return out
+    return operator_params.mirrorEffect(out)
 end
 
 local function sanitizeEffects(effects)
@@ -544,11 +613,30 @@ local function paramsSummary(params)
     return table.concat(parts, GLYPHS.sub_sep)
 end
 
+local function operatorSummary(effects)
+    local parts = {}
+    for _, effect in ipairs(effects or {}) do
+        local opcode = opcodeForEffect(effect)
+        if opcode then
+            local summary = paramsSummary(operator_params.paramsForEffect(effect, opcode))
+            if summary ~= "" then
+                parts[#parts + 1] = string.format("%s(%s)", opcode, summary)
+            else
+                parts[#parts + 1] = tostring(opcode)
+            end
+        end
+    end
+    if #parts == 0 then
+        return "none"
+    end
+    return table.concat(parts, ",")
+end
+
 local function effectLabel(effect, index)
     local opcode = opcodeForEffect(effect)
     local prefix = string.format("%d.", index)
     if opcode then
-        local summary = paramsSummary(effect.params)
+        local summary = paramsSummary(operator_params.paramsForEffect(effect, opcode))
         local name = operatorDisplayName(opcode)
         if summary ~= "" then
             return string.format("%s %s (%s)", prefix, name, summary)
@@ -587,6 +675,42 @@ local function setStatus(text, kind)
     state.status_kind = kind or "info"
 end
 
+local function markRecipeChanged()
+    state.recipe_generation = (state.recipe_generation or 0) + 1
+    state.preview = nil
+    state.last_validation = nil
+end
+
+local function requestStillCurrent(generation)
+    return state.visible == true and generation == state.recipe_generation
+end
+
+local function firstErrorMessage(result, fallback)
+    local first = result and result.errors and result.errors[1]
+    return first and first.message or fallback or "Request failed."
+end
+
+local function previewDeferredReasons(preview)
+    local matrix = preview and (preview.feature_matrix or preview.support) or {}
+    if type(matrix.deferred_reasons) == "table" then
+        return matrix.deferred_reasons
+    end
+    return {}
+end
+
+local function previewIsDeferred(preview)
+    local matrix = preview and (preview.feature_matrix or preview.support) or {}
+    return matrix.live_runtime_status == "deferred" or #previewDeferredReasons(preview) > 0
+end
+
+local function previewDeferredSummary(preview)
+    local reasons = previewDeferredReasons(preview)
+    if #reasons > 0 then
+        return table.concat(reasons, ", ")
+    end
+    return "runtime combo deferred"
+end
+
 local function statusColor(kind)
     if kind == "success" then return COLOR.success end
     if kind == "error" then return COLOR.error end
@@ -604,7 +728,7 @@ end
 local function addEffect(effect)
     state.effects[#state.effects + 1] = cloneValue(effect, 0)
     state.selected_index = #state.effects
-    state.preview = nil
+    markRecipeChanged()
     setStatus(string.format("Added effect (%d total).", #state.effects), "info")
     render()
 end
@@ -618,10 +742,10 @@ local function addOperator(opcode)
     end
     state.effects[#state.effects + 1] = cloneValue({
         id = effect_id,
-        params = cloneValue(DEFAULT_OPERATOR_PARAMS[opcode] or {}, 0),
+        params = defaultOperatorParams(opcode),
     }, 0)
     state.selected_index = #state.effects
-    state.preview = nil
+    markRecipeChanged()
     setStatus(string.format("Added %s operator.", operatorDisplayName(opcode)), "info")
     render()
 end
@@ -634,7 +758,7 @@ local function moveSelected(delta)
     end
     state.effects[i], state.effects[j] = state.effects[j], state.effects[i]
     state.selected_index = j
-    state.preview = nil
+    markRecipeChanged()
     render()
 end
 
@@ -649,7 +773,7 @@ local function removeSelected()
     elseif i > #state.effects then
         state.selected_index = #state.effects
     end
-    state.preview = nil
+    markRecipeChanged()
     setStatus("Removed effect.", "info")
     render()
 end
@@ -659,8 +783,7 @@ local function newRecipe()
     state.effects = {}
     state.selected_index = nil
     state.selected_saved_id = nil
-    state.preview = nil
-    state.last_validation = nil
+    markRecipeChanged()
     setStatus("New recipe started.", "info")
     render()
 end
@@ -670,8 +793,7 @@ local function loadSaved(saved)
     state.effects = sanitizeEffects(saved.recipe and saved.recipe.effects or {})
     state.selected_index = #state.effects > 0 and 1 or nil
     state.selected_saved_id = saved.id
-    state.preview = nil
-    state.last_validation = nil
+    markRecipeChanged()
     setStatus("Loaded \"" .. tostring(saved.title or saved.id) .. "\".", "info")
     log.info(string.format(
         "SPELLFORGE_SPELLCRAFT_UI_LOAD_OK saved_id=%s effects=%s",
@@ -682,9 +804,10 @@ local function loadSaved(saved)
 end
 
 local function saveRecipe()
+    local recipe = currentRecipe()
     local payload = {
         title = state.title,
-        recipe = currentRecipe(),
+        recipe = recipe,
     }
     local result
     if state.selected_saved_id then
@@ -694,10 +817,19 @@ local function saveRecipe()
     end
     if result and result.ok then
         state.selected_saved_id = result.saved_recipe and result.saved_recipe.id or state.selected_saved_id
-        setStatus("Saved \"" .. tostring(result.saved_recipe and result.saved_recipe.title or state.title) .. "\".", "success")
+        setStatus("Saved draft \"" .. tostring(result.saved_recipe and result.saved_recipe.title or state.title) .. "\".", "success")
+        local saved_recipe = result.saved_recipe and result.saved_recipe.recipe or recipe
+        if saved_recipe and type(saved_recipe.effects) == "table" then
+            state.effects = sanitizeEffects(saved_recipe.effects)
+            if type(state.selected_index) == "number" and state.selected_index > #state.effects then
+                state.selected_index = #state.effects > 0 and #state.effects or nil
+            end
+        end
         log.info(string.format(
-            "SPELLFORGE_SPELLCRAFT_UI_SAVE_OK saved_id=%s",
-            tostring(state.selected_saved_id)
+            "SPELLFORGE_SPELLCRAFT_UI_SAVE_OK saved_id=%s effects=%s ops=%s",
+            tostring(state.selected_saved_id),
+            tostring(saved_recipe.effects and #saved_recipe.effects or 0),
+            operatorSummary(saved_recipe.effects)
         ))
     else
         local first = result and result.errors and result.errors[1]
@@ -724,8 +856,7 @@ local function deleteSaved()
         state.effects = {}
         state.selected_index = nil
         state.selected_saved_id = nil
-        state.preview = nil
-        state.last_validation = nil
+        markRecipeChanged()
         setStatus("Deleted saved recipe.", "success")
         log.info(string.format("SPELLFORGE_SPELLCRAFT_UI_DELETE_OK saved_id=%s", tostring(deleted_id)))
         render()
@@ -738,13 +869,29 @@ local function deleteSaved()
 end
 
 local function validateRecipe()
+    local generation = state.recipe_generation
+    local saved_id = state.selected_saved_id
+    if saved_id then
+        local saved = saveRecipe()
+        if not saved or not saved.ok then
+            return
+        end
+        generation = state.recipe_generation
+    end
     setStatus("Validating recipe...", "info")
     render()
-    ui_api.validateRecipe(currentRecipe(), function(result)
+    local function onValidated(result)
+        if not requestStillCurrent(generation) then
+            return
+        end
         state.last_validation = result
         if result and result.ok == true then
             setStatus("Valid recipe (id " .. tostring(result.recipe_id) .. ").", "success")
-            log.info(string.format("SPELLFORGE_SPELLCRAFT_UI_VALIDATE_OK recipe_id=%s", tostring(result.recipe_id)))
+            log.info(string.format(
+                "SPELLFORGE_SPELLCRAFT_UI_VALIDATE_OK recipe_id=%s ops=%s",
+                tostring(result.recipe_id),
+                operatorSummary(result.effects)
+            ))
         else
             local first = result and result.errors and result.errors[1]
             setStatus(first and first.message or "Validation failed.", "error")
@@ -754,22 +901,44 @@ local function validateRecipe()
             ))
         end
         render()
-    end)
+    end
+    if saved_id then
+        ui_api.validateSavedRecipe(saved_id, onValidated)
+    else
+        ui_api.validateRecipe(currentRecipe(), onValidated)
+    end
 end
 
 local function previewRecipe()
+    local generation = state.recipe_generation
+    local saved_id = state.selected_saved_id
+    if saved_id then
+        local saved = saveRecipe()
+        if not saved or not saved.ok then
+            return
+        end
+        generation = state.recipe_generation
+    end
     setStatus("Previewing recipe...", "info")
     render()
-    ui_api.previewRecipe(currentRecipe(), function(result)
+    local function onPreviewed(result)
+        if not requestStillCurrent(generation) then
+            return
+        end
         if result and result.ok == true then
             state.preview = result.preview
-            setStatus("Preview ready (id " .. tostring(result.recipe_id) .. ").", "success")
+            if previewIsDeferred(state.preview) then
+                setStatus("Preview deferred: " .. previewDeferredSummary(state.preview), "warning")
+            else
+                setStatus(string.format("Preview ready: %s slots.", tostring(state.preview and state.preview.slot_count or 0)), "success")
+            end
             log.info(string.format(
-                "SPELLFORGE_SPELLCRAFT_UI_PREVIEW_OK recipe_id=%s groups=%s slots=%s helpers=%s",
+                "SPELLFORGE_SPELLCRAFT_UI_PREVIEW_OK recipe_id=%s groups=%s slots=%s helpers=%s ops=%s",
                 tostring(result.recipe_id),
                 tostring(state.preview and state.preview.group_count),
                 tostring(state.preview and state.preview.slot_count),
-                tostring(state.preview and state.preview.helper_spec_count)
+                tostring(state.preview and state.preview.helper_spec_count),
+                operatorSummary(result.effects)
             ))
         else
             state.preview = nil
@@ -781,23 +950,85 @@ local function previewRecipe()
             ))
         end
         render()
-    end)
+    end
+    if saved_id then
+        ui_api.previewSavedRecipe(saved_id, onPreviewed)
+    else
+        ui_api.previewRecipe(currentRecipe(), onPreviewed)
+    end
 end
 
-local function compileDeferred()
+local function compileRecipe()
     local saved = saveRecipe()
     if not saved or not saved.ok or not state.selected_saved_id then
         return
     end
-    local result = state.selected_saved_id and ui_api.requestCompileSavedRecipe(state.selected_saved_id) or nil
-    local first = result and result.errors and result.errors[1]
-    setStatus(first and first.message or "Compile is deferred.", "info")
-    log.info(string.format(
-        "SPELLFORGE_SPELLCRAFT_UI_COMPILE_DEFERRED saved_id=%s reason=%s",
-        tostring(state.selected_saved_id),
-        tostring(first and first.message or "deferred")
-    ))
+    local saved_id = state.selected_saved_id
+    local generation = state.recipe_generation
+    setStatus("Creating spell...", "info")
     render()
+    ui_api.validateSavedRecipe(saved_id, function(validate_result)
+        if not requestStillCurrent(generation) then
+            return
+        end
+        if not validate_result or validate_result.ok ~= true then
+            setStatus(firstErrorMessage(validate_result, "Validation failed before compile."), "error")
+            render()
+            return
+        end
+        ui_api.previewSavedRecipe(saved_id, function(preview_result)
+            if not requestStillCurrent(generation) then
+                return
+            end
+            if not preview_result or preview_result.ok ~= true then
+                setStatus(firstErrorMessage(preview_result, "Preview failed before compile."), "error")
+                render()
+                return
+            end
+            state.preview = preview_result.preview
+            if previewIsDeferred(state.preview) then
+                local reason_summary = previewDeferredSummary(state.preview)
+                setStatus("Create blocked: " .. reason_summary .. ".", "warning")
+                log.warn(string.format(
+                    "SPELLFORGE_SPELLCRAFT_UI_COMPILE_DEFERRED saved_id=%s recipe_id=%s reason=%s",
+                    tostring(saved_id),
+                    tostring(preview_result.recipe_id),
+                    reason_summary
+                ))
+                render()
+                return
+            end
+            local queued = ui_api.requestCompileSavedRecipe(saved_id, function(compile_result)
+                if not requestStillCurrent(generation) then
+                    return
+                end
+                if compile_result and compile_result.ok == true then
+                    setStatus("Created spell \"" .. tostring(state.title) .. "\".", "success")
+                    log.info(string.format(
+                        "SPELLFORGE_SPELLCRAFT_UI_COMPILE_OK saved_id=%s recipe_id=%s spell_id=%s slots=%s helpers=%s ops=%s",
+                        tostring(saved_id),
+                        tostring(compile_result.recipe_id),
+                        tostring(compile_result.spell_id),
+                        tostring(preview_result.preview and preview_result.preview.slot_count),
+                        tostring(preview_result.preview and preview_result.preview.helper_spec_count),
+                        operatorSummary(preview_result and preview_result.effects)
+                    ))
+                else
+                    setStatus(firstErrorMessage(compile_result, "Create failed."), "error")
+                    log.warn(string.format(
+                        "SPELLFORGE_SPELLCRAFT_UI_COMPILE_FAILED saved_id=%s reason=%s",
+                        tostring(saved_id),
+                        firstErrorMessage(compile_result, "unknown")
+                    ))
+                end
+                render()
+            end)
+            if not queued or not queued.ok then
+                setStatus(firstErrorMessage(queued, "Create request failed."), "error")
+                render()
+            end
+        end)
+    end)
 end
 
 local function operatorPalette(m)
@@ -887,8 +1118,11 @@ local function rangeButtons(effect, m)
     local function tab(label, range_value, width)
         local active = current == range_value
         return button(label, function()
+            if effect.range == range_value then
+                return
+            end
             effect.range = range_value
-            state.preview = nil
+            markRecipeChanged()
             render()
         end, {
             width = width,
@@ -941,8 +1175,11 @@ local function selectedEditor(m)
         heading,
         spacer(0, 4),
         fieldLine("ID", textInput(effect.id, function(value)
+            if effect.id == value then
+                return
+            end
             effect.id = value
-            state.preview = nil
+            markRecipeChanged()
         end, { width = m.field_input_w }), m),
         spacer(0, 4),
     }
@@ -966,11 +1203,14 @@ local function selectedEditor(m)
         end
         for _, name in ipairs(names) do
             if params[name] == nil then
-                params[name] = (DEFAULT_OPERATOR_PARAMS[opcode] or {})[name] or 1
+                params[name] = operatorParamDefault(opcode, name, 1)
             end
             lines[#lines + 1] = fieldLine(name, numberInput(params[name], function(value)
+                if params[name] == value then
+                    return
+                end
                 params[name] = value
-                state.preview = nil
+                markRecipeChanged()
             end, { width = m.number_w }), m)
             lines[#lines + 1] = spacer(0, 3)
         end
@@ -980,23 +1220,35 @@ local function selectedEditor(m)
         lines[#lines + 1] = rangeButtons(effect, m)
         lines[#lines + 1] = spacer(0, 4)
         lines[#lines + 1] = fieldLine("Min", numberInput(effect.magnitudeMin or 0, function(value)
+            if effect.magnitudeMin == value then
+                return
+            end
             effect.magnitudeMin = value
-            state.preview = nil
+            markRecipeChanged()
         end, { width = m.number_w }), m)
         lines[#lines + 1] = spacer(0, 3)
         lines[#lines + 1] = fieldLine("Max", numberInput(effect.magnitudeMax or 0, function(value)
+            if effect.magnitudeMax == value then
+                return
+            end
             effect.magnitudeMax = value
-            state.preview = nil
+            markRecipeChanged()
         end, { width = m.number_w }), m)
         lines[#lines + 1] = spacer(0, 3)
         lines[#lines + 1] = fieldLine("Area", numberInput(effect.area or 0, function(value)
+            if effect.area == value then
+                return
+            end
             effect.area = value
-            state.preview = nil
+            markRecipeChanged()
         end, { width = m.number_w }), m)
         lines[#lines + 1] = spacer(0, 3)
         lines[#lines + 1] = fieldLine("Duration", numberInput(effect.duration or 0, function(value)
+            if effect.duration == value then
+                return
+            end
             effect.duration = value
-            state.preview = nil
+            markRecipeChanged()
         end, { width = m.number_w }), m)
     end
 
@@ -1088,7 +1340,11 @@ local function titleEditor(m)
         textLayout("Name", { color = COLOR.muted }),
         spacer(8, 0),
         textInput(state.title, function(value)
+            if state.title == value then
+                return
+            end
             state.title = value
+            markRecipeChanged()
         end, { width = m.title_w, color = COLOR.selected }),
     })
 end
@@ -1156,7 +1412,7 @@ local function actionButtons()
         spacer(6, 0),
         actionButton("Preview", previewRecipe, "primary", 76),
         spacer(6, 0),
-        actionButton("Compile", compileDeferred, nil, 76),
+        actionButton("Create", compileRecipe, nil, 70),
         spacer(6, 0),
         actionButton("Delete", deleteSaved, "danger", 64),
         spacer(6, 0),

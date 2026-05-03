@@ -20,6 +20,7 @@ local live_timer = require("scripts.spellforge.global.live_timer")
 local live_trigger = require("scripts.spellforge.global.live_trigger")
 local runtime_stats = require("scripts.spellforge.global.runtime_stats")
 local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
+local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
 
 local live_simple_dispatch = {}
 local next_live_cast_index = 1
@@ -82,6 +83,32 @@ local BOUNCE_TRIGGER_CHAIN_FROST_TARGET = {
     { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
     { id = "spellforge_trigger" },
     { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+local BOUNCE_TRIGGER_MULTICAST_FROST_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_multicast", params = { count = 3 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+local BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_burst", params = { count = 5 } },
+    { id = "spellforge_multicast", params = { count = 5 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+local BOUNCE_TRIGGER_SPREAD_MULTICAST_FROST_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_spread", params = { preset = 2 } },
+    { id = "spellforge_multicast", params = { count = 3 } },
     { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
 }
 
@@ -152,6 +179,29 @@ local function applyBounceProbeMode(mode, opts)
         opts.force_trigger_enabled = true
         opts.force_chain_runtime_enabled = true
         opts.dry_run = false
+    elseif mode == "bounce_trigger_multicast_dry_run" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+    elseif mode == "bounce_trigger_multicast_post_bounce" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.register_bounce_probe_binding = true
+    elseif mode == "bounce_trigger_burst_dry_run" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.force_payload_pattern_enabled = true
+    elseif mode == "bounce_trigger_spread_dry_run" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_SPREAD_MULTICAST_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.force_payload_pattern_enabled = true
     elseif mode == "bounce_over_cap" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_OVER_CAP_TARGET }
         opts.force_bounce_enabled = true
@@ -5067,12 +5117,19 @@ local function tryBounceDispatch(compiled, launch_payload, options)
     local bounce_plan, bounce_reason = live_bounce.selectV0Plan(attached.plan, {
         max_depth = options.max_nested_payload_depth,
         max_jobs = options.max_nested_payload_jobs,
+        max_fanout = options.max_payload_fanout,
         max_projectiles = options.max_projectiles,
         max_bounce_count = options.max_bounce_count,
         max_chain_hops = options.max_chain_hops,
         max_chain_jobs = options.max_chain_jobs,
         max_chain_scan_candidates = options.max_chain_scan_candidates,
         chain_scan_radius = options.chain_scan_radius,
+        max_jobs_per_tick = options.max_jobs_per_tick,
+        max_live_launches_per_tick = options.max_live_launches_per_tick,
+        chaos_budget_profile = options.chaos_budget_profile,
+        allow_pending_launch_jobs = options.allow_pending_launch_jobs,
+        allow_payload_multicast = payloadMulticastRuntimeEnabled(options),
+        allow_payload_pattern = payloadPatternRuntimeEnabled(options),
     })
     if not bounce_plan then
         return bounceRejected(bounce_reason or "bounce_v0_rejected", {
@@ -5120,6 +5177,14 @@ local function tryBounceDispatch(compiled, launch_payload, options)
             tostring(bounce_plan.chain_max_hops)
         )
     end
+    local payload_detonation_mode = nil
+    if bounce_plan.has_chain_payload == true then
+        payload_detonation_mode = "bounce_chain_runtime"
+    elseif bounce_plan.payload_multicast == true or bounce_plan.payload_pattern == true then
+        payload_detonation_mode = "bounce_trigger_payload_fanout"
+    elseif bounce_plan.has_trigger_payload == true then
+        payload_detonation_mode = "bounce_detonate_at_pos"
+    end
     runtime_stats.inc("live_2_2c_qualified")
     runtime_stats.inc("live_bounce_qualified")
     if bounce_plan.has_trigger_payload == true then
@@ -5158,6 +5223,12 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         payload_helper_engine_ids = bounce_plan.payload_helper_engine_ids,
         payload_count = bounce_plan.payload_count,
         payload_group_key = bounce_plan.payload_group_key,
+        payload_multicast = bounce_plan.payload_multicast == true,
+        payload_pattern = bounce_plan.payload_pattern == true,
+        payload_pattern_kind = bounce_plan.payload_pattern_kind,
+        payload_pattern_op = bounce_plan.payload_pattern_op,
+        max_payload_fanout = bounce_plan.max_payload_fanout,
+        max_projectiles = bounce_plan.max_projectiles,
         has_trigger_payload = bounce_plan.has_trigger_payload == true,
         has_chain_payload = bounce_plan.has_chain_payload == true,
         chain_id = chain_id,
@@ -5169,7 +5240,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         candidate_cap = options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
         scan_radius = options.chain_scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
         max_chain_ticks = options.max_chain_ticks,
-        max_jobs_per_tick = options.max_jobs_per_tick,
+        max_jobs_per_tick = bounce_plan.max_jobs_per_tick,
         force_chain_runtime_enabled = options.force_chain_runtime_enabled == true,
         bounce_max = bounce_plan.bounce_max,
         bounce_power = bounce_plan.bounce_power,
@@ -5178,8 +5249,11 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         direction = launch_payload.direction,
         mute_audio = launch_payload.mute_audio or launch_payload.muteAudio,
         mute_light = launch_payload.mute_light or launch_payload.muteLight,
-        max_live_launches_per_tick = options.max_live_launches_per_tick,
-        chaos_budget_profile = options.chaos_budget_profile,
+        max_live_launches_per_tick = bounce_plan.max_live_launches_per_tick,
+        chaos_budget_profile = bounce_plan.chaos_budget_profile,
+        allow_pending_launch_jobs = bounce_plan.allow_pending_launch_jobs == true,
+        force_payload_multicast_enabled = options.force_payload_multicast_enabled == true,
+        force_payload_pattern_enabled = options.force_payload_pattern_enabled == true,
     }
     live_bounce.decorateSourceJob(source_job, binding)
     local chain_binding = nil
@@ -5219,10 +5293,84 @@ local function tryBounceDispatch(compiled, launch_payload, options)
     end
 
     if options.dry_run == true then
+        local probe_source_job = nil
+        local probe_projectile_id = nil
+        if options.register_bounce_probe_binding == true then
+            binding.source_job_id = string.format("probe_job:%s", tostring(cast_id))
+            if not live_bounce.registerBinding(binding) then
+                return bounceRejected("bounce_probe_binding_failed", {
+                    recipe_id = result_recipe_id,
+                    plan_recipe_id = compiled.recipe_id,
+                    source_slot_id = bounce_plan.source_slot_id,
+                    payload_slot_id = bounce_plan.payload_slot_id,
+                    cast_id = cast_id,
+                })
+            end
+
+            local source_payload = source_job.payload or {}
+            local source_user_data = sfp_userdata.buildHelperUserData({
+                runtime = "2.2c_live_helper",
+                mapping = helper_records.getByEngineId(bounce_plan.source_helper_engine_id),
+                recipe_id = compiled.recipe_id,
+                slot_id = bounce_plan.source_slot_id,
+                helper_engine_id = bounce_plan.source_helper_engine_id,
+                job_kind = orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND,
+                job_id = binding.source_job_id,
+                cast_id = cast_id,
+                emission_index = source_job.emission_index,
+                group_index = source_job.group_index,
+                fanout_count = source_job.fanout_count,
+                source_slot_id = source_payload.source_slot_id,
+                source_prefix_opcode = source_payload.source_prefix_opcode,
+                source_postfix_opcode = source_payload.source_postfix_opcode,
+                source_helper_engine_id = source_payload.source_helper_engine_id,
+                trigger_source_slot_id = source_payload.trigger_source_slot_id,
+                trigger_payload_slot_id = source_payload.trigger_payload_slot_id,
+                has_trigger_payload = source_payload.has_trigger_payload,
+                bounce_runtime = source_payload.bounce_runtime,
+                bounce_role = source_payload.bounce_role,
+                bounce_id = source_payload.bounce_id,
+                bounce_max = source_payload.bounce_max,
+                bounce_power = source_payload.bounce_power,
+                bounce_detonate_on_actor_hit = source_payload.bounce_detonate_on_actor_hit,
+                bounce_trigger_payload_slot_id = source_payload.bounce_trigger_payload_slot_id,
+                branch_scope = source_payload.branch_scope,
+                branch_id = source_payload.branch_id,
+                branch_parent_id = source_payload.branch_parent_id,
+                branch_kind = source_payload.branch_kind,
+                branch_index = source_payload.branch_index,
+                branch_count = source_payload.branch_count,
+            })
+            probe_projectile_id = string.format("probe_projectile:%s:%s", tostring(cast_id), tostring(bounce_plan.source_slot_id))
+            probe_source_job = {
+                job_id = binding.source_job_id,
+                job_status = "complete",
+                slot_id = bounce_plan.source_slot_id,
+                helper_engine_id = bounce_plan.source_helper_engine_id,
+                cast_id = cast_id,
+                fanout_count = 1,
+                bounce_runtime = true,
+                bounce_role = "source",
+                bounce_id = bounce_id,
+                bounce_max = bounce_plan.bounce_max,
+                bounce_power = bounce_plan.bounce_power,
+                bounceEnabled = true,
+                bounceMax = bounce_plan.bounce_max,
+                bouncePower = bounce_plan.bounce_power,
+                detonateOnActorHit = false,
+                launch_accepted = false,
+                projectile_id = probe_projectile_id,
+                projectile_registered = false,
+                launch_direction = launch_payload.direction,
+                launch_user_data = source_user_data,
+            }
+        end
+
         return {
             ok = true,
             used_live_2_2c = true,
             dry_run = true,
+            bounce_probe_binding_registered = options.register_bounce_probe_binding == true,
             recipe_id = result_recipe_id,
             plan_recipe_id = compiled.recipe_id,
             slot_id = bounce_plan.source_slot_id,
@@ -5236,11 +5384,14 @@ local function tryBounceDispatch(compiled, launch_payload, options)
             bounce_trigger_payload_slot_id = bounce_plan.payload_slot_id,
             trigger_payload_slot_id = bounce_plan.payload_slot_id,
             trigger_payload_helper_engine_id = bounce_plan.payload_helper_engine_id,
+            trigger_payload_slot_ids = bounce_plan.payload_slot_ids,
+            trigger_payload_helper_engine_ids = bounce_plan.payload_helper_engine_ids,
             trigger_payload_count = bounce_plan.payload_count,
+            payload_multicast = bounce_plan.payload_multicast == true,
+            payload_pattern = bounce_plan.payload_pattern == true,
+            payload_pattern_kind = bounce_plan.payload_pattern_kind,
             payload_projectile_launches = 0,
-            payload_detonation_mode = bounce_plan.has_chain_payload == true
-                and "bounce_chain_runtime"
-                or (bounce_plan.has_trigger_payload == true and "bounce_detonate_at_pos" or nil),
+            payload_detonation_mode = payload_detonation_mode,
             payload_chain_runtime = bounce_plan.has_chain_payload == true,
             chain_id = chain_id,
             chain_shape = bounce_plan.chain_shape,
@@ -5248,6 +5399,9 @@ local function tryBounceDispatch(compiled, launch_payload, options)
             chain_max_hops = bounce_plan.chain_max_hops,
             targeting_mode = bounce_plan.has_chain_payload == true and "no_immediate_repeat" or nil,
             expected_bounce_event_count = bounce_plan.bounce_max,
+            projectile_id = probe_projectile_id,
+            projectile_ids = probe_projectile_id and { probe_projectile_id } or {},
+            jobs = probe_source_job and { probe_source_job } or nil,
             slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
             helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
             dispatch_count = 1,
@@ -5354,11 +5508,14 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         post_launch_detonate_on_actor_error = summary.post_launch_detonate_on_actor_error,
         trigger_payload_slot_id = bounce_plan.payload_slot_id,
         trigger_payload_helper_engine_id = bounce_plan.payload_helper_engine_id,
+        trigger_payload_slot_ids = bounce_plan.payload_slot_ids,
+        trigger_payload_helper_engine_ids = bounce_plan.payload_helper_engine_ids,
         trigger_payload_count = bounce_plan.payload_count,
+        payload_multicast = bounce_plan.payload_multicast == true,
+        payload_pattern = bounce_plan.payload_pattern == true,
+        payload_pattern_kind = bounce_plan.payload_pattern_kind,
         payload_projectile_launches = 0,
-        payload_detonation_mode = bounce_plan.has_chain_payload == true
-            and "bounce_chain_runtime"
-            or (bounce_plan.has_trigger_payload == true and "bounce_detonate_at_pos" or nil),
+        payload_detonation_mode = payload_detonation_mode,
         payload_chain_runtime = bounce_plan.has_chain_payload == true,
         chain_id = chain_id,
         chain_shape = bounce_plan.chain_shape,
@@ -6880,6 +7037,45 @@ function live_simple_dispatch.onProbe(payload)
             runtime_stats.inc("live_trigger_post_hit_smoke_observed")
         end
     end
+    if mode == "bounce_trigger_multicast_post_bounce"
+        and result.ok == true
+        and result.pending_source_launch_job ~= true then
+        local source_job = result.jobs and result.jobs[1] or nil
+        local user_data = source_job and source_job.launch_user_data or nil
+        local bounce_payload = {
+            spellId = result.helper_engine_id,
+            projectileId = result.projectile_id or ((payload and payload.request_id or "bounce-post-bounce") .. ":source-projectile"),
+            userData = user_data,
+            attacker = payload and (payload.actor or payload.sender),
+            hitPos = payload and payload.start_pos,
+            hitNormal = payload and payload.direction,
+            bounceCount = 1,
+        }
+        local bounce_opts = {
+            force_enabled = true,
+            force_trigger_enabled = true,
+            force_payload_multicast_enabled = true,
+            simulate_update_ticks = true,
+        }
+        local first = live_bounce.handleBouncePayload(bounce_payload, bounce_opts)
+        local duplicate = live_bounce.handleBouncePayload(bounce_payload, bounce_opts)
+        local first_payload = first and first.trigger_result or first
+        result.post_bounce_result = first
+        result.duplicate_bounce_result = duplicate
+        result.bounce_trigger_payload_job_id = first_payload and first_payload.job_id or nil
+        result.bounce_trigger_payload_job_ids = first_payload and first_payload.job_ids or nil
+        result.bounce_trigger_payload_jobs = first_payload and first_payload.jobs or nil
+        result.bounce_trigger_payload_slot_id = first_payload and first_payload.payload_slot_id or nil
+        result.bounce_trigger_payload_slot_ids = first_payload and first_payload.payload_slot_ids or nil
+        result.bounce_trigger_payload_count = first_payload and first_payload.payload_count or nil
+        result.bounce_trigger_payload_launch_count = first_payload and first_payload.launch_count or nil
+        result.bounce_trigger_payload_projectile_ids = first_payload and first_payload.projectile_ids or nil
+        result.bounce_trigger_payload_launch_user_data = first_payload and first_payload.launch_user_data or nil
+        result.bounce_duplicate_suppressed = duplicate and duplicate.duplicate_suppressed == true
+        if first and first.ok == true and duplicate and duplicate.duplicate_suppressed == true then
+            runtime_stats.inc("live_bounce_trigger_payload_smoke_observed")
+        end
+    end
     if mode == "timer_launch" and result.ok == true and type(result.timer_id) == "string" then
         result.timer_status_after_launch = live_timer.timerStatus(result.timer_id)
         result.timer_payload_launched_before_delay = false
@@ -7171,6 +7367,51 @@ function live_simple_dispatch.onProbe(payload)
             and result.chain_shape == "trigger_payload_chain"
             and tonumber(result.chain_max_hops) == 3
             and result.targeting_mode == "no_immediate_repeat"
+    elseif mode == "bounce_trigger_multicast_dry_run" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.payload_multicast == true
+            and result.payload_pattern == false
+            and tonumber(result.trigger_payload_count) == 3
+            and type(result.trigger_payload_slot_ids) == "table"
+            and #result.trigger_payload_slot_ids == 3
+            and result.payload_projectile_launches == 0
+            and result.payload_detonation_mode == "bounce_trigger_payload_fanout"
+    elseif mode == "bounce_trigger_multicast_post_bounce" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.bounce_probe_binding_registered == true
+            and result.payload_multicast == true
+            and result.payload_pattern == false
+            and result.post_bounce_result
+            and result.post_bounce_result.ok == true
+            and result.bounce_duplicate_suppressed == true
+            and tonumber(result.bounce_trigger_payload_count) == 3
+            and tonumber(result.bounce_trigger_payload_launch_count) == 3
+            and type(result.bounce_trigger_payload_slot_ids) == "table"
+            and #result.bounce_trigger_payload_slot_ids == 3
+    elseif mode == "bounce_trigger_burst_dry_run" or mode == "bounce_trigger_spread_dry_run" then
+        local expected_count = mode == "bounce_trigger_burst_dry_run" and 5 or 3
+        local expected_kind = mode == "bounce_trigger_burst_dry_run" and "Burst" or "Spread"
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.payload_multicast == true
+            and result.payload_pattern == true
+            and result.payload_pattern_kind == expected_kind
+            and tonumber(result.trigger_payload_count) == expected_count
+            and type(result.trigger_payload_slot_ids) == "table"
+            and #result.trigger_payload_slot_ids == expected_count
+            and result.payload_projectile_launches == 0
+            and result.payload_detonation_mode == "bounce_trigger_payload_fanout"
     elseif mode == "bounce_chain_payload_launch" then
         ok = result.ok == true
             and result.used_live_2_2c == true

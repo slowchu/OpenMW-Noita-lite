@@ -166,6 +166,7 @@ local function onQuerySpellMetadata(payload)
         is_spellforge = recipe_id ~= nil,
         recipe_id = recipe_id,
         root_base_spell_id = root and root.base_spell_id or nil,
+        root_range = root and root.marker_range or nil,
         root_real_effects = root and root.real_effects or nil,
         frontend_spell_id = entry and entry.frontend_spell_id or nil,
     })

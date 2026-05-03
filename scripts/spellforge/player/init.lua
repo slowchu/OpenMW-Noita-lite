@@ -204,6 +204,7 @@ local function refreshSpellMetadata(spell_id, reason)
             is_spellforge = meta.is_spellforge == true,
             recipe_id = meta.recipe_id,
             root_base_spell_id = meta.root_base_spell_id,
+            root_range = meta.root_range,
             frontend_spell_id = meta.frontend_spell_id,
             updated_at = os.time(),
             reason = reason,
@@ -218,9 +219,9 @@ local function refreshSpellMetadata(spell_id, reason)
     end)
 end
 
-local function classifyVariant(root_base_spell_id)
+local function classifyVariant(root_base_spell_id, root_range)
     local base = root_base_spell_id and core.magic.spells.records[root_base_spell_id] or nil
-    local range = base and base.effects and base.effects[1] and base.effects[1].range or nil
+    local range = (base and base.effects and base.effects[1] and base.effects[1].range) or root_range
 
     -- OpenMW spell effect range in records is numeric in many runtimes:
     --   0=self, 1=touch, 2=target.
@@ -824,7 +825,7 @@ local function onInputAction(action)
         return true
     end
 
-    local variant = classifyVariant(meta.root_base_spell_id)
+    local variant = classifyVariant(meta.root_base_spell_id, meta.root_range)
     state.pending_intercept_spell_id = selected_spell_id
     state.pending_intercept_variant = variant
     state.pending_cast_authorized = false

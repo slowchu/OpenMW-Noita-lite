@@ -1856,7 +1856,12 @@ local function runBounceSmoke()
     local function runLiveBounceLaunch()
         requestProbe("bounce_launch", function(result)
             local bounce_detail = result and string.format(
-                "bounce_ok=%s actor_toggle_ok=%s bounce_enabled=%s detonate_on_actor=%s payload_projectile_launches=%s bounce_error=%s actor_error=%s",
+                "ok=%s error=%s fallback=%s job_status=%s queue_status=%s bounce_ok=%s actor_toggle_ok=%s bounce_enabled=%s detonate_on_actor=%s payload_projectile_launches=%s bounce_error=%s actor_error=%s",
+                tostring(result.ok),
+                tostring(result.error),
+                tostring(result.fallback_reason),
+                tostring(result.job_status),
+                tostring(result.tick_result and result.tick_result.remaining_count),
                 tostring(result.post_launch_bounce_ok),
                 tostring(result.post_launch_detonate_on_actor_ok),
                 tostring(result.jobs and result.jobs[1] and result.jobs[1].bounceEnabled),
@@ -1918,7 +1923,45 @@ local function runBounceSmoke()
                 assertLine(chain_dry and tonumber(chain_dry.chain_max_hops) == 3, "Bounce Trigger Chain payload reports three Chain hops")
                 assertLine(chain_dry and chain_dry.payload_projectile_launches == 0, "Bounce Trigger Chain payload launches no payload before a bounce hit")
 
-                runUnsupportedBounceChecks()
+                requestProbe("bounce_trigger_multicast_dry_run", function(multicast_dry)
+                    assertLine(multicast_dry and multicast_dry.ok == true, "Bounce Trigger payload Multicast dry-run qualifies", multicast_dry and multicast_dry.error)
+                    assertLine(multicast_dry and multicast_dry.payload_multicast == true, "Bounce Trigger payload Multicast reports payload fanout")
+                    assertLine(multicast_dry and multicast_dry.payload_pattern == false, "Bounce Trigger payload Multicast is not a pattern")
+                    assertLine(multicast_dry and tonumber(multicast_dry.trigger_payload_count) == 3, "Bounce Trigger payload Multicast plans three payloads")
+                    assertLine(multicast_dry and type(multicast_dry.trigger_payload_slot_ids) == "table" and #multicast_dry.trigger_payload_slot_ids == 3, "Bounce Trigger payload Multicast exposes payload slot ids")
+                    assertLine(multicast_dry and multicast_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Multicast waits for bounce-event fanout")
+
+                    requestProbe("bounce_trigger_burst_dry_run", function(burst_dry)
+                        assertLine(burst_dry and burst_dry.ok == true, "Bounce Trigger payload Burst dry-run qualifies", burst_dry and burst_dry.error)
+                        assertLine(burst_dry and burst_dry.payload_multicast == true and burst_dry.payload_pattern == true, "Bounce Trigger payload Burst reports pattern fanout")
+                        assertLine(burst_dry and burst_dry.payload_pattern_kind == "Burst", "Bounce Trigger payload Burst keeps pattern kind", burst_dry and tostring(burst_dry.payload_pattern_kind))
+                        assertLine(burst_dry and tonumber(burst_dry.trigger_payload_count) == 5, "Bounce Trigger payload Burst plans five payloads")
+                        assertLine(burst_dry and burst_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Burst waits for bounce-event fanout")
+
+                        requestProbe("bounce_trigger_spread_dry_run", function(spread_dry)
+                            assertLine(spread_dry and spread_dry.ok == true, "Bounce Trigger payload Spread dry-run qualifies", spread_dry and spread_dry.error)
+                            assertLine(spread_dry and spread_dry.payload_multicast == true and spread_dry.payload_pattern == true, "Bounce Trigger payload Spread reports pattern fanout")
+                            assertLine(spread_dry and spread_dry.payload_pattern_kind == "Spread", "Bounce Trigger payload Spread keeps pattern kind", spread_dry and tostring(spread_dry.payload_pattern_kind))
+                            assertLine(spread_dry and tonumber(spread_dry.trigger_payload_count) == 3, "Bounce Trigger payload Spread plans three payloads")
+                            assertLine(spread_dry and spread_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Spread waits for bounce-event fanout")
+                            requestProbe("bounce_trigger_multicast_post_bounce", function(post_bounce)
+                                local post_bounce_detail = post_bounce and string.format(
+                                    "count=%s launch_count=%s error=%s",
+                                    tostring(post_bounce.bounce_trigger_payload_count),
+                                    tostring(post_bounce.bounce_trigger_payload_launch_count),
+                                    tostring(post_bounce.error or post_bounce.fallback_reason)
+                                ) or nil
+                                assertLine(post_bounce and post_bounce.ok == true, "Bounce Trigger payload Multicast post-bounce launches payloads", post_bounce and (post_bounce.fallback_reason or post_bounce.error))
+                                assertLine(post_bounce and post_bounce.bounce_probe_binding_registered == true, "Bounce Trigger payload Multicast post-bounce uses synthetic binding")
+                                assertLine(post_bounce and post_bounce.post_bounce_result and post_bounce.post_bounce_result.ok == true, "Bounce Trigger payload Multicast post-bounce route succeeds")
+                                assertLine(post_bounce and post_bounce.bounce_duplicate_suppressed == true, "Bounce Trigger payload Multicast duplicate bounce suppresses")
+                                assertLine(post_bounce and tonumber(post_bounce.bounce_trigger_payload_count) == 3, "Bounce Trigger payload Multicast post-bounce routes three payloads", post_bounce_detail)
+                                assertLine(post_bounce and tonumber(post_bounce.bounce_trigger_payload_launch_count) == 3, "Bounce Trigger payload Multicast post-bounce launches three payload jobs", post_bounce_detail)
+                                runUnsupportedBounceChecks()
+                            end, launchAimPayload())
+                        end)
+                    end)
+                end)
             end)
         end)
     end)
@@ -3452,7 +3495,7 @@ return {
                 requestBackend()
             elseif state.backend == "READY" and not state.ready_logged then
                 state.ready_logged = true
-                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ and Chain+Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0, or H for Bounce Trigger Chain")
+                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ and Chain+Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0 plus Trigger payload fanout dry-runs, or H for Bounce Trigger Chain")
             end
         end,
         onKeyPress = onKeyPress,

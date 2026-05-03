@@ -1,4 +1,5 @@
 local validation = require("scripts.spellforge.shared.validation_contract")
+local operator_params = require("scripts.spellforge.shared.operator_params")
 
 local recipe_model = {}
 
@@ -70,6 +71,8 @@ local function cloneEffect(effect, index)
             cloned[field] = cloneValue(effect[field], 0)
         end
     end
+    operator_params.copyEncodedFields(effect, cloned)
+    cloned = operator_params.mirrorEffect(cloned)
     if cloned.ui_id == nil or cloned.ui_id == "" then
         cloned.ui_id = string.format("effect:%d", index)
     end

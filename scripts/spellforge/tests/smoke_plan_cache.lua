@@ -1,5 +1,6 @@
 local plan_cache = require("scripts.spellforge.global.plan_cache")
 local generated_lifecycle = require("scripts.spellforge.shared.generated_spell_lifecycle")
+local operator_params = require("scripts.spellforge.shared.operator_params")
 local recipe_model = require("scripts.spellforge.shared.recipe_model")
 local saved_recipe_model = require("scripts.spellforge.shared.saved_recipe_model")
 local ui_catalog = require("scripts.spellforge.global.ui_catalog")
@@ -30,6 +31,15 @@ local function containsValue(values, expected)
         end
     end
     return false
+end
+
+local function findOp(ops, opcode)
+    for _, op in ipairs(ops or {}) do
+        if op.opcode == opcode then
+            return op
+        end
+    end
+    return nil
 end
 
 local function run()
@@ -169,6 +179,29 @@ local function run()
     assertLine(bounce_timer_matrix.live_runtime_status == "deferred", "14 ui feature matrix marks Bounce+Timer deferred")
     assertLine(containsValue(bounce_timer_matrix.deferred_reasons, "bounce_timer_deferred"), "14 ui feature matrix gives Bounce+Timer reason")
 
+    local bounce_trigger_multicast = {
+        { id = "spellforge_bounce", params = { bounces = 5 } },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_trigger" },
+        { id = "spellforge_multicast", params = { count = 8 } },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local bounce_trigger_multicast_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-bounce-trigger-multicast-supported",
+        recipe = {
+            title = "Smoke Bounce Trigger Multicast Preview",
+            effects = bounce_trigger_multicast,
+        },
+    })
+    local bounce_trigger_multicast_result = bounce_trigger_multicast_preview.preview or {}
+    local bounce_trigger_multicast_matrix = bounce_trigger_multicast_result.feature_matrix or {}
+    assertLine(bounce_trigger_multicast_preview.ok == true, "14b ui feature matrix preview accepts Bounce Trigger payload Multicast")
+    assertLine(bounce_trigger_multicast_result.slot_count == 9, "14b ui preview plans Bounce Trigger payload Multicast slots")
+    assertLine(bounce_trigger_multicast_matrix.live_runtime_status == "feature_gated", "14b ui feature matrix marks Bounce Trigger payload Multicast feature-gated")
+    assertLine(containsValue(bounce_trigger_multicast_matrix.active_feature_ids, "payload_multicast"), "14b ui feature matrix detects Bounce Trigger payload Multicast")
+    assertLine(containsValue(bounce_trigger_multicast_matrix.required_flags, "SpellforgeDev.enable_live_payload_multicast_v0"), "14b ui feature matrix lists payload Multicast gate")
+    assertLine(not containsValue(bounce_trigger_multicast_matrix.deferred_reasons, "bounce_trigger_payload_deferred"), "14b ui feature matrix does not defer Bounce Trigger payload Multicast")
+
     local catalog = ui_catalog.build({ request_id = "smoke-ui-catalog" })
     assertLine(catalog.ok == true, "15 ui catalog succeeds")
     assertLine(catalog.catalog_version == "spellforge-ui-catalog-v1", "15 ui catalog version set")
@@ -179,6 +212,8 @@ local function run()
     assertLine(catalog.feature_matrix and catalog.feature_matrix.version == "spellforge-feature-matrix-v1", "15 ui catalog includes feature matrix catalog")
     assertLine(catalog.events and catalog.events.preview_recipe == "Spellforge_PreviewRecipe", "15 ui catalog includes preview event name")
     assertLine(catalog.defaults and catalog.defaults.preview_launches_projectiles == false, "15 ui catalog marks preview dry-run")
+    assertLine(containsValue(catalog.recipe_model and catalog.recipe_model.effect_fields, operator_params.encodedFieldName("count")), "15 ui catalog exposes scalar count param field")
+    assertLine(containsValue(catalog.recipe_model and catalog.recipe_model.effect_fields, operator_params.encodedFieldName("seconds")), "15 ui catalog exposes scalar seconds param field")
 
     local saved_result = saved_recipe_model.create({
         id = "saved-smoke-1",
@@ -204,6 +239,83 @@ local function run()
     assertLine(unsupported_saved.ok == false, "16 saved recipe unsupported version fails")
     assertLine(unsupported_issue and unsupported_issue.code == "unsupported_saved_recipe_schema_version", "16 saved recipe unsupported version has code")
 
+    local timer_burst_payload = {
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        { id = "spellforge_multicast", params = { count = 8 } },
+        { id = "spellforge_burst", params = { count = 8 } },
+        { id = "firedamage", range = 2, magnitudeMin = 10, magnitudeMax = 10, area = 0, duration = 1 },
+    }
+    local timer_burst_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-timer-burst-payload",
+        recipe = {
+            title = "Smoke Timer Burst Payload",
+            effects = timer_burst_payload,
+        },
+    })
+    local timer_burst = timer_burst_preview.preview or {}
+    local timer_burst_matrix = timer_burst.feature_matrix or {}
+    assertLine(timer_burst_preview.ok == true, "17 ui preview Timer payload Burst succeeds")
+    assertLine(timer_burst.bounds and timer_burst.bounds.has_timer == true, "17 ui preview Timer payload Burst keeps Timer bounds")
+    assertLine(timer_burst.slot_count == 9 and timer_burst.helper_spec_count == 9, "17 ui preview Timer payload Burst plans eight payload slots")
+    assertLine(containsValue(timer_burst_matrix.active_feature_ids, "timer"), "17 ui feature matrix detects Timer payload Burst timer")
+    assertLine(containsValue(timer_burst_matrix.active_feature_ids, "payload_pattern"), "17 ui feature matrix detects Timer payload Burst pattern")
+
+    local event_safe_timer_burst_payload = {
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_timer", spellforge_param_seconds = 1.0 },
+        { id = "spellforge_multicast", spellforge_param_count = 8 },
+        { id = "spellforge_burst", spellforge_param_count = 8 },
+        { id = "firedamage", range = 2, magnitudeMin = 10, magnitudeMax = 10, area = 0, duration = 1 },
+    }
+    local event_safe_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-timer-burst-event-safe-payload",
+        recipe = {
+            title = "Smoke Timer Burst Event Safe Payload",
+            effects = event_safe_timer_burst_payload,
+        },
+    })
+    local event_safe = event_safe_preview.preview or {}
+    assertLine(event_safe_preview.ok == true, "18 ui preview event-safe Timer payload Burst succeeds")
+    assertLine(event_safe.slot_count == 9 and event_safe.helper_spec_count == 9, "18 ui preview event-safe Timer payload Burst keeps scalar params")
+    assertLine(event_safe_preview.effects and event_safe_preview.effects[3] and event_safe_preview.effects[3].params and event_safe_preview.effects[3].params.count == 8, "18 ui preview event-safe Multicast restores params")
+    assertLine(event_safe_preview.effects and event_safe_preview.effects[4] and event_safe_preview.effects[4].params and event_safe_preview.effects[4].params.count == 8, "18 ui preview event-safe Burst restores params")
+
+    local event_safe_all_params = {
+        { id = "spellforge_speed_plus", spellforge_param_percent = "75" },
+        { id = "spellforge_size_plus", spellforge_param_percent = "125" },
+        { id = "spellforge_chain", spellforge_param_hops = "2" },
+        { id = "spellforge_bounce", spellforge_param_bounces = "2" },
+        { id = "spellforge_multicast", spellforge_param_count = "4" },
+        { id = "spellforge_spread", spellforge_param_preset = "2" },
+        { id = "firedamage", range = 2, magnitudeMin = 10, magnitudeMax = 10, area = 0, duration = 1 },
+        { id = "spellforge_timer", spellforge_param_seconds = "1.5" },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local event_safe_all = ui_contract.validateRecipe({
+        request_id = "smoke-ui-event-safe-all-operator-params",
+        recipe = {
+            title = "Smoke Event Safe Operator Params",
+            effects = event_safe_all_params,
+        },
+    })
+    local event_safe_all_group = event_safe_all.groups and event_safe_all.groups[1] or {}
+    local event_safe_speed = findOp(event_safe_all_group.prefix_ops, "Speed+")
+    local event_safe_size = findOp(event_safe_all_group.prefix_ops, "Size+")
+    local event_safe_chain = findOp(event_safe_all_group.prefix_ops, "Chain")
+    local event_safe_bounce = findOp(event_safe_all_group.prefix_ops, "Bounce")
+    local event_safe_multicast = findOp(event_safe_all_group.prefix_ops, "Multicast")
+    local event_safe_spread = findOp(event_safe_all_group.prefix_ops, "Spread")
+    local event_safe_timer = findOp(event_safe_all_group.postfix_ops, "Timer")
+    assertLine(event_safe_all.ok == true, "19 ui validate event-safe all operator params succeeds")
+    assertLine(event_safe_speed and event_safe_speed.params and event_safe_speed.params.percent == 75, "19 event-safe Speed+ percent restored")
+    assertLine(event_safe_size and event_safe_size.params and event_safe_size.params.percent == 125, "19 event-safe Size+ percent restored")
+    assertLine(event_safe_chain and event_safe_chain.params and event_safe_chain.params.hops == 2, "19 event-safe Chain hops restored")
+    assertLine(event_safe_bounce and event_safe_bounce.params and event_safe_bounce.params.bounces == 2, "19 event-safe Bounce bounces restored")
+    assertLine(event_safe_multicast and event_safe_multicast.params and event_safe_multicast.params.count == 4, "19 event-safe Multicast count restored")
+    assertLine(event_safe_spread and event_safe_spread.params and event_safe_spread.params.preset == 2, "19 event-safe Spread preset restored")
+    assertLine(event_safe_timer and event_safe_timer.params and event_safe_timer.params.seconds == 1.5, "19 event-safe Timer seconds restored")
+
     local lifecycle_entry = generated_lifecycle.newEntry(saved_recipe, { now = 1000 })
     local lifecycle_validated = generated_lifecycle.applyValidation(lifecycle_entry, validate_result, { now = 1001 })
     local lifecycle_previewed = generated_lifecycle.applyPreview(lifecycle_validated, preview_result, { now = 1002 })
@@ -223,15 +335,15 @@ local function run()
         lifecycle_version = "spellforge-generated-spell-lifecycle-v0",
     })
     local unsupported_lifecycle_issue = unsupported_lifecycle.errors and unsupported_lifecycle.errors[1]
-    assertLine(lifecycle_entry.status == generated_lifecycle.STATUS_DRAFT, "17 lifecycle starts draft")
-    assertLine(lifecycle_validated.status == generated_lifecycle.STATUS_VALIDATED, "17 lifecycle stores validation")
-    assertLine(lifecycle_previewed.status == generated_lifecycle.STATUS_PREVIEWED, "17 lifecycle stores preview")
-    assertLine(lifecycle_pending.status == generated_lifecycle.STATUS_COMPILE_PENDING and lifecycle_pending.compile_generation == 1, "17 lifecycle marks compile pending")
-    assertLine(lifecycle_compiled.status == generated_lifecycle.STATUS_COMPILED and lifecycle_compiled.frontend_spell_id == "spellforge_smoke_frontend", "17 lifecycle stores compile result")
-    assertLine(lifecycle_stale.status == generated_lifecycle.STATUS_STALE and lifecycle_stale.cleanup_required == true, "17 lifecycle marks recipe changes stale")
-    assertLine(cleanup.needed == true and cleanup.spell_id == "spellforge_smoke_frontend" and cleanup.delete_compiled_record == true, "17 lifecycle cleanup plan targets compiled spell")
-    assertLine(lifecycle_deleted.status == generated_lifecycle.STATUS_DELETED and lifecycle_deleted.cleanup_required == false, "17 lifecycle marks deleted")
-    assertLine(unsupported_lifecycle.ok == false and unsupported_lifecycle_issue and unsupported_lifecycle_issue.code == "unsupported_lifecycle_version", "17 lifecycle unsupported version fails")
+    assertLine(lifecycle_entry.status == generated_lifecycle.STATUS_DRAFT, "20 lifecycle starts draft")
+    assertLine(lifecycle_validated.status == generated_lifecycle.STATUS_VALIDATED, "20 lifecycle stores validation")
+    assertLine(lifecycle_previewed.status == generated_lifecycle.STATUS_PREVIEWED, "20 lifecycle stores preview")
+    assertLine(lifecycle_pending.status == generated_lifecycle.STATUS_COMPILE_PENDING and lifecycle_pending.compile_generation == 1, "20 lifecycle marks compile pending")
+    assertLine(lifecycle_compiled.status == generated_lifecycle.STATUS_COMPILED and lifecycle_compiled.frontend_spell_id == "spellforge_smoke_frontend", "20 lifecycle stores compile result")
+    assertLine(lifecycle_stale.status == generated_lifecycle.STATUS_STALE and lifecycle_stale.cleanup_required == true, "20 lifecycle marks recipe changes stale")
+    assertLine(cleanup.needed == true and cleanup.spell_id == "spellforge_smoke_frontend" and cleanup.delete_compiled_record == true, "20 lifecycle cleanup plan targets compiled spell")
+    assertLine(lifecycle_deleted.status == generated_lifecycle.STATUS_DELETED and lifecycle_deleted.cleanup_required == false, "20 lifecycle marks deleted")
+    assertLine(unsupported_lifecycle.ok == false and unsupported_lifecycle_issue and unsupported_lifecycle_issue.code == "unsupported_lifecycle_version", "20 lifecycle unsupported version fails")
 
     log.info("smoke plan cache run complete")
 end

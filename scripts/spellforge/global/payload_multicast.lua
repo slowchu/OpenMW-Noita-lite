@@ -139,6 +139,8 @@ local function auditAllowsPayloadMulticast(plan, fanout_count, options)
         max_depth = options.max_depth or limits.MAX_NESTED_PAYLOAD_DEPTH,
         max_jobs = max_jobs,
         max_fanout = max_fanout,
+        max_projectiles = max_projectiles,
+        allowed_primary_prefix_ops = options.allowed_primary_prefix_ops,
     })
     if not audit.ok then
         return false, audit.rejection_reason or "nested_payload_audit_rejected", audit
