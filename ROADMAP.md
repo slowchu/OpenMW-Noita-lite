@@ -25,8 +25,10 @@
 4. `Speed+`
 5. `Size+`
 6. `Chain`
-7. `Trigger`
-8. `Timer`
+7. `Bounce`
+8. `Homing`
+9. `Trigger`
+10. `Timer`
 
 ## Phase 2 Milestones
 

@@ -32,7 +32,9 @@ SFP backend to be ready.
 Preview also includes `feature_matrix`, a machine-readable support summary for
 the future UI. It lists active features, required dev/live gates, bounded limits,
 and deferred reasons for valid-but-not-live-supported combinations such as
-Bounce+Timer.
+Bounce+Timer or source-level Bounce+Multicast, while marking narrow supported
+Bounce Trigger payload fanout and Bounce Trigger Chain shapes as feature-gated
+instead of broadly unsupported.
 
 The UI catalog result is static metadata for building the interface: recipe
 schema version, supported operator opcodes/effect IDs, operator parameters,
@@ -44,10 +46,14 @@ and caches the latest results for the visible shell. The first dev/smoke-gated
 spellcrafting shell lives in `player/spellcrafting_ui.lua` and opens with `Y`
 when dev hotkeys or smoke tests are enabled. The shell fits itself to the
 detected `Windows` UI layer, opens from a safe top-left position, and logs its
-`screen=`, `layer=`, `window=`, and `position=` dimensions on open. UI
-compile/recompile calls are present but deliberately deferred until the
-generated-spell lifecycle is ready for real frontend spell creation. Saved
-recipe loads sanitize malformed operator parameter maps before rendering.
+`screen=`, `layer=`, `window=`, and `position=` dimensions on open. The visible
+Create action now saves, validates, previews, materializes helper records, and
+creates a player-visible generated frontend spell while keeping live runtime
+behavior behind the existing dev/smoke gates. If preview reports a deferred
+runtime combination, Create is blocked before helper records or frontend spells
+are materialized; the player UI wrapper applies the same guard for cached
+deferred previews. Saved recipe loads sanitize malformed operator parameter
+maps before rendering.
 
 Saved UI recipes use `spellforge-saved-recipe-v1`: stable saved ids, title/name
 metadata, normalized effect-list recipes with `ui_id` fields, recipe ids from
@@ -57,10 +63,11 @@ draft, validate, preview, compile-pending, compiled, stale, delete-pending, and
 deleted states without exposing helper records to the player spellbook.
 
 The plan-cache smoke add-on also includes a player-side UI API smoke. It
-exercises catalog, cache, save, validate, preview, deferred compile, delete, and
-spellbook-pollution checks through the same wrapper the visible shell uses.
-Player storage keeps a small read-through cache so UI calls can read saved
-recipes and lifecycle state immediately after writes.
+exercises catalog, cache, save, validate, preview, compile, delete, and
+spellbook-pollution checks through the same wrapper the visible shell uses,
+including the cached deferred-preview compile guard. Player storage keeps a
+small read-through cache so UI calls can read saved recipes and lifecycle state
+immediately after writes.
 
 ## Dev and smoke gates
 
@@ -133,8 +140,11 @@ mutation smoke, `Numpad -` for live Size+ v0 helper-spec mutation smoke,
 redirect/retarget runtime/probe, or `Numpad .` for
 the chaos budget high-fanout stress suite, including Chain+Multicast high-fanout
 checks. Press `G` for the Bounce v0
-hardening smoke, `H` for the live Bounce Trigger->Chain probe, or `Y` for the
-dev/smoke-gated spellcrafting shell.
+    hardening smoke plus Bounce Trigger payload Multicast/Spread/Burst dry-runs,
+    post-bounce simple/fanout probes, and gate rejection checks,
+    `H` for the Bounce Trigger->Chain no-target/mock/live probe, `J` for manual
+    Bounce surface/contact diagnostics, or `Y` for the dev/smoke-gated
+    spellcrafting shell.
 The Trigger, Timer, Chain+Multicast, nested final fanout, and Bounce smokes now
 also assert compact branch metadata on launch jobs and SFP `userData` so nested
 or fanout regressions are easier to separate in logs. The dev smoke probe also
@@ -268,32 +278,49 @@ Trigger/Timer, Multicast/Spread/Burst, Speed+, Size+, nested payload runtime,
 and recursion remains deferred.
 
 Bounce v0 is separately gated by `SpellforgeDev.enable_live_bounce_v0`.
-The supported gameplay smoke shape is `Bounce 3 Fire Damage -> Trigger ->
-Frost Damage 20pt/10ft`: the source projectile bounces off surfaces or actors, manually
-detonates the source spell at each bounce position, detonates its simple payload
-at the same bounce position instead of launching a second projectile, and cancels the source projectile on the final configured
-bounce. A Bounce source may also carry a Trigger payload branch that starts
-Chain, such as `Bounce 3 Fire Damage -> Trigger -> Chain 3 -> Frost Damage`;
-the source still belongs to Bounce. SFP 1.7 bounce events expose the bounce
-point rather than a hit actor, so Spellforge does one bounded Chain-provider
-lookup at that bounce point, infers the nearest valid actor as the source hit
-when available, using actor aim height for that source-inference check, and
-then routes into the existing Chain runtime with `no_immediate_repeat`
-targeting. Normal Chain hops keep the stricter actor-to-actor vertical guard.
+The supported v0 shapes are:
+
+- `Bounce N -> simple target emitter`
+- `Bounce N -> target emitter -> Trigger -> simple payload`
+- `Bounce N -> target emitter -> Trigger -> payload Multicast`, requiring
+  `SpellforgeDev.enable_live_payload_multicast_v0`
+- `Bounce N -> target emitter -> Trigger -> payload Spread/Burst + Multicast`,
+  requiring payload Multicast plus
+  `SpellforgeDev.enable_live_payload_pattern_v0`
+- `Bounce N -> target emitter -> Trigger -> Chain N -> simple payload`,
+  requiring `SpellforgeDev.enable_live_chain_runtime_v0`
+
+Smoke76/manual checks proved SFP bounce callbacks and Spellforge routing for
+actor/contact hits, interior wall/statics, exterior wall/statics, and
+terrain/ground. The source projectile belongs to Bounce, manually detonates the
+source spell at each bounce position, routes any supported Trigger payload from
+the bounce event, and cancels the source projectile on the final configured
+bounce. SFP 1.7 bounce events expose the bounce point but do not always include
+a hit actor, so Spellforge does one bounded Chain-provider lookup at that bounce
+point, infers the nearest valid actor as the Chain source when available, and
+routes into the existing Chain runtime with `no_immediate_repeat` targeting. If
+no Chain candidate exists, the runtime stops safely without failure.
+
 The v0 detonation path is event-driven through SFP 1.7
 `MagExp_OnProjectileBounce`; Spellforge also applies SFP 1.7
 `setSpellBounce`/`setSpellDetonateOnActor` immediately after source launch so
 the live source projectile carries the bounce fields. It does not add per-frame
-scans, Lua projectile updates, or post-launch steering. Bounce with Multicast,
-Spread/Burst, Timer, direct source Chain, Speed+, Size+, nested payload runtime, and recursion
-remains deferred.
+scans, Lua projectile updates, post-launch steering, or per-projectile Lua
+brains. Bounce with Timer, Homing, source Speed+/Size+, direct source Chain,
+arbitrary nested payload runtime, recursion, and unsupported fanout remains
+deferred.
 
 The `G` smoke now also runs Bounce hardening probes before the live launch:
-Trigger payload dry-run qualification, Trigger->Chain payload dry-run
-qualification, disabled/cap rejection, unsupported fanout, Timer, direct
-source Chain, Speed+, and Size+ deferrals, and a live-launch assertion that only the source projectile is
-launched while the simple Trigger payload is detonated in place.
+source-only qualification, Trigger simple post-bounce detonation, Trigger->Chain
+payload dry-run qualification, Trigger payload Multicast/Spread/Burst dry-run
+qualification, one synthetic Bounce Trigger payload Multicast post-bounce
+launch, disabled-gate/cap rejection, unsupported source fanout, Timer, direct
+source Chain, Speed+, Size+, Homing, and nested payload deferrals, and a
+live-launch assertion that only the source projectile is launched while the
+simple Trigger payload is detonated in place.
 Press `H` for the live `Bounce 3 Fire Damage -> Trigger -> Chain 3 -> Frost
-Damage` probe; aim at an actor near another actor, or at a nearby surface with
-valid actors close to the bounce point, to watch Bounce infer a Chain source
-target and route into Chain.
+Damage` probe; it first checks synthetic no-target and mock-candidate handoff
+paths, then you can aim at an actor near another actor, or at a nearby surface
+with valid actors close to the bounce point, to watch Bounce infer a Chain source
+target and route into Chain. Empty real-provider scenes should log a safe
+no-candidate stop rather than a smoke failure.

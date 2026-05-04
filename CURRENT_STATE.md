@@ -44,8 +44,9 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
   - saved recipe migration rejects unsupported saved schema versions with structured errors
   - generated spell lifecycle entries track draft, validated, previewed, compile-pending, compiled, stale, delete-pending, deleted, and error states
   - player `spellcrafting_ui.lua` opens a dev/smoke-gated vanilla-inspired `Spellmaking` shell on `Y`
-  - the shell uses the player UI API for catalog, save/update/delete, validate, preview, and deferred compile actions
-  - does not materialize helper records, launch projectiles, change gameplay semantics, or require live 2.2c to be enabled
+  - the shell uses the player UI API for catalog, save/update/delete, validate, preview, and real saved-recipe compile actions
+  - compile saves, validates, previews, materializes helper records, creates one player-visible generated frontend spell, and leaves live runtime behavior behind the existing gates
+  - if preview reports a deferred runtime combination, the visible Create action and cached player UI compile wrapper now block before materializing helper records or frontend spells
 
 - **Primary Multicast fanout**
   - feature-gated by `SpellforgeDev.enable_live_multicast`
@@ -183,6 +184,19 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
   - does not add per-frame actor scans, per-projectile Lua update loops, high-fanout Homing, or gameplay-wide unbounded target reacquisition
   - Homing with Bounce, Chain, Trigger/Timer, Multicast/Spread/Burst, Speed+, Size+, nested payload runtime, and recursion remains deferred
 
+- **Bounce v0**
+  - feature-gated by `SpellforgeDev.enable_live_bounce_v0`
+  - supports:
+    - `Bounce N -> simple target emitter`
+    - `Bounce N -> target emitter -> Trigger -> simple payload`
+    - `Bounce N -> target emitter -> Trigger -> payload Multicast` when payload Multicast v0 is enabled
+    - `Bounce N -> target emitter -> Trigger -> payload Spread/Burst + Multicast` when payload Multicast and payload Pattern v0 are enabled
+    - `Bounce N -> target emitter -> Trigger -> Chain N -> simple payload` when Chain runtime v0 is enabled
+  - Smoke76/manual checks observed bounce callbacks and clean routing for actor/contact hits, interior wall/statics, exterior wall/statics, and terrain/ground
+  - Bounce event payloads do not always include a hit actor; the Chain bridge infers one source target near the bounce point through a bounded provider lookup when possible
+  - real Bounce Trigger->Chain handoff stops safely when no valid Chain candidates exist, including `candidate_count=0`
+  - source-level Bounce with Timer, direct Chain, Speed+/Size+, Homing, arbitrary nested payload runtime, recursion, unsupported fanout, post-launch steering, and per-projectile Lua brains remains deferred
+
 - **Chaos budget v0**
   - dev/test-gated by `SpellforgeDev.enable_chaos_budget_v0`
   - default profile keeps the conservative bring-up caps
@@ -227,7 +241,7 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
 - nested behavior inside final fanout
 - Chain runtime beyond the narrow direct/Trigger simple payload, Speed+/Size+ payload-modifier, and bounded Multicast payload-fanout shapes
 - broader Homing combinations and Gravity runtime
-- Bounce runtime beyond the narrow source/Trigger v0 shape
+- Bounce runtime beyond source-only, simple Trigger payloads, Trigger payload fanout, and the Trigger->Chain simple-payload bridge
 - Speed+ acceleration behavior
 - Speed+ damage scaling
 - post-launch projectile mutation
@@ -1406,19 +1420,19 @@ What exists now:
 
 - `Bounce N` is parsed as a launch modifier and bounded by `MAX_BOUNCE_COUNT`
 - live Bounce v0 is gated by `SpellforgeDev.enable_live_bounce_v0`
-- the supported v0 runtime shape is `Bounce 3 Fire Damage -> Trigger -> Frost Damage 20pt/10ft`
+- the supported v0 runtime shapes are `Bounce N -> simple target emitter`, `Bounce N -> target emitter -> Trigger -> simple payload`, `Bounce N -> target emitter -> Trigger -> payload Multicast`, `Bounce N -> target emitter -> Trigger -> payload Spread/Burst + Multicast`, and `Bounce N -> target emitter -> Trigger -> Chain N -> simple payload`, each behind its existing live/runtime gates
 - the source helper launches with SFP `bounceEnabled`, `bounceMax`, `bouncePower`, and `detonateOnActorHit=false`, then reinforces those fields through SFP 1.7 `setSpellBounce` and `setSpellDetonateOnActor` after launch so the live source projectile carries bounce behavior
-- each SFP `MagExp_OnProjectileBounce` event manually detonates the source spell at the bounce position and then detonates the simple Trigger payload at the same bounce position without launching a second projectile
+- each SFP `MagExp_OnProjectileBounce` event manually detonates the source spell at the bounce position, then routes a supported Trigger payload from that bounce event
 - a Bounce source may carry a Trigger payload branch that starts Chain, such as `Bounce 3 Fire Damage -> Trigger -> Chain 3 -> Frost Damage`; source-level Bounce still owns the bouncing projectile, and because SFP 1.7 bounce events expose a bounce point rather than a hit actor, Spellforge performs one bounded Chain-provider lookup at the bounce point, infers the nearest valid actor as the source hit when available, and then routes into the existing Chain runtime
 - the final configured bounce also cancels the source projectile, so `Bounce 3` ends on the third bounce instead of waiting for a fourth collision
-- Bounce userData preserves `source_prefix_opcode`, `bounce_id`, `bounce_index`, `bounce_max`, manual detonation state, Trigger payload identity, and source/postfix metadata
+- Bounce userData preserves `source_prefix_opcode`, `bounce_id`, `bounce_index`, `bounce_max`, manual detonation state, Trigger payload identity, source/postfix metadata, and compact branch scope metadata
 - Trigger duplicate suppression includes the bounce index, so each bounce can trigger once while duplicate events for the same bounce remain suppressed
 - runtime stats expose Bounce qualification, source jobs, post-launch bounce toggles, bounce events, source detonation attempts/results, Trigger payload detonation attempts/results, duplicate suppression, and final cancel results
 
 Still deferred:
 
-- Bounce + Multicast
-- Bounce + Spread/Burst
+- source-level Bounce + Multicast
+- source-level Bounce + Spread/Burst
 - Bounce + Timer
 - direct source Bounce + Chain
 - Bounce + Speed+/Size+
@@ -1436,7 +1450,7 @@ Manual gameplay smoke:
 - aim `Bounce 3 Fire Damage -> Trigger -> Frost Damage 20pt/10ft` at a wall, floor, ceiling, or actor
 - aim the `H` probe at an actor near another valid actor, or at a nearby surface with valid actors close to the bounce point; expected markers include `SPELLFORGE_LIVE_BOUNCE_CHAIN_SOURCE_TARGET_INFERRED`, `SPELLFORGE_CHAIN_HOP_ENQUEUED`, and `SPELLFORGE_CHAIN_HOP_PAYLOAD_OK`
 - aim `Bounce 3 Fire Damage -> Trigger -> Chain 3 -> Frost Damage` at an actor near another actor to exercise Chain payload routing
-- expected markers include `SPELLFORGE_LIVE_BOUNCE_SOURCE_OK` with `post_launch_bounce_ok=true`, `SPELLFORGE_LIVE_BOUNCE_EVENT`, `SPELLFORGE_LIVE_BOUNCE_SOURCE_DETONATED`, `SPELLFORGE_LIVE_BOUNCE_TRIGGER_PAYLOAD_DETONATED`, and `SPELLFORGE_LIVE_BOUNCE_FINAL_CANCELLED`
+- expected markers include `SPELLFORGE_BOUNCE_SOURCE_LAUNCH_CONFIG` with `post_launch_bounce_ok=true`, `SPELLFORGE_BOUNCE_EVENT_SEEN`, `SPELLFORGE_LIVE_BOUNCE_SOURCE_DETONATED`, `SPELLFORGE_LIVE_BOUNCE_TRIGGER_PAYLOAD_DETONATED` or fanout/Chain handoff markers, and `SPELLFORGE_LIVE_BOUNCE_FINAL_CANCELLED`
 - source damage is driven through SFP area detonation at the bounce point, so the v0 manual smoke uses AoE Fireball-style source damage
 
 ---
@@ -1450,7 +1464,7 @@ What changed:
 - the `G` smoke runs Trigger payload Bounce dry-run coverage before the live launch
 - the `G` smoke also dry-runs `Bounce 3 Fire Damage -> Trigger -> Chain 3 -> Frost Damage` and asserts the payload branch routes to Chain runtime instead of a simple at-position detonation
 - the smoke asserts Bounce disabled and over-cap recipes reject clearly
-- the smoke asserts Bounce + Multicast/fanout, Bounce + Timer, direct source Bounce + Chain, Bounce + Speed+, and Bounce + Size+ remain deferred
+- the smoke asserts source-level Bounce + Multicast/fanout, Bounce + Timer, direct source Bounce + Chain, Bounce + Speed+, and Bounce + Size+ remain deferred
 - the live Bounce launch assertion now checks that only the source projectile is launched
 - the Trigger payload is expected to use `bounce_detonate_at_pos`, not a second payload projectile launch
 - source job/userData assertions confirm `bounce_runtime`, `source_prefix_opcode=Bounce`, `source_postfix_opcode=Trigger`, and Trigger payload slot identity survive launch preparation
@@ -1458,8 +1472,8 @@ What changed:
 
 Still deferred:
 
-- Bounce + Multicast
-- Bounce + Spread/Burst
+- source-level Bounce + Multicast
+- source-level Bounce + Spread/Burst
 - Bounce + Timer
 - direct source Bounce + Chain
 - Bounce + Speed+/Size+
@@ -1493,8 +1507,8 @@ What changed:
 Still deferred:
 
 - direct source Bounce + Chain
-- Bounce + Multicast
-- Bounce + Spread/Burst
+- source-level Bounce + Multicast
+- source-level Bounce + Spread/Burst
 - Bounce + Timer
 - Bounce + Speed+/Size+
 - nested Bounce payload runtime
@@ -1802,9 +1816,9 @@ What changed:
 - added `shared/saved_recipe_model.lua` with `spellforge-saved-recipe-v1`
 - added `shared/generated_spell_lifecycle.lua` for UI-created generated-spell state transitions
 - replaced the player storage stub with a player-section saved recipe store and generated lifecycle store
-- replaced the player UI stub with cacheable calls for catalog, validate, preview, saved recipe create/update/delete, saved recipe validate/preview, deferred compile/recompile, and lifecycle lookup
+- replaced the player UI stub with cacheable calls for catalog, validate, preview, saved recipe create/update/delete, saved recipe validate/preview, compile/recompile lifecycle, and lifecycle lookup
 - validation/preview callbacks now persist successful recipe ids back onto the saved recipe and lifecycle entry
-- generated spell compile remains deferred for the visible UI flow, so this pass does not add new player spellbook entries
+- generated spell compile was still deferred in this pass; later UI work enables real player-visible frontend spell creation
 - global delete cleanup can remove compiled recipe index entries by recipe id and clear in-memory helper-record mappings for that recipe
 - helper-record smoke coverage now asserts recipe cleanup removes recipe-slot and logical lookup mappings
 - plan-cache smoke coverage now asserts saved recipe schema/version behavior and lifecycle draft/validate/preview/compile/stale/delete transitions
@@ -1813,7 +1827,7 @@ Still deferred:
 
 - visible spellcrafting interface controls
 - UI-driven live compile/cast buttons
-- actual UI-created frontend spellbook lifecycle beyond the existing cleanup/delete scaffold
+- additional UI-created frontend spellbook lifecycle polish beyond the existing cleanup/delete scaffold
 - broader runtime support for deferred gameplay combinations
 
 Manual smoke:
@@ -1834,44 +1848,48 @@ What changed:
 - added `tests/smoke_player_ui_api.lua`
 - wired the smoke into `spellforge_smoke_plan_cache.omwscripts`
 - added a player storage read-through cache so saved recipes and lifecycle entries are visible immediately after writes, even when OpenMW player storage does not behave read-after-write inside the same simulation tick
-- the smoke requests the UI catalog through `player/ui.lua`, verifies the cache path, saves a recipe through player storage, validates and previews the saved recipe through global event plumbing, checks lifecycle transitions, confirms compile/recompile remains deferred, deletes the saved recipe, and confirms the pre-compile delete path does not request compiled cleanup or pollute the spellbook
+- the smoke requests the UI catalog through `player/ui.lua`, verifies the cache path, saves a recipe through player storage, validates and previews the saved recipe through global event plumbing, checks lifecycle transitions, compiles a generated frontend spell, deletes the saved recipe, and confirms cleanup removes the frontend spellbook entry
 - tightened generated lifecycle cleanup planning so preview-only recipes with a recipe id do not claim compiled cleanup unless a frontend/generated engine spell id exists
 
 Still deferred:
 
 - visible spellcrafting interface controls
-- real UI compile/recompile buttons
-- UI-created frontend spellbook lifecycle beyond the existing deferred scaffold
+- richer UI compile/recompile management controls
+- broader UI-created frontend spellbook lifecycle polish
 
 Manual smoke:
 
 - rerun the plan-cache smoke suite
-- expected new markers include `PASS 1 catalog request succeeds`, `PASS 2 save recipe succeeds`, `PASS 3 validate saved recipe succeeds`, `PASS 4 preview saved recipe succeeds`, `PASS 5 compile saved recipe defers`, `PASS 6 delete saved recipe succeeds`, and `smoke player ui api run complete`
+- expected new markers include `PASS 1 catalog request succeeds`, `PASS 2 save recipe succeeds`, `PASS 3 validate saved recipe succeeds`, `PASS 4 preview saved recipe succeeds`, `PASS 5 compile saved recipe succeeds`, `PASS 6 delete saved recipe succeeds`, and `smoke player ui api run complete`
 
 ---
 
 ## 2.2c.52 - Spellcrafting Interface Shell v0
 
-This pass adds the first visible, vanilla-inspired spellcrafting shell without enabling real UI-created spellbook output.
+This pass adds the first visible, vanilla-inspired spellcrafting shell and its dev-gated UI-created spellbook output path.
 
 What changed:
 
 - added `player/spellcrafting_ui.lua`
 - wired the player `Y` hotkey to open/close the shell when dev hotkeys or smoke tests are enabled
 - added a MWUI `Spellmaking` shell with effect and operator palettes, a recipe stack, selected-effect editing, saved-recipe loading, preview/status output, and action buttons
-- the shell talks through `player/ui.lua` for catalog, save/update/delete, validate, preview, and deferred compile requests instead of knowing global event plumbing
-- the Compile button still records the existing deferred compile path and does not create frontend spells or helper records
-- added sparse log markers for UI open/close, catalog, save, validate, preview, deferred compile, and delete actions
+- the shell talks through `player/ui.lua` for catalog, save/update/delete, validate, preview, and compile requests instead of knowing global event plumbing
+- the Create button saves, validates, previews, queues real saved-recipe compile, and reports the generated frontend spell id
+- added sparse log markers for UI open/close, catalog, save, validate, preview, compile, and delete actions
 - fixed delete-state rendering so the visible success status appears after a saved recipe is deleted
 - fitted the shell to the detected OpenMW `Windows` UI layer with a compact 3-column layout and 8px top-left position so physical display scaling cannot center it off-screen
 - hardened visible-shell saved recipe loading so malformed/non-table operator `params` values are reset to operator defaults instead of crashing recipe row rendering
 - hardened shared parser/canonicalize/plan/helper clone paths so non-table `params` values are treated as empty parameter maps instead of reaching `pairs()`
+- moved operator parameter defaults into the shared opcode contract and parser so UI-created Timer drafts with missing `seconds` normalize to `1.0` before validation/planning
+- hardened the visible UI numeric editors and save/preview/create markers so operator params such as `Multicast(count=8)` and `Burst(count=8)` are easier to verify against planned slot counts
+- synchronized the visible draft back to the normalized saved recipe after Save/Create and expanded UI/global compile markers with slot/helper counts to catch any future saved-vs-compiled recipe drift
+- mirrored operator params into scalar `spellforge_param_*` fields and rebuilt params from those fields globally so player-to-global UI events preserve values like `Multicast(count=8)` even when nested Lua tables are stripped
+- centralized scalar operator-param field generation in the shared operator-param helper, added numeric-string coercion, and expanded plan-cache smoke coverage across Timer, Multicast, Burst, Spread, Speed+, Size+, Chain, and Bounce params
 
 Still deferred:
 
 - production Noita wand/deck UI semantics
-- true UI-created frontend spellbook lifecycle
-- real UI compile/recompile/cast controls
+- richer generated-spell management controls
 - richer vanilla visual parity and layout polish
 - dynamic game-effect catalog beyond the current starter palette
 
@@ -1879,10 +1897,102 @@ Manual smoke:
 
 - load the dev launch or plan-cache smoke setup so dev hotkeys or smoke tests are enabled
 - press `Y` and confirm the `Spellmaking` shell opens fully on-screen, closes, and does not block normal gameplay after closing
-- expected action markers include `SPELLFORGE_SPELLCRAFT_UI_OPENED`, `SPELLFORGE_SPELLCRAFT_UI_CATALOG_OK`, `SPELLFORGE_SPELLCRAFT_UI_SAVE_OK`, `SPELLFORGE_SPELLCRAFT_UI_VALIDATE_OK`, `SPELLFORGE_SPELLCRAFT_UI_PREVIEW_OK`, `SPELLFORGE_SPELLCRAFT_UI_COMPILE_DEFERRED`, `SPELLFORGE_SPELLCRAFT_UI_DELETE_OK`, and `SPELLFORGE_SPELLCRAFT_UI_CLOSED`
+- expected action markers include `SPELLFORGE_SPELLCRAFT_UI_OPENED`, `SPELLFORGE_SPELLCRAFT_UI_CATALOG_OK`, `SPELLFORGE_SPELLCRAFT_UI_SAVE_OK`, `SPELLFORGE_SPELLCRAFT_UI_VALIDATE_OK`, `SPELLFORGE_SPELLCRAFT_UI_PREVIEW_OK`, `SPELLFORGE_SPELLCRAFT_UI_COMPILE_OK`, `SPELLFORGE_SPELLCRAFT_UI_DELETE_OK`, and `SPELLFORGE_SPELLCRAFT_UI_CLOSED`
 - `SPELLFORGE_SPELLCRAFT_UI_OPENED` also logs the detected physical `screen=`, UI `layer=`, fitted `window=`, and `position=` dimensions for layout debugging
 - loading a saved recipe should emit `SPELLFORGE_SPELLCRAFT_UI_LOAD_OK` and should not produce `bad argument #1 to 'next'` or `pairs()` errors
-- Compile should still report a deferred result and should not add helper records to the player spellbook
+- Create should add one generated frontend spell to the player spellbook, keep helper records out of the spellbook, and delete/recompile should clean up stale frontend metadata
+- for `Fire -> Timer(seconds=1) -> Multicast(count=8) -> Burst(count=8) -> Fire`, preview/create should report `slots=9`, `helpers=9`, and `ops=` should include Timer, Multicast count 8, and Burst count 8
+
+---
+
+## 2.2c.53 - Spellcrafting Deferred Runtime Guard
+
+This pass tightened the visible shell's contract with the live runtime after smoke67 showed a UI-created Bounce source with a Trigger payload Multicast compiling successfully while Bounce v0 still rejected that runtime shape.
+
+What changed:
+
+- the feature matrix temporarily marked `Bounce -> Trigger -> payload Multicast/Spread/Burst` as `bounce_trigger_payload_deferred`, matching the then-existing Bounce runtime rejection path
+- the visible shell now displays preview-deferred status as a warning and blocks Create when preview returns any deferred runtime reason
+- the player UI compile wrapper also refuses compile requests when the latest cached preview for the saved recipe is deferred
+- plan-cache smoke coverage added the exact `Bounce 5 Fire Damage -> Trigger -> Multicast 8 Frost Damage` shape so the matrix could track the recipe before exposing it safely
+- player UI API smoke coverage now checks that a cached deferred preview returns `ui_compile_deferred` synchronously without queueing a global compile
+
+Still deferred:
+
+- broader Bounce composition beyond the current simple Trigger payload, Trigger->Chain bridge, and Trigger payload fanout path
+
+Manual smoke:
+
+- in the `Y` shell, previewing a still-deferred combo such as `Bounce -> Fire Damage -> Timer -> Frost Damage` should show `Runtime: deferred`
+- pressing Create on that still-deferred recipe should report `Create blocked` and log `SPELLFORGE_SPELLCRAFT_UI_COMPILE_DEFERRED`
+- the player UI API smoke should include `PASS 7 deferred compile blocks request`, `PASS 7 deferred compile returns readable error`, and `PASS 7 deferred compile callback invoked synchronously`
+
+---
+
+## 2.2c.54 - Bounce Trigger Payload Fanout
+
+This pass removes the temporary Bounce Trigger payload fanout deferral and routes the narrow supported shape through bounded Bounce-owned Trigger payload launch jobs.
+
+What changed:
+
+- `Bounce -> projectile -> Trigger -> payload Multicast/Spread/Burst` now qualifies when the existing Bounce, Trigger, payload Multicast, and payload Pattern gates are enabled
+- Bounce events still detonate the source projectile at the bounce point, but fanout Trigger payloads now launch via the central orchestrator instead of being collapsed into the old single at-position payload detonation
+- source-level `Bounce + Multicast/Spread/Burst`, `Bounce + Timer`, direct `Bounce + Chain`, Bounce Speed+/Size+ source modifiers, Bounce+Homing, and arbitrary nested Bounce payload runtime remain deferred with stable reason codes
+- the feature matrix now reports the Bounce Trigger payload Multicast shape as `feature_gated` with the payload Multicast gate instead of `bounce_trigger_payload_deferred`
+- Bounce smoke coverage now includes source-only and Trigger simple payload probes, disabled-gate probes for Trigger Chain/Multicast/Pattern payloads, dry-run probes for Bounce Trigger payload Multicast/Burst/Spread, and synthetic post-bounce simple/Multicast probes that register bindings without launching visible source projectiles
+- `H` now preflights a synthetic Bounce Trigger->Chain no-target bounce route before the live launch, proving duplicate bounce suppression and non-fatal `no_valid_chain_target` stops
+
+Manual smoke:
+
+- press `G` for the Bounce hardening suite; it should include source-only, Trigger simple post-bounce, Trigger payload Multicast/Burst/Spread, disabled-gate, and unsupported-shape PASS lines before the live simple Bounce launch
+- press `H` for the Bounce Trigger->Chain suite; it should include a no-target post-bounce PASS before the live actor-near-actor launch
+- in live logs, supported Bounce Trigger fanout should use `SPELLFORGE_BOUNCE_TRIGGER_PAYLOAD_MULTICAST_ENQUEUED`, `SPELLFORGE_BOUNCE_TRIGGER_PAYLOAD_PATTERN_ENQUEUED`, and `SPELLFORGE_LIVE_BOUNCE_TRIGGER_PAYLOAD_OK`
+- simple `Bounce -> Fire Damage -> Trigger -> Frost Damage` should still use `SPELLFORGE_LIVE_BOUNCE_TRIGGER_PAYLOAD_DETONATED`
+
+---
+
+## 2.2c.55 - Smoke76 Bounce Support Truth
+
+Smoke76/manual checks consolidate Bounce v0's proven surface and Chain-handoff behavior without broadening the runtime.
+
+What is now documented as supported:
+
+- `Bounce N -> simple target emitter`
+- `Bounce N -> target emitter -> Trigger -> simple payload`
+- `Bounce N -> target emitter -> Trigger -> payload Multicast`, gated by payload Multicast v0
+- `Bounce N -> target emitter -> Trigger -> payload Spread/Burst + Multicast`, gated by payload Multicast and payload Pattern v0
+- `Bounce N -> target emitter -> Trigger -> Chain N -> simple payload`, gated by Chain runtime v0
+
+Observed bounce surfaces:
+
+- actor/contact
+- interior wall/static
+- exterior wall/static
+- terrain/ground
+
+Chain handoff truth:
+
+- SFP bounce events expose a bounce point and may not expose a hit actor
+- Bounce Trigger->Chain performs one bounded source-target inference near the bounce point
+- when no Chain source/next candidates exist, the runtime logs the no-target condition and stops safely without a smoke failure
+
+Still deferred:
+
+- Bounce + Timer
+- Bounce + Homing
+- Bounce + source Speed+/Size+
+- Bounce + direct source Chain
+- Bounce + arbitrary nested payload runtime
+- Bounce + recursion
+- Bounce + post-launch steering
+- per-projectile Lua brains
+
+Smoke/UI contract notes:
+
+- `G` remains the Bounce hardening suite for source-only, Trigger simple, Trigger fanout, gate rejections, and unsupported-shape deferrals
+- `H` distinguishes synthetic no-target safety, mock Chain handoff payload launch, live bounce-event routing, and real-provider safe stops
+- `J` is the manual surface diagnostic for actor/contact, interior static, exterior static, and terrain/ground bounce callback checks
+- the feature matrix reports narrow Bounce Trigger fanout and Bounce Trigger Chain as feature-gated, while still reporting Bounce+Timer, Bounce+Homing, source Bounce+Speed+/Size+, direct source Bounce+Chain, and nested Bounce payloads as deferred
 
 ---
 
@@ -1955,7 +2065,7 @@ The dev launch harness can enable:
 
 Representative hotkeys from the current README/dev harness:
 
-The `Numpad 5` suite covers audit-only nested payload planning plus Chain audit/runtime, including Chain Speed+/Size+ payload modifier probes and bounded Chain+Multicast branch-observability smokes. The `Numpad 9` and `Numpad /` suites also cover nested final payload fanout v0. The `Numpad .` suite covers chaos budget high-fanout stress, including Chain+Multicast under the chaos cap. The `G` smoke covers Bounce v0 hardening. The `K` smoke covers Homing v0 launch-assist dry-run plus soft redirect runtime/probe checks. The `Y` dev/smoke hotkey opens the spellcrafting shell.
+The `Numpad 5` suite covers audit-only nested payload planning plus Chain audit/runtime, including Chain Speed+/Size+ payload modifier probes and bounded Chain+Multicast branch-observability smokes. The `Numpad 9` and `Numpad /` suites also cover nested final payload fanout v0. The `Numpad .` suite covers chaos budget high-fanout stress, including Chain+Multicast under the chaos cap. The `G` smoke covers Bounce v0 hardening, supported Trigger payload dry-run/post-bounce routes, gate-disabled rejections, and unsupported-shape deferrals. The `H` smoke covers Bounce Trigger->Chain no-target/mock handoff plus live bounce-event routing and real-provider safe stops. The `J` smoke covers manual Bounce surface/contact diagnostics. The `K` smoke covers Homing v0 launch-assist dry-run plus soft redirect runtime/probe checks. The `Y` dev/smoke hotkey opens the spellcrafting shell.
 
 - `Numpad 0` — performance stress spell
 - `Numpad +` — simple-helper launch smoke
@@ -1973,11 +2083,12 @@ The `Numpad 5` suite covers audit-only nested payload planning plus Chain audit/
 - `Numpad -` — live Size+ v0 helper-spec mutation smoke
 - `K` - live Homing v0 SFP 1.7 `forceVec` dry-run plus delayed soft redirect/retarget probe
 - `Numpad .` - chaos budget high-fanout stress smoke
-- `G` - Bounce v0 hardening smoke
-- `H` - live Bounce Trigger->Chain payload probe
+- `G` - Bounce v0 hardening smoke plus Bounce Trigger payload fanout dry-runs/post-bounce probes
+- `H` - Bounce Trigger->Chain no-target/mock handoff plus live event/payload probe
+- `J` - manual Bounce surface/contact diagnostic probe
 - `Y` - dev/smoke-gated spellcrafting shell
 
-Additional current coverage: `Numpad 5` now includes Chain+Multicast branch-observability smokes, `Numpad 9` and `Numpad /` assert Trigger/Timer branch metadata across fanout and nested final payloads, `Numpad .` includes Chain+Multicast high-fanout chaos checks, `G` checks Bounce source branch identity, and `K` includes the soft redirect runtime/probe path with bounded retarget diagnostics.
+Additional current coverage: `Numpad 5` now includes Chain+Multicast branch-observability smokes, `Numpad 9` and `Numpad /` assert Trigger/Timer branch metadata across fanout and nested final payloads, `Numpad .` includes Chain+Multicast high-fanout chaos checks, `G` checks Bounce source branch identity, Trigger simple/fanout bounce-route metadata, gate rejections, and unsupported-shape deferrals, `H` checks Bounce Trigger->Chain no-target safety, mock handoff payload launch, live bounce-event routing, and real-provider safe stops, `J` checks manual surface/contact callback diagnostics, and `K` includes the soft redirect runtime/probe path with bounded retarget diagnostics.
 
 ---
 
