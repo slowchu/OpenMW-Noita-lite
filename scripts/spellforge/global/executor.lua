@@ -51,6 +51,109 @@ local function stringifyValue(value, depth)
     return tostring(value)
 end
 
+local function readField(value, key)
+    if value == nil then
+        return nil
+    end
+    local ok, result = pcall(function()
+        return value[key]
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+local function objectToken(value)
+    if value == nil then
+        return nil
+    end
+    if type(value) ~= "table" then
+        return tostring(value)
+    end
+    return readField(value, "id")
+        or readField(value, "recordId")
+        or readField(value, "refId")
+        or readField(value, "name")
+        or objectToken(readField(value, "object"))
+end
+
+local function objectKind(value)
+    if value == nil then
+        return nil
+    end
+    return readField(value, "type")
+        or readField(value, "objectType")
+        or readField(value, "recordType")
+        or type(value)
+end
+
+local function compactNumber(value)
+    local number = tonumber(value)
+    if number == nil then
+        return nil
+    end
+    return string.format("%.1f", number)
+end
+
+local function compactVector(value)
+    if value == nil then
+        return nil
+    end
+    local x = compactNumber(readField(value, "x"))
+    local y = compactNumber(readField(value, "y"))
+    local z = compactNumber(readField(value, "z"))
+    if x and y and z then
+        return string.format("%s,%s,%s", x, y, z)
+    end
+    return tostring(value)
+end
+
+local function compactBounceUserData(user_data)
+    if type(user_data) ~= "table" then
+        return nil
+    end
+    return string.format(
+        "recipe_id=%s slot_id=%s cast_id=%s bounce_id=%s bounce_role=%s",
+        tostring(user_data.recipe_id),
+        tostring(user_data.slot_id),
+        tostring(user_data.cast_id),
+        tostring(user_data.bounce_id),
+        tostring(user_data.bounce_role)
+    )
+end
+
+local function logBounceMagicHitWithoutBounce(payload, helper_hit, helper_mapping, user_data)
+    if type(user_data) ~= "table"
+        or user_data.bounce_runtime ~= true
+        or user_data.bounce_role ~= "source"
+        or user_data.bounce_manual_detonation == true then
+        return
+    end
+
+    local projectile_id = helper_hit and helper_hit.projectile_id or nil
+    if projectile_id == nil then
+        local _, extracted_projectile_id = sfp_adapter.extractProjectileFromHit(payload)
+        projectile_id = extracted_projectile_id
+    end
+    if live_bounce.bounceEventCount(projectile_id) > 0 then
+        return
+    end
+
+    runtime_stats.inc("live_bounce_magic_hit_without_bounce")
+    local target = payload and (payload.target or payload.hitObject or payload.hit_object) or nil
+    log.info(string.format(
+        "SPELLFORGE_BOUNCE_SOURCE_MAGIC_HIT_WITHOUT_BOUNCE spell_id=%s helper_engine_id=%s projectile_id=%s target_id=%s target_type=%s hit_pos=%s userData=%s",
+        tostring(payload and (payload.spellId or payload.spell_id) or nil),
+        tostring((helper_mapping and helper_mapping.engine_id) or user_data.helper_engine_id),
+        tostring(projectile_id),
+        tostring(objectToken(target)),
+        tostring(objectKind(target)),
+        tostring(compactVector(payload and (payload.hitPos or payload.hit_pos) or nil)),
+        tostring(compactBounceUserData(user_data))
+    ))
+end
+
 local function logSpellRecord(label, spell_id)
     local record = spell_id and core.magic.spells.records[spell_id] or nil
     if not record then
@@ -538,6 +641,9 @@ function executor.onMagicHit(payload)
     local helper_mapping = helper_hit and helper_hit.ok and helper_hit.mapping or nil
     local skip_live_continuations = spellforge_hit_user_data
         and spellforge_hit_user_data.bounce_manual_detonation == true
+    if not skip_live_continuations then
+        logBounceMagicHitWithoutBounce(payload, helper_hit, helper_mapping, spellforge_hit_user_data)
+    end
 
     if helper_mapping and dev.devLaunchEnabled() and not skip_live_continuations then
         dev_launch.onHelperHit(helper_hit)

@@ -244,7 +244,7 @@ function runtime_stats.summaryLines()
             g("timer_source_detonation_blocked")
         ),
         string.format(
-            "bounce attempts=%d qualified=%d rejected=%d disabled=%d trigger_qualified=%d chain_payload_qualified=%d source_jobs=%d events=%d source_detonate_attempts=%d source_detonate_ok=%d source_detonate_failed=%d trigger_payloads=%d chain_payload_attempts=%d chain_source_inferred=%d chain_source_missing=%d chain_payload_ok=%d chain_payload_ignored=%d chain_payload_failed=%d payload_detonate_attempts=%d payload_detonate_ok=%d payload_detonate_failed=%d duplicate_suppressed=%d final_cancel_ok=%d final_cancel_failed=%d cap_reject=%d fanout_reject=%d modifier_reject=%d chain_reject=%d post_launch_bounce_attempts=%d post_launch_bounce_ok=%d post_launch_bounce_failed=%d post_launch_actor_toggle_attempts=%d post_launch_actor_toggle_ok=%d post_launch_actor_toggle_failed=%d post_launch_projectile_missing=%d",
+            "bounce attempts=%d qualified=%d rejected=%d disabled=%d trigger_qualified=%d chain_payload_qualified=%d source_jobs=%d events=%d source_detonate_attempts=%d source_detonate_ok=%d source_detonate_failed=%d trigger_payloads=%d chain_payload_attempts=%d chain_source_inferred=%d chain_source_missing=%d chain_payload_ok=%d chain_payload_ignored=%d chain_payload_failed=%d payload_detonate_attempts=%d payload_detonate_ok=%d payload_detonate_failed=%d duplicate_suppressed=%d final_cancel_ok=%d final_cancel_failed=%d cap_reject=%d fanout_reject=%d modifier_reject=%d homing_reject=%d nested_payload_reject=%d chain_reject=%d post_launch_bounce_attempts=%d post_launch_bounce_ok=%d post_launch_bounce_failed=%d post_launch_actor_toggle_attempts=%d post_launch_actor_toggle_ok=%d post_launch_actor_toggle_failed=%d post_launch_projectile_missing=%d",
             g("live_bounce_attempts"),
             g("live_bounce_qualified"),
             g("live_bounce_rejected"),
@@ -272,6 +272,8 @@ function runtime_stats.summaryLines()
             g("live_bounce_cap_reject"),
             g("live_bounce_fanout_reject"),
             g("live_bounce_modifier_reject"),
+            g("live_bounce_homing_reject"),
+            g("live_bounce_nested_payload_reject"),
             g("live_bounce_chain_reject"),
             g("sfp_post_launch_bounce_attempts"),
             g("sfp_post_launch_bounce_ok"),

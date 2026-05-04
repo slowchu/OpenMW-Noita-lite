@@ -200,7 +200,132 @@ local function run()
     assertLine(bounce_trigger_multicast_matrix.live_runtime_status == "feature_gated", "14b ui feature matrix marks Bounce Trigger payload Multicast feature-gated")
     assertLine(containsValue(bounce_trigger_multicast_matrix.active_feature_ids, "payload_multicast"), "14b ui feature matrix detects Bounce Trigger payload Multicast")
     assertLine(containsValue(bounce_trigger_multicast_matrix.required_flags, "SpellforgeDev.enable_live_payload_multicast_v0"), "14b ui feature matrix lists payload Multicast gate")
+    assertLine(not containsValue(bounce_trigger_multicast_matrix.required_flags, "SpellforgeDev.enable_live_multicast"), "14b ui feature matrix does not require primary Multicast gate for payload Multicast")
     assertLine(not containsValue(bounce_trigger_multicast_matrix.deferred_reasons, "bounce_trigger_payload_deferred"), "14b ui feature matrix does not defer Bounce Trigger payload Multicast")
+
+    local bounce_trigger_chain = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_trigger" },
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local bounce_trigger_chain_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-bounce-trigger-chain-supported",
+        recipe = {
+            title = "Smoke Bounce Trigger Chain Preview",
+            effects = bounce_trigger_chain,
+        },
+    })
+    local bounce_trigger_chain_matrix = bounce_trigger_chain_preview.preview and bounce_trigger_chain_preview.preview.feature_matrix or {}
+    assertLine(bounce_trigger_chain_preview.ok == true, "14c ui feature matrix preview accepts Bounce Trigger Chain")
+    assertLine(bounce_trigger_chain_matrix.live_runtime_status == "feature_gated", "14c ui feature matrix marks Bounce Trigger Chain feature-gated")
+    assertLine(containsValue(bounce_trigger_chain_matrix.active_feature_ids, "bounce"), "14c ui feature matrix detects Bounce for Trigger Chain")
+    assertLine(containsValue(bounce_trigger_chain_matrix.active_feature_ids, "chain"), "14c ui feature matrix detects Chain for Bounce Trigger Chain")
+    assertLine(containsValue(bounce_trigger_chain_matrix.combos, "bounce_trigger_chain"), "14c ui feature matrix reports Bounce Trigger Chain combo")
+    assertLine(containsValue(bounce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_bounce_v0"), "14c ui feature matrix lists Bounce gate")
+    assertLine(containsValue(bounce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_trigger"), "14c ui feature matrix lists Trigger gate")
+    assertLine(containsValue(bounce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_chain_runtime_v0"), "14c ui feature matrix lists Chain runtime gate")
+    assertLine(not containsValue(bounce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_chain_multicast_v0"), "14c ui feature matrix does not require Chain Multicast gate")
+    assertLine(not containsValue(bounce_trigger_chain_matrix.deferred_reasons, "bounce_chain_deferred"), "14c ui feature matrix does not defer narrow Bounce Trigger Chain")
+
+    local bounce_trigger_burst = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_trigger" },
+        { id = "spellforge_burst", params = { count = 5 } },
+        { id = "spellforge_multicast", params = { count = 5 } },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local bounce_trigger_burst_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-bounce-trigger-pattern-supported",
+        recipe = {
+            title = "Smoke Bounce Trigger Pattern Preview",
+            effects = bounce_trigger_burst,
+        },
+    })
+    local bounce_trigger_burst_matrix = bounce_trigger_burst_preview.preview and bounce_trigger_burst_preview.preview.feature_matrix or {}
+    assertLine(bounce_trigger_burst_preview.ok == true, "14d ui feature matrix preview accepts Bounce Trigger Burst")
+    assertLine(bounce_trigger_burst_matrix.live_runtime_status == "feature_gated", "14d ui feature matrix marks Bounce Trigger Burst feature-gated")
+    assertLine(containsValue(bounce_trigger_burst_matrix.active_feature_ids, "payload_multicast"), "14d ui feature matrix detects payload Multicast for Bounce Trigger Burst")
+    assertLine(containsValue(bounce_trigger_burst_matrix.active_feature_ids, "payload_pattern"), "14d ui feature matrix detects payload Pattern for Bounce Trigger Burst")
+    assertLine(containsValue(bounce_trigger_burst_matrix.combos, "bounce_trigger_payload_pattern"), "14d ui feature matrix reports Bounce Trigger payload Pattern combo")
+    assertLine(containsValue(bounce_trigger_burst_matrix.required_flags, "SpellforgeDev.enable_live_payload_multicast_v0"), "14d ui feature matrix lists payload Multicast gate")
+    assertLine(containsValue(bounce_trigger_burst_matrix.required_flags, "SpellforgeDev.enable_live_payload_pattern_v0"), "14d ui feature matrix lists payload Pattern gate")
+    assertLine(not containsValue(bounce_trigger_burst_matrix.required_flags, "SpellforgeDev.enable_live_multicast"), "14d ui feature matrix does not require primary Multicast gate for payload Pattern")
+    assertLine(not containsValue(bounce_trigger_burst_matrix.required_flags, "SpellforgeDev.enable_live_spread_burst"), "14d ui feature matrix does not require primary Spread/Burst gate for payload Pattern")
+
+    local bounce_direct_chain = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local bounce_direct_chain_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-bounce-direct-chain-deferred",
+        recipe = {
+            title = "Smoke Bounce Direct Chain Preview",
+            effects = bounce_direct_chain,
+        },
+    })
+    local bounce_direct_chain_matrix = bounce_direct_chain_preview.preview and bounce_direct_chain_preview.preview.feature_matrix or {}
+    assertLine(bounce_direct_chain_preview.ok == true, "14e ui feature matrix preview accepts direct Bounce Chain")
+    assertLine(bounce_direct_chain_matrix.live_runtime_status == "deferred", "14e ui feature matrix marks direct Bounce Chain deferred")
+    assertLine(containsValue(bounce_direct_chain_matrix.deferred_reasons, "bounce_chain_deferred"), "14e ui feature matrix gives direct Bounce Chain reason")
+
+    local bounce_homing = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "spellforge_homing" },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+    }
+    local bounce_homing_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-bounce-homing-deferred",
+        recipe = {
+            title = "Smoke Bounce Homing Preview",
+            effects = bounce_homing,
+        },
+    })
+    local bounce_homing_matrix = bounce_homing_preview.preview and bounce_homing_preview.preview.feature_matrix or {}
+    assertLine(bounce_homing_preview.ok == true, "14f ui feature matrix preview accepts Bounce Homing")
+    assertLine(bounce_homing_matrix.live_runtime_status == "deferred", "14f ui feature matrix marks Bounce Homing deferred")
+    assertLine(containsValue(bounce_homing_matrix.deferred_reasons, "bounce_homing_deferred"), "14f ui feature matrix gives Bounce Homing reason")
+
+    local bounce_speed_plus = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+    }
+    local bounce_speed_plus_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-bounce-speed-plus-deferred",
+        recipe = {
+            title = "Smoke Bounce Speed Plus Preview",
+            effects = bounce_speed_plus,
+        },
+    })
+    local bounce_speed_plus_matrix = bounce_speed_plus_preview.preview and bounce_speed_plus_preview.preview.feature_matrix or {}
+    assertLine(bounce_speed_plus_preview.ok == true, "14g ui feature matrix preview accepts Bounce Speed+")
+    assertLine(bounce_speed_plus_matrix.live_runtime_status == "deferred", "14g ui feature matrix marks Bounce Speed+ deferred")
+    assertLine(containsValue(bounce_speed_plus_matrix.deferred_reasons, "bounce_modifier_deferred"), "14g ui feature matrix gives Bounce modifier reason")
+
+    local bounce_nested_payload = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_trigger" },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+        { id = "spellforge_trigger" },
+        { id = "shockdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local bounce_nested_payload_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-bounce-nested-payload-deferred",
+        recipe = {
+            title = "Smoke Bounce Nested Payload Preview",
+            effects = bounce_nested_payload,
+        },
+    })
+    local bounce_nested_payload_matrix = bounce_nested_payload_preview.preview and bounce_nested_payload_preview.preview.feature_matrix or {}
+    assertLine(bounce_nested_payload_preview.ok == true, "14h ui feature matrix preview accepts Bounce nested payload")
+    assertLine(bounce_nested_payload_matrix.live_runtime_status == "deferred", "14h ui feature matrix marks Bounce nested payload deferred")
+    assertLine(containsValue(bounce_nested_payload_matrix.deferred_reasons, "nested_payload_runtime_deferred"), "14h ui feature matrix gives Bounce nested payload reason")
 
     local catalog = ui_catalog.build({ request_id = "smoke-ui-catalog" })
     assertLine(catalog.ok == true, "15 ui catalog succeeds")
@@ -214,6 +339,8 @@ local function run()
     assertLine(catalog.defaults and catalog.defaults.preview_launches_projectiles == false, "15 ui catalog marks preview dry-run")
     assertLine(containsValue(catalog.recipe_model and catalog.recipe_model.effect_fields, operator_params.encodedFieldName("count")), "15 ui catalog exposes scalar count param field")
     assertLine(containsValue(catalog.recipe_model and catalog.recipe_model.effect_fields, operator_params.encodedFieldName("seconds")), "15 ui catalog exposes scalar seconds param field")
+    assertLine(catalog.support_truth and catalog.support_truth.bounce_v0 and containsValue(catalog.support_truth.bounce_v0.observed_surfaces, "exterior wall/static"), "15 ui catalog records Bounce exterior surface support")
+    assertLine(catalog.support_truth and catalog.support_truth.bounce_v0 and containsValue(catalog.support_truth.bounce_v0.supported_shapes, "Bounce N -> target emitter -> Trigger -> Chain N -> simple payload"), "15 ui catalog records Bounce Trigger Chain support")
 
     local saved_result = saved_recipe_model.create({
         id = "saved-smoke-1",

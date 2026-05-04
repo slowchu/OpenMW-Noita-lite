@@ -147,6 +147,41 @@ local function buildLimits()
     }
 end
 
+local function buildSupportTruth()
+    return {
+        bounce_v0 = {
+            gates = {
+                "SpellforgeDev.enable_live_2_2c_runtime",
+                "SpellforgeDev.enable_live_bounce_v0",
+            },
+            supported_shapes = {
+                "Bounce N -> simple target emitter",
+                "Bounce N -> target emitter -> Trigger -> simple payload",
+                "Bounce N -> target emitter -> Trigger -> payload Multicast",
+                "Bounce N -> target emitter -> Trigger -> payload Spread/Burst + Multicast",
+                "Bounce N -> target emitter -> Trigger -> Chain N -> simple payload",
+            },
+            observed_surfaces = {
+                "actor/contact",
+                "interior wall/static",
+                "exterior wall/static",
+                "terrain/ground",
+            },
+            chain_handoff = "Bounce events may not include a hit actor; Spellforge infers a Chain source near the bounce point when possible and stops safely when no candidates exist.",
+            deferred = {
+                "Bounce + Timer",
+                "Bounce + Homing",
+                "Bounce + source Speed+/Size+",
+                "Bounce + direct source Chain",
+                "Bounce + arbitrary nested payload runtime",
+                "Bounce + recursion",
+                "Bounce + post-launch steering",
+                "per-projectile Lua brains",
+            },
+        },
+    }
+end
+
 function ui_catalog.build(payload)
     local operators, operators_by_opcode = buildOperators()
     local operator_effect_ids, operator_opcode_by_effect_id = buildOperatorEffectIds()
@@ -182,6 +217,7 @@ function ui_catalog.build(payload)
             version = feature_matrix.VERSION,
             features = feature_matrix.catalog(),
         },
+        support_truth = buildSupportTruth(),
         limits = buildLimits(),
         defaults = {
             live_runtime_enabled = false,

@@ -39,6 +39,7 @@ local state = {
 local DEBUG_MARKER_RANGE_FROM_ROOT = true
 local SMOKE_STAGE_YIELD_SECONDS = 0.05
 local SMOKE_CHAIN_CASE_YIELD_SECONDS = 0.03
+local BOUNCE_SURFACE_EVENT_WAIT_SECONDS = 1.35
 
 local KNOWN_COMBAT_SPELL_IDS = {
     "fireball",
@@ -167,6 +168,13 @@ local function launchAimPayload(extra)
     payload.start_pos = start_pos
     payload.direction = direction
     payload.hit_object = hit_object
+    return payload
+end
+
+local function deterministicBounceChainPayload()
+    local payload = launchAimPayload()
+    payload.start_pos = { x = 0, y = 0, z = 0 }
+    payload.direction = { x = 1, y = 0, z = 0 }
     return payload
 end
 
@@ -1853,6 +1861,39 @@ local function runBounceSmoke()
         end)
     end
 
+    local function compactDetailValue(value)
+        if type(value) ~= "table" then
+            return tostring(value)
+        end
+        local parts = {}
+        for key, item in pairs(value) do
+            parts[#parts + 1] = tostring(key) .. "=" .. tostring(item)
+        end
+        table.sort(parts)
+        return table.concat(parts, ",")
+    end
+
+    local function bounceSourceOnlyDetail(result)
+        if type(result) ~= "table" then
+            return "result=nil"
+        end
+        return string.format(
+            "ok=%s mode=%s rejection_reason=%s fallback_reason=%s unsupported_reasons=%s live_mode=%s bounce_mode=%s bounce_max=%s source_slot_id=%s source_helper_engine_id=%s has_trigger_payload=%s payload_count=%s",
+            tostring(result.ok),
+            tostring(result.mode),
+            tostring(result.rejection_reason),
+            tostring(result.fallback_reason),
+            compactDetailValue(result.unsupported_reasons),
+            tostring(result.live_mode),
+            tostring(result.bounce_mode),
+            tostring(result.bounce_max),
+            tostring(result.source_slot_id or result.slot_id),
+            tostring(result.source_helper_engine_id or result.helper_engine_id),
+            tostring(result.has_trigger_payload),
+            tostring(result.payload_count)
+        )
+    end
+
     local function runLiveBounceLaunch()
         requestProbe("bounce_launch", function(result)
             local bounce_detail = result and string.format(
@@ -1883,7 +1924,7 @@ local function runBounceSmoke()
             assertLine(type(user_data) == "table" and user_data.source_postfix_opcode == "Trigger" and user_data.bounce_trigger_payload_slot_id == result.trigger_payload_slot_id, "Bounce source userData carries Trigger payload identity")
             assertLine(type(user_data) == "table" and user_data.branch_kind == "bounce_source" and type(user_data.branch_id) == "string" and type(user_data.branch_parent_id) == "string", "Bounce source userData carries source branch identity")
             if result and result.ok == true then
-                log.info("Bounce live: watch for exactly three SPELLFORGE_LIVE_BOUNCE_EVENT markers, source and Trigger payload detonations at each bounce, and one final cancel")
+                log.info("Bounce live: watch for exactly three SPELLFORGE_BOUNCE_EVENT_SEEN markers, source and Trigger payload detonations at each bounce, and one final cancel")
             end
             state.running = false
         end, launchAimPayload())
@@ -1891,14 +1932,26 @@ local function runBounceSmoke()
 
     local function runUnsupportedBounceChecks()
         assertBounceRejected("bounce_over_cap", "over-cap", "bounce_count_cap_exceeded", function()
-            assertBounceRejected("bounce_fanout_deferred", "fanout", "bounce_fanout_deferred", function()
+            assertBounceRejected("bounce_fanout_deferred", "source fanout", "bounce_fanout_deferred", function()
                 assertBounceRejected("bounce_timer_deferred", "Timer", "bounce_timer_deferred", function()
                     assertBounceRejected("bounce_chain_deferred", "direct Chain", "bounce_chain_deferred", function()
-                        assertBounceRejected("bounce_speed_plus_deferred", "Speed+", "bounce_modifier_deferred", function()
-                            assertBounceRejected("bounce_size_plus_deferred", "Size+", "bounce_modifier_deferred", runLiveBounceLaunch)
+                        assertBounceRejected("bounce_nested_payload_deferred", "nested payload", "nested_payload_runtime_deferred", function()
+                            assertBounceRejected("bounce_speed_plus_deferred", "Speed+", "bounce_modifier_deferred", function()
+                                assertBounceRejected("bounce_size_plus_deferred", "Size+", "bounce_modifier_deferred", function()
+                                    assertBounceRejected("bounce_homing_deferred", "Homing", "bounce_homing_deferred", runLiveBounceLaunch)
+                                end)
+                            end)
                         end)
                     end)
                 end)
+            end)
+        end)
+    end
+
+    local function runBounceGateRejectionChecks()
+        assertBounceRejected("bounce_chain_payload_disabled", "Trigger Chain payload gate", "bounce_chain_payload_disabled", function()
+            assertBounceRejected("bounce_trigger_multicast_disabled", "Trigger Multicast payload gate", "payload_multicast_disabled", function()
+                assertBounceRejected("bounce_trigger_pattern_disabled", "Trigger pattern payload gate", "payload_pattern_disabled", runUnsupportedBounceChecks)
             end)
         end)
     end
@@ -1907,64 +1960,174 @@ local function runBounceSmoke()
         assertLine(disabled and disabled.ok == true, "Bounce disabled probe rejects cleanly", disabled and disabled.error)
         assertLine(type(disabled and disabled.fallback_reason) == "string", "Bounce disabled probe has reason")
 
-        requestProbe("bounce_dry_run", function(dry)
-            assertLine(dry and dry.ok == true, "Bounce dry-run qualifies", dry and dry.error)
-            assertLine(dry and tonumber(dry.bounce_max) == 3, "Bounce dry-run reports three bounces")
-            assertLine(dry and dry.bounce_detonate_on_actor_hit == false, "Bounce dry-run bounces actors")
-            assertLine(type(dry and dry.trigger_payload_slot_id) == "string", "Bounce dry-run keeps Trigger payload")
-            assertLine(dry and dry.payload_projectile_launches == 0, "Bounce dry-run predicts no Trigger payload projectile")
-            assertLine(dry and dry.payload_detonation_mode == "bounce_detonate_at_pos", "Bounce dry-run predicts at-position Trigger payload detonation")
+        requestProbe("bounce_source_only_dry_run", function(source_only)
+            local source_only_detail = bounceSourceOnlyDetail(source_only)
+            assertLine(source_only and source_only.ok == true, "Bounce simple source dry-run qualifies", source_only_detail)
+            assertLine(source_only and source_only.live_mode == "bounce", "Bounce simple source reports bounce mode")
+            assertLine(source_only and source_only.bounce_mode == "source", "Bounce simple source reports source-only bounce mode", source_only_detail)
+            assertLine(source_only and tonumber(source_only.bounce_max) == 3, "Bounce simple source reports three bounces")
+            assertLine(source_only and source_only.dispatch_count == 1 and source_only.source_dispatch_count == 1, "Bounce simple source plans only one source projectile")
+            assertLine(source_only and type(source_only.source_slot_id or source_only.slot_id) == "string", "Bounce simple source exposes source slot id", source_only_detail)
+            assertLine(source_only and type(source_only.source_helper_engine_id or source_only.helper_engine_id) == "string", "Bounce simple source exposes source helper id", source_only_detail)
+            assertLine(source_only and source_only.trigger_payload_slot_id == nil, "Bounce simple source has no Trigger payload")
+            assertLine(source_only and source_only.trigger_payload_helper_engine_id == nil and source_only.payload_helper_engine_id == nil, "Bounce simple source has no payload helper")
+            assertLine(source_only and tonumber(source_only.payload_count) == 0 and source_only.payload_fanout_count == nil, "Bounce simple source has no payload fanout", source_only_detail)
+            assertLine(source_only and source_only.payload_chain_runtime == false and source_only.has_chain_payload == false, "Bounce simple source has no Chain payload")
+            assertLine(source_only and source_only.bounce_probe_binding_registered == false, "Bounce simple source dry-run does not register a post-bounce binding")
 
-            requestProbe("bounce_chain_payload_dry_run", function(chain_dry)
-                assertLine(chain_dry and chain_dry.ok == true, "Bounce Trigger Chain payload dry-run qualifies", chain_dry and chain_dry.error)
-                assertLine(chain_dry and chain_dry.payload_chain_runtime == true, "Bounce Trigger Chain payload uses Chain runtime")
-                assertLine(chain_dry and chain_dry.payload_detonation_mode == "bounce_chain_runtime", "Bounce Trigger Chain payload does not detonate as simple payload")
-                assertLine(chain_dry and chain_dry.chain_shape == "trigger_payload_chain", "Bounce Trigger Chain payload keeps Trigger Chain shape", chain_dry and tostring(chain_dry.chain_shape))
-                assertLine(chain_dry and tonumber(chain_dry.chain_max_hops) == 3, "Bounce Trigger Chain payload reports three Chain hops")
-                assertLine(chain_dry and chain_dry.payload_projectile_launches == 0, "Bounce Trigger Chain payload launches no payload before a bounce hit")
+            requestProbe("bounce_dry_run", function(dry)
+                assertLine(dry and dry.ok == true, "Bounce dry-run qualifies", dry and dry.error)
+                assertLine(dry and tonumber(dry.bounce_max) == 3, "Bounce dry-run reports three bounces")
+                assertLine(dry and dry.bounce_detonate_on_actor_hit == false, "Bounce dry-run bounces actors")
+                assertLine(type(dry and dry.trigger_payload_slot_id) == "string", "Bounce dry-run keeps Trigger payload")
+                assertLine(dry and dry.payload_projectile_launches == 0, "Bounce dry-run predicts no Trigger payload projectile")
+                assertLine(dry and dry.payload_detonation_mode == "bounce_detonate_at_pos", "Bounce dry-run predicts at-position Trigger payload detonation")
 
-                requestProbe("bounce_trigger_multicast_dry_run", function(multicast_dry)
-                    assertLine(multicast_dry and multicast_dry.ok == true, "Bounce Trigger payload Multicast dry-run qualifies", multicast_dry and multicast_dry.error)
-                    assertLine(multicast_dry and multicast_dry.payload_multicast == true, "Bounce Trigger payload Multicast reports payload fanout")
-                    assertLine(multicast_dry and multicast_dry.payload_pattern == false, "Bounce Trigger payload Multicast is not a pattern")
-                    assertLine(multicast_dry and tonumber(multicast_dry.trigger_payload_count) == 3, "Bounce Trigger payload Multicast plans three payloads")
-                    assertLine(multicast_dry and type(multicast_dry.trigger_payload_slot_ids) == "table" and #multicast_dry.trigger_payload_slot_ids == 3, "Bounce Trigger payload Multicast exposes payload slot ids")
-                    assertLine(multicast_dry and multicast_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Multicast waits for bounce-event fanout")
+                requestProbe("bounce_trigger_simple_post_bounce", function(simple_post)
+                    local simple_user_data = simple_post and simple_post.bounce_trigger_payload_launch_user_data or nil
+                    assertLine(simple_post and simple_post.ok == true, "Bounce Trigger simple payload post-bounce detonates", simple_post and (simple_post.fallback_reason or simple_post.error))
+                    assertLine(simple_post and simple_post.bounce_probe_binding_registered == true, "Bounce Trigger simple payload post-bounce uses synthetic binding")
+                    assertLine(simple_post and simple_post.post_bounce_result and simple_post.post_bounce_result.ok == true, "Bounce Trigger simple payload post-bounce route succeeds")
+                    assertLine(simple_post and simple_post.bounce_duplicate_suppressed == true, "Bounce Trigger simple payload duplicate bounce suppresses")
+                    assertLine(simple_post and simple_post.bounce_trigger_route == "bounce", "Bounce Trigger simple payload uses bounce event route")
+                    assertLine(simple_post and tonumber(simple_post.bounce_trigger_payload_count) == 1, "Bounce Trigger simple payload routes one payload")
+                    assertLine(simple_post and tonumber(simple_post.bounce_trigger_payload_launch_count) == 1, "Bounce Trigger simple payload detonates once")
+                    assertLine(type(simple_user_data) == "table" and simple_user_data.branch_kind == "bounce_trigger_payload" and simple_user_data.trigger_route == "bounce", "Bounce Trigger simple payload userData marks bounce route")
 
-                    requestProbe("bounce_trigger_burst_dry_run", function(burst_dry)
-                        assertLine(burst_dry and burst_dry.ok == true, "Bounce Trigger payload Burst dry-run qualifies", burst_dry and burst_dry.error)
-                        assertLine(burst_dry and burst_dry.payload_multicast == true and burst_dry.payload_pattern == true, "Bounce Trigger payload Burst reports pattern fanout")
-                        assertLine(burst_dry and burst_dry.payload_pattern_kind == "Burst", "Bounce Trigger payload Burst keeps pattern kind", burst_dry and tostring(burst_dry.payload_pattern_kind))
-                        assertLine(burst_dry and tonumber(burst_dry.trigger_payload_count) == 5, "Bounce Trigger payload Burst plans five payloads")
-                        assertLine(burst_dry and burst_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Burst waits for bounce-event fanout")
+                    requestProbe("bounce_chain_payload_dry_run", function(chain_dry)
+                        assertLine(chain_dry and chain_dry.ok == true, "Bounce Trigger Chain payload dry-run qualifies", chain_dry and chain_dry.error)
+                        assertLine(chain_dry and chain_dry.payload_chain_runtime == true, "Bounce Trigger Chain payload uses Chain runtime")
+                        assertLine(chain_dry and chain_dry.payload_detonation_mode == "bounce_chain_runtime", "Bounce Trigger Chain payload does not detonate as simple payload")
+                        assertLine(chain_dry and chain_dry.chain_shape == "trigger_payload_chain", "Bounce Trigger Chain payload keeps Trigger Chain shape", chain_dry and tostring(chain_dry.chain_shape))
+                        assertLine(chain_dry and tonumber(chain_dry.chain_max_hops) == 3, "Bounce Trigger Chain payload reports three Chain hops")
+                        assertLine(chain_dry and chain_dry.payload_projectile_launches == 0, "Bounce Trigger Chain payload launches no payload before a bounce hit")
 
-                        requestProbe("bounce_trigger_spread_dry_run", function(spread_dry)
-                            assertLine(spread_dry and spread_dry.ok == true, "Bounce Trigger payload Spread dry-run qualifies", spread_dry and spread_dry.error)
-                            assertLine(spread_dry and spread_dry.payload_multicast == true and spread_dry.payload_pattern == true, "Bounce Trigger payload Spread reports pattern fanout")
-                            assertLine(spread_dry and spread_dry.payload_pattern_kind == "Spread", "Bounce Trigger payload Spread keeps pattern kind", spread_dry and tostring(spread_dry.payload_pattern_kind))
-                            assertLine(spread_dry and tonumber(spread_dry.trigger_payload_count) == 3, "Bounce Trigger payload Spread plans three payloads")
-                            assertLine(spread_dry and spread_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Spread waits for bounce-event fanout")
-                            requestProbe("bounce_trigger_multicast_post_bounce", function(post_bounce)
-                                local post_bounce_detail = post_bounce and string.format(
-                                    "count=%s launch_count=%s error=%s",
-                                    tostring(post_bounce.bounce_trigger_payload_count),
-                                    tostring(post_bounce.bounce_trigger_payload_launch_count),
-                                    tostring(post_bounce.error or post_bounce.fallback_reason)
-                                ) or nil
-                                assertLine(post_bounce and post_bounce.ok == true, "Bounce Trigger payload Multicast post-bounce launches payloads", post_bounce and (post_bounce.fallback_reason or post_bounce.error))
-                                assertLine(post_bounce and post_bounce.bounce_probe_binding_registered == true, "Bounce Trigger payload Multicast post-bounce uses synthetic binding")
-                                assertLine(post_bounce and post_bounce.post_bounce_result and post_bounce.post_bounce_result.ok == true, "Bounce Trigger payload Multicast post-bounce route succeeds")
-                                assertLine(post_bounce and post_bounce.bounce_duplicate_suppressed == true, "Bounce Trigger payload Multicast duplicate bounce suppresses")
-                                assertLine(post_bounce and tonumber(post_bounce.bounce_trigger_payload_count) == 3, "Bounce Trigger payload Multicast post-bounce routes three payloads", post_bounce_detail)
-                                assertLine(post_bounce and tonumber(post_bounce.bounce_trigger_payload_launch_count) == 3, "Bounce Trigger payload Multicast post-bounce launches three payload jobs", post_bounce_detail)
-                                runUnsupportedBounceChecks()
-                            end, launchAimPayload())
+                        requestProbe("bounce_trigger_multicast_dry_run", function(multicast_dry)
+                            assertLine(multicast_dry and multicast_dry.ok == true, "Bounce Trigger payload Multicast dry-run qualifies", multicast_dry and multicast_dry.error)
+                            assertLine(multicast_dry and multicast_dry.payload_multicast == true, "Bounce Trigger payload Multicast reports payload fanout")
+                            assertLine(multicast_dry and multicast_dry.payload_pattern == false, "Bounce Trigger payload Multicast is not a pattern")
+                            assertLine(multicast_dry and tonumber(multicast_dry.trigger_payload_count) == 3, "Bounce Trigger payload Multicast plans three payloads")
+                            assertLine(multicast_dry and type(multicast_dry.trigger_payload_slot_ids) == "table" and #multicast_dry.trigger_payload_slot_ids == 3, "Bounce Trigger payload Multicast exposes payload slot ids")
+                            assertLine(multicast_dry and multicast_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Multicast waits for bounce-event fanout")
+
+                            requestProbe("bounce_trigger_burst_dry_run", function(burst_dry)
+                                assertLine(burst_dry and burst_dry.ok == true, "Bounce Trigger payload Burst dry-run qualifies", burst_dry and burst_dry.error)
+                                assertLine(burst_dry and burst_dry.payload_multicast == true and burst_dry.payload_pattern == true, "Bounce Trigger payload Burst reports pattern fanout")
+                                assertLine(burst_dry and burst_dry.payload_pattern_kind == "Burst", "Bounce Trigger payload Burst keeps pattern kind", burst_dry and tostring(burst_dry.payload_pattern_kind))
+                                assertLine(burst_dry and tonumber(burst_dry.trigger_payload_count) == 5, "Bounce Trigger payload Burst plans five payloads")
+                                assertLine(burst_dry and burst_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Burst waits for bounce-event fanout")
+
+                                requestProbe("bounce_trigger_spread_dry_run", function(spread_dry)
+                                    assertLine(spread_dry and spread_dry.ok == true, "Bounce Trigger payload Spread dry-run qualifies", spread_dry and spread_dry.error)
+                                    assertLine(spread_dry and spread_dry.payload_multicast == true and spread_dry.payload_pattern == true, "Bounce Trigger payload Spread reports pattern fanout")
+                                    assertLine(spread_dry and spread_dry.payload_pattern_kind == "Spread", "Bounce Trigger payload Spread keeps pattern kind", spread_dry and tostring(spread_dry.payload_pattern_kind))
+                                    assertLine(spread_dry and tonumber(spread_dry.trigger_payload_count) == 3, "Bounce Trigger payload Spread plans three payloads")
+                                    assertLine(spread_dry and spread_dry.payload_detonation_mode == "bounce_trigger_payload_fanout", "Bounce Trigger payload Spread waits for bounce-event fanout")
+                                    requestProbe("bounce_trigger_multicast_post_bounce", function(post_bounce)
+                                        local post_bounce_detail = post_bounce and string.format(
+                                            "count=%s launch_count=%s error=%s",
+                                            tostring(post_bounce.bounce_trigger_payload_count),
+                                            tostring(post_bounce.bounce_trigger_payload_launch_count),
+                                            tostring(post_bounce.error or post_bounce.fallback_reason)
+                                        ) or nil
+                                        local first_payload_job = post_bounce and post_bounce.bounce_trigger_payload_jobs and post_bounce.bounce_trigger_payload_jobs[1] or nil
+                                        local fanout_user_data = post_bounce and post_bounce.bounce_trigger_payload_launch_user_data or nil
+                                        assertLine(post_bounce and post_bounce.ok == true, "Bounce Trigger payload Multicast post-bounce launches payloads", post_bounce and (post_bounce.fallback_reason or post_bounce.error))
+                                        assertLine(post_bounce and post_bounce.bounce_probe_binding_registered == true, "Bounce Trigger payload Multicast post-bounce uses synthetic binding")
+                                        assertLine(post_bounce and post_bounce.post_bounce_result and post_bounce.post_bounce_result.ok == true, "Bounce Trigger payload Multicast post-bounce route succeeds")
+                                        assertLine(post_bounce and post_bounce.bounce_duplicate_suppressed == true, "Bounce Trigger payload Multicast duplicate bounce suppresses")
+                                        assertLine(post_bounce and post_bounce.bounce_trigger_route == "bounce", "Bounce Trigger payload Multicast uses bounce event route")
+                                        assertLine(post_bounce and tonumber(post_bounce.bounce_trigger_payload_count) == 3, "Bounce Trigger payload Multicast post-bounce routes three payloads", post_bounce_detail)
+                                        assertLine(post_bounce and tonumber(post_bounce.bounce_trigger_payload_launch_count) == 3, "Bounce Trigger payload Multicast post-bounce launches three payload jobs", post_bounce_detail)
+                                        assertLine(type(first_payload_job) == "table" and first_payload_job.branch_kind == "bounce_trigger_payload_multicast" and first_payload_job.trigger_route == "bounce", "Bounce Trigger payload Multicast jobs carry bounce route metadata")
+                                        assertLine(type(fanout_user_data) == "table" and fanout_user_data.branch_kind == "bounce_trigger_payload_multicast" and fanout_user_data.trigger_route == "bounce", "Bounce Trigger payload Multicast userData marks bounce route")
+                                        runBounceGateRejectionChecks()
+                                    end, launchAimPayload())
+                                end)
+                            end)
                         end)
                     end)
-                end)
+                end, launchAimPayload())
             end)
         end)
     end)
+end
+
+local function runBounceSurfaceSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
+    if not dev.liveSimpleDispatchEnabled() then
+        log.info(string.format("SKIP Bounce surface smoke: enable %s", dev.liveSimpleDispatchSettingKey()))
+        return
+    end
+    if state.running then
+        log.warn("Bounce surface smoke skipped: smoke live simple dispatch already in progress")
+        return
+    end
+    if state.backend ~= "READY" then
+        log.warn("Bounce surface smoke skipped: backend is not READY")
+        return
+    end
+
+    state.running = true
+    log.info("Bounce surface diagnostic launching: Bounce 3 -> Fire Damage source only; aim at an actor, interior wall/static, exterior wall/static, or terrain")
+    requestProbe("bounce_source_only_launch", function(result)
+        local source_job = result and result.jobs and result.jobs[1] or nil
+        local detail = result and string.format(
+            "ok=%s error=%s projectile_id=%s projectile_id_source=%s bounce_ok=%s actor_toggle_ok=%s bounce_enabled=%s detonate_on_actor=%s",
+            tostring(result.ok),
+            tostring(result.error or result.fallback_reason),
+            tostring(result.projectile_id),
+            tostring(result.projectile_id_source),
+            tostring(result.post_launch_bounce_ok),
+            tostring(result.post_launch_detonate_on_actor_ok),
+            tostring(source_job and source_job.bounceEnabled),
+            tostring(source_job and source_job.detonateOnActorHit)
+        ) or nil
+        assertLine(result and result.ok == true, "Bounce simple source surface probe launches", detail)
+        assertLine(result and result.live_mode == "bounce", "Bounce simple source surface probe reports bounce mode", detail)
+        assertLine(result and result.has_trigger_payload == false and result.payload_detonation_mode == nil, "Bounce simple source surface probe is payload-free", detail)
+        assertLine(source_job and source_job.bounceEnabled == true and source_job.detonateOnActorHit == false, "Bounce simple source surface probe configures actor bounce", detail)
+        assertLine(result and result.post_launch_bounce_ok == true and result.post_launch_detonate_on_actor_ok == true, "Bounce simple source surface probe post-launch physics applied", detail)
+
+        if not (result and result.ok == true) then
+            state.running = false
+            return
+        end
+
+        log.info(string.format(
+            "SPELLFORGE_BOUNCE_SURFACE_WAITING_FOR_EVENT recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s wait_seconds=%s",
+            tostring(result.plan_recipe_id or result.recipe_id),
+            tostring(result.cast_id),
+            tostring(result.source_slot_id or result.slot_id),
+            tostring(result.source_helper_engine_id or result.helper_engine_id),
+            tostring(result.projectile_id),
+            tostring(BOUNCE_SURFACE_EVENT_WAIT_SECONDS)
+        ))
+
+        async:newUnsavableSimulationTimer(BOUNCE_SURFACE_EVENT_WAIT_SECONDS, function()
+            requestProbe("bounce_event_count_check", function(check)
+                if check and tonumber(check.event_count) and tonumber(check.event_count) > 0 then
+                    log.info(string.format(
+                        "SPELLFORGE_BOUNCE_SURFACE_PROBE_EVENT_COUNT projectile_id=%s event_count=%s context=%s",
+                        tostring(check.projectile_id),
+                        tostring(check.event_count),
+                        tostring(check.context)
+                    ))
+                end
+                state.running = false
+            end, {
+                projectile_id = result.projectile_id,
+                recipe_id = result.plan_recipe_id or result.recipe_id,
+                cast_id = result.cast_id,
+                source_slot_id = result.source_slot_id or result.slot_id,
+                helper_engine_id = result.source_helper_engine_id or result.helper_engine_id,
+                wait_seconds = BOUNCE_SURFACE_EVENT_WAIT_SECONDS,
+                context = "manual_bounce_surface_probe",
+            })
+        end)
+    end, launchAimPayload())
 end
 
 local function runBounceChainSmoke()
@@ -1987,21 +2150,139 @@ local function runBounceChainSmoke()
     state.running = true
     log.info("Bounce Chain live launching: Bounce 3 Fire Damage -> Trigger -> Chain 3 -> Frost Damage; aim at an actor near another actor")
 
-    requestProbe("bounce_chain_payload_launch", function(result)
-        local source_job = result and result.jobs and result.jobs[1] or nil
-        local user_data = source_job and source_job.launch_user_data or nil
-        assertLine(result and result.ok == true, "Bounce Trigger Chain source launches", result and (result.fallback_reason or result.error))
-        assertLine(result and result.live_mode == "bounce", "Bounce Trigger Chain source reports bounce mode", result and tostring(result.live_mode))
-        assertLine(result and result.payload_chain_runtime == true, "Bounce Trigger Chain live uses Chain payload runtime")
-        assertLine(result and result.payload_detonation_mode == "bounce_chain_runtime", "Bounce Trigger Chain live does not simple-detonate payload")
-        assertLine(result and result.chain_shape == "trigger_payload_chain", "Bounce Trigger Chain live keeps Trigger Chain shape", result and tostring(result.chain_shape))
-        assertLine(result and tonumber(result.chain_max_hops) == 3, "Bounce Trigger Chain live reports three Chain hops")
-        assertLine(type(user_data) == "table" and user_data.bounce_runtime == true and user_data.chain_runtime == true, "Bounce Trigger Chain source userData carries Bounce and Chain identity")
-        assertLine(type(user_data) == "table" and type(user_data.branch_scope) == "string" and type(user_data.branch_id) == "string", "Bounce Trigger Chain source userData carries branch identity")
-        if result and result.ok == true then
-            log.info("Bounce Chain live: bounce points near actors should log SPELLFORGE_LIVE_BOUNCE_CHAIN_SOURCE_TARGET_INFERRED plus Chain hop markers; empty bounce points stop with no_valid_chain_target")
+    requestProbe("bounce_chain_payload_no_target", function(no_target)
+        local chain_user_data = no_target and no_target.bounce_trigger_payload_launch_user_data or nil
+        assertLine(no_target and no_target.ok == true, "Bounce Trigger Chain no-target post-bounce probe succeeds", no_target and (no_target.fallback_reason or no_target.error))
+        assertLine(no_target and no_target.bounce_probe_binding_registered == true, "Bounce Trigger Chain no-target probe uses synthetic binding")
+        assertLine(no_target and no_target.post_bounce_result and no_target.post_bounce_result.ok == true, "Bounce Trigger Chain no-target route is non-fatal")
+        assertLine(no_target and no_target.bounce_duplicate_suppressed == true, "Bounce Trigger Chain duplicate bounce suppresses")
+        assertLine(no_target and no_target.bounce_trigger_route == "bounce_chain", "Bounce Trigger Chain uses bounce event route")
+        assertLine(no_target and no_target.bounce_chain_stop_reason == "no_valid_chain_target", "Bounce Trigger Chain no-target stops safely", no_target and tostring(no_target.bounce_chain_stop_reason))
+        assertLine(no_target and tonumber(no_target.bounce_trigger_payload_launch_count) == 0, "Bounce Trigger Chain no-target launches no chain payload")
+        assertLine(type(chain_user_data) == "table" and chain_user_data.branch_kind == "bounce_trigger_chain_payload" and chain_user_data.trigger_route == "bounce", "Bounce Trigger Chain userData marks bounce Chain payload")
+        if no_target and no_target.ok == true then
+            log.info(string.format(
+                "SPELLFORGE_H_SMOKE_BOUNCE_CHAIN_SAFE_STOP recipe_id=%s cast_id=%s bounce_id=%s chain_id=%s stop_reason=%s",
+                tostring(no_target.plan_recipe_id or no_target.recipe_id),
+                tostring(no_target.cast_id),
+                tostring(no_target.bounce_id),
+                tostring(no_target.chain_id),
+                tostring(no_target.bounce_chain_stop_reason)
+            ))
         end
-        state.running = false
+
+        requestProbe("bounce_chain_payload_mock_handoff", function(handoff)
+            local first_job = handoff and handoff.bounce_trigger_payload_jobs and handoff.bounce_trigger_payload_jobs[1] or nil
+            local handoff_user_data = handoff and handoff.bounce_trigger_payload_launch_user_data or nil
+            local detail = handoff and string.format(
+                "route=%s stop=%s provider=%s hop=%s current=%s selected=%s launch_count=%s error=%s",
+                tostring(handoff.bounce_trigger_route),
+                tostring(handoff.bounce_chain_stop_reason),
+                tostring(handoff.bounce_chain_provider),
+                tostring(handoff.bounce_chain_hop_index),
+                tostring(handoff.bounce_chain_current_hit_target_id),
+                tostring(handoff.bounce_chain_selected_target_id),
+                tostring(handoff.bounce_trigger_payload_launch_count),
+                tostring(handoff.error or handoff.fallback_reason)
+            ) or nil
+            assertLine(handoff and handoff.ok == true, "Bounce Trigger Chain mock handoff post-bounce probe succeeds", detail)
+            assertLine(handoff and handoff.bounce_probe_binding_registered == true, "Bounce Trigger Chain mock handoff uses synthetic binding", detail)
+            assertLine(handoff and handoff.post_bounce_result and handoff.post_bounce_result.ok == true, "Bounce Trigger Chain mock handoff route succeeds", detail)
+            assertLine(handoff and handoff.bounce_duplicate_suppressed == true, "Bounce Trigger Chain mock handoff duplicate bounce suppresses", detail)
+            assertLine(handoff and handoff.bounce_trigger_route == "bounce_chain", "Bounce Trigger Chain mock handoff uses bounce event route", detail)
+            assertLine(handoff and handoff.bounce_chain_provider == "mock", "Bounce Trigger Chain mock handoff provider returns candidates", detail)
+            assertLine(handoff and handoff.bounce_chain_current_hit_target_id == "A", "Bounce Trigger Chain mock handoff has inferred source target", detail)
+            assertLine(handoff and handoff.bounce_chain_selected_target_id == "B", "Bounce Trigger Chain mock handoff selects next target", detail)
+            assertLine(handoff and tonumber(handoff.bounce_chain_hop_index) == 1, "Bounce Trigger Chain mock handoff starts Chain hop one", detail)
+            assertLine(handoff and tonumber(handoff.bounce_trigger_payload_launch_count) == 1, "Bounce Trigger Chain mock handoff enqueues one Chain hop", detail)
+            assertLine(type(first_job) == "table" and first_job.chain_runtime == true and first_job.chain_role == "payload", "Bounce Trigger Chain mock handoff job carries Chain payload identity")
+            assertLine(type(first_job) == "table" and first_job.bounce_runtime == true and first_job.bounce_role == "chain_branch_scope", "Bounce Trigger Chain mock handoff job carries Bounce continuation identity")
+            assertLine(
+                type(first_job) == "table"
+                    and type(first_job.branch_scope) == "string"
+                    and string.find(first_job.branch_scope, "bounce:bounce:", 1, true) == nil
+                    and type(first_job.branch_id) == "string"
+                    and string.find(first_job.branch_id, "bounce:bounce:", 1, true) == nil,
+                "Bounce Trigger Chain mock handoff branch scope is compact",
+                type(first_job) == "table" and string.format("scope=%s id=%s", tostring(first_job.branch_scope), tostring(first_job.branch_id)) or detail
+            )
+            assertLine(type(handoff_user_data) == "table" and handoff_user_data.branch_kind == "bounce_trigger_chain_payload" and handoff_user_data.trigger_route == "bounce", "Bounce Trigger Chain mock handoff userData marks bounce Chain payload")
+            if handoff and handoff.ok == true then
+                log.info(string.format(
+                    "SPELLFORGE_H_SMOKE_BOUNCE_CHAIN_PASS recipe_id=%s cast_id=%s bounce_id=%s chain_id=%s chain_hop_index=%s selected_target_id=%s provider=%s",
+                    tostring(handoff.plan_recipe_id or handoff.recipe_id),
+                    tostring(handoff.cast_id),
+                    tostring(handoff.bounce_id),
+                    tostring(handoff.chain_id),
+                    tostring(handoff.bounce_chain_hop_index),
+                    tostring(handoff.bounce_chain_selected_target_id),
+                    tostring(handoff.bounce_chain_provider)
+                ))
+            end
+
+            requestProbe("bounce_chain_payload_launch", function(result)
+                local source_job = result and result.jobs and result.jobs[1] or nil
+                local user_data = source_job and source_job.launch_user_data or nil
+                assertLine(result and result.ok == true, "Bounce Trigger Chain source launches", result and (result.fallback_reason or result.error))
+                assertLine(result and result.live_mode == "bounce", "Bounce Trigger Chain source reports bounce mode", result and tostring(result.live_mode))
+                assertLine(result and result.payload_chain_runtime == true, "Bounce Trigger Chain live uses Chain payload runtime")
+                assertLine(result and result.payload_detonation_mode == "bounce_chain_runtime", "Bounce Trigger Chain live does not simple-detonate payload")
+                assertLine(result and result.chain_shape == "trigger_payload_chain", "Bounce Trigger Chain live keeps Trigger Chain shape", result and tostring(result.chain_shape))
+                assertLine(result and tonumber(result.chain_max_hops) == 3, "Bounce Trigger Chain live reports three Chain hops")
+                assertLine(type(user_data) == "table" and user_data.bounce_runtime == true and user_data.chain_runtime == true, "Bounce Trigger Chain source userData carries Bounce and Chain identity")
+                assertLine(type(user_data) == "table" and type(user_data.branch_scope) == "string" and type(user_data.branch_id) == "string", "Bounce Trigger Chain source userData carries branch identity")
+                if result and result.ok == true then
+                    log.info("Bounce Chain live: real bounce points near actors should log SPELLFORGE_LIVE_BOUNCE_CHAIN_SOURCE_TARGET_INFERRED plus Chain LOS/hop markers; empty bounce points stop safely")
+                    log.info(string.format(
+                        "SPELLFORGE_BOUNCE_SURFACE_WAITING_FOR_EVENT recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s wait_seconds=%s",
+                        tostring(result.plan_recipe_id or result.recipe_id),
+                        tostring(result.cast_id),
+                        tostring(result.source_slot_id or result.slot_id),
+                        tostring(result.source_helper_engine_id or result.helper_engine_id),
+                        tostring(result.projectile_id),
+                        tostring(BOUNCE_SURFACE_EVENT_WAIT_SECONDS)
+                    ))
+                end
+                if not (result and result.ok == true) then
+                    state.running = false
+                    return
+                end
+                async:newUnsavableSimulationTimer(BOUNCE_SURFACE_EVENT_WAIT_SECONDS, function()
+                    requestProbe("bounce_event_count_check", function(check)
+                        if check and tonumber(check.event_count) and tonumber(check.event_count) > 0 then
+                            log.info(string.format(
+                                "SPELLFORGE_H_SMOKE_BOUNCE_CHAIN_LIVE_EVENT_ROUTED recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s event_count=%s",
+                                tostring(result.plan_recipe_id or result.recipe_id),
+                                tostring(result.cast_id),
+                                tostring(result.source_slot_id or result.slot_id),
+                                tostring(result.source_helper_engine_id or result.helper_engine_id),
+                                tostring(result.projectile_id),
+                                tostring(check.event_count)
+                            ))
+                        else
+                            log.info(string.format(
+                                "SPELLFORGE_H_SMOKE_BOUNCE_CHAIN_LIVE_EVENT_TIMEOUT recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s wait_seconds=%s",
+                                tostring(result.plan_recipe_id or result.recipe_id),
+                                tostring(result.cast_id),
+                                tostring(result.source_slot_id or result.slot_id),
+                                tostring(result.source_helper_engine_id or result.helper_engine_id),
+                                tostring(result.projectile_id),
+                                tostring(BOUNCE_SURFACE_EVENT_WAIT_SECONDS)
+                            ))
+                        end
+                        state.running = false
+                    end, {
+                        projectile_id = result.projectile_id,
+                        recipe_id = result.plan_recipe_id or result.recipe_id,
+                        cast_id = result.cast_id,
+                        source_slot_id = result.source_slot_id or result.slot_id,
+                        helper_engine_id = result.source_helper_engine_id or result.helper_engine_id,
+                        wait_seconds = BOUNCE_SURFACE_EVENT_WAIT_SECONDS,
+                        context = "manual_bounce_chain_surface_probe",
+                    })
+                end)
+            end, launchAimPayload())
+        end, deterministicBounceChainPayload())
     end, launchAimPayload())
 end
 
@@ -3475,6 +3756,10 @@ local function onKeyPress(key)
         runBounceChainSmoke()
         return false
     end
+    if symbol == "j" or key.code == input.KEY.J then
+        runBounceSurfaceSmoke()
+        return false
+    end
     return true
 end
 
@@ -3495,7 +3780,7 @@ return {
                 requestBackend()
             elseif state.backend == "READY" and not state.ready_logged then
                 state.ready_logged = true
-                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ and Chain+Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0 plus Trigger payload fanout dry-runs, or H for Bounce Trigger Chain")
+                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ and Chain+Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0 hardening plus Trigger payload fanout post-bounce probes, H for Bounce Trigger Chain no-target/mock/live probes, or J for manual Bounce surface diagnostics")
             end
         end,
         onKeyPress = onKeyPress,

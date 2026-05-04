@@ -446,6 +446,11 @@ local function compactJob(job_id)
         branch_kind = job and (job.branch_kind or (payload and payload.branch_kind)) or nil,
         branch_index = job and (job.branch_index or (payload and payload.branch_index)) or nil,
         branch_count = job and (job.branch_count or (payload and payload.branch_count)) or nil,
+        bounce_runtime = job and ((job.bounce_runtime or (payload and payload.bounce_runtime)) == true) or false,
+        bounce_role = job and (job.bounce_role or (payload and payload.bounce_role)) or nil,
+        bounce_id = job and (job.bounce_id or (payload and payload.bounce_id)) or nil,
+        bounce_index = job and (job.bounce_index or (payload and payload.bounce_index)) or nil,
+        bounce_final = job and ((job.bounce_final or (payload and payload.bounce_final)) == true) or false,
         chain_continuation_group_id = job and (job.chain_continuation_group_id or (payload and payload.chain_continuation_group_id)) or nil,
         current_hit_target_id = job and (job.current_hit_target_id or (payload and payload.current_hit_target_id)) or nil,
         selected_target_id = job and (job.selected_target_id or (payload and payload.selected_target_id)) or nil,
@@ -912,9 +917,16 @@ end
 local function routeContinuationScope(route)
     local user_data = route and route.user_data or nil
     if user_data and user_data.bounce_runtime == true and user_data.bounce_index ~= nil then
+        if type(user_data.branch_scope) == "string" and user_data.branch_scope ~= "" then
+            return user_data.branch_scope
+        end
+        local bounce_id = tostring(user_data.bounce_id or "no-bounce")
+        if string.sub(bounce_id, 1, 7) ~= "bounce:" then
+            bounce_id = "bounce:" .. bounce_id
+        end
         return string.format(
-            "bounce:%s:%s",
-            tostring(user_data.bounce_id or "no-bounce"),
+            "%s:b%s",
+            bounce_id,
             tostring(user_data.bounce_index)
         )
     end

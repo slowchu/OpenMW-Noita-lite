@@ -82,7 +82,7 @@ local FEATURE_DEFS = {
         category = "payload",
         status = "feature_gated",
         gates = { FLAG_LIVE_2_2C, FLAG_PAYLOAD_MULTICAST },
-        summary = "Direct Trigger/Timer payload Multicast groups.",
+        summary = "Direct Trigger/Timer payload Multicast groups, including Bounce-owned Trigger payload fanout.",
     },
     {
         id = "payload_pattern",
@@ -90,7 +90,7 @@ local FEATURE_DEFS = {
         category = "payload",
         status = "feature_gated",
         gates = { FLAG_LIVE_2_2C, FLAG_PAYLOAD_MULTICAST, FLAG_PAYLOAD_PATTERN },
-        summary = "Direct Trigger/Timer payload Multicast plus Spread/Burst groups.",
+        summary = "Direct Trigger/Timer payload Multicast plus Spread/Burst groups, including Bounce-owned Trigger payload patterns.",
     },
     {
         id = "nested_trigger_timer",
@@ -146,7 +146,7 @@ local FEATURE_DEFS = {
         category = "targeting",
         status = "feature_gated_narrow",
         gates = { FLAG_LIVE_2_2C, FLAG_BOUNCE },
-        summary = "Source/Trigger Bounce v0, Trigger payload fanout, and the narrow Trigger->Chain payload bridge.",
+        summary = "Bounce v0 source projectiles, Trigger payload fanout, and the narrow Trigger->Chain payload bridge.",
     },
     {
         id = "homing",
@@ -236,6 +236,13 @@ local function hasOpcode(ops, opcode)
     return false
 end
 
+local function prefixFeatureForOpcode(opcode, depth)
+    if depth > 0 and (opcode == "Multicast" or opcode == "Spread" or opcode == "Burst") then
+        return nil
+    end
+    return OPCODE_TO_FEATURE[opcode]
+end
+
 local function firstPostfixOpcode(group)
     for _, op in ipairs(group.postfix_ops or {}) do
         if op.opcode == "Trigger" or op.opcode == "Timer" then
@@ -243,6 +250,24 @@ local function firstPostfixOpcode(group)
         end
     end
     return nil
+end
+
+local function groupsHavePrefixOpcode(groups, opcode)
+    for _, group in ipairs(groups or {}) do
+        if hasOpcode(group.prefix_ops, opcode) then
+            return true
+        end
+    end
+    return false
+end
+
+local function groupsHavePostfixOpcode(groups, opcode)
+    for _, group in ipairs(groups or {}) do
+        if hasOpcode(group.postfix_ops, opcode) then
+            return true
+        end
+    end
+    return false
 end
 
 local function scanGroups(groups, summary, depth, payload_stack)
@@ -271,7 +296,7 @@ local function scanGroups(groups, summary, depth, payload_stack)
         end
 
         for _, op in ipairs(prefix) do
-            addFeature(summary, OPCODE_TO_FEATURE[op.opcode], depth)
+            addFeature(summary, prefixFeatureForOpcode(op.opcode, depth), depth)
         end
         for _, op in ipairs(postfix) do
             addFeature(summary, OPCODE_TO_FEATURE[op.opcode], depth)
@@ -292,6 +317,32 @@ local function scanGroups(groups, summary, depth, payload_stack)
         end
         if depth >= 2 and (has_multicast or has_pattern) then
             addFeature(summary, "nested_final_fanout", depth)
+        end
+        if has_bounce then
+            addSet(summary.combos, "bounce_source")
+            if has_trigger and has_payload_effects then
+                addSet(summary.combos, "bounce_trigger_payload")
+                if groupsHavePrefixOpcode(payload_groups, "Chain") then
+                    addSet(summary.combos, "bounce_trigger_chain")
+                    if groupsHavePrefixOpcode(payload_groups, "Multicast")
+                        or groupsHavePrefixOpcode(payload_groups, "Spread")
+                        or groupsHavePrefixOpcode(payload_groups, "Burst") then
+                        addSet(summary.deferred_reasons, "bounce_fanout_deferred")
+                    end
+                    if groupsHavePrefixOpcode(payload_groups, "Speed+") or groupsHavePrefixOpcode(payload_groups, "Size+") then
+                        addSet(summary.deferred_reasons, "bounce_chain_modifier_deferred")
+                    end
+                end
+                if groupsHavePrefixOpcode(payload_groups, "Multicast") then
+                    addSet(summary.combos, "bounce_trigger_payload_multicast")
+                end
+                if groupsHavePrefixOpcode(payload_groups, "Spread") or groupsHavePrefixOpcode(payload_groups, "Burst") then
+                    addSet(summary.combos, "bounce_trigger_payload_pattern")
+                end
+                if groupsHavePostfixOpcode(payload_groups, "Trigger") or groupsHavePostfixOpcode(payload_groups, "Timer") then
+                    addSet(summary.deferred_reasons, "nested_payload_runtime_deferred")
+                end
+            end
         end
 
         if has_chain and has_pattern then
@@ -331,10 +382,12 @@ local function scanGroups(groups, summary, depth, payload_stack)
         if has_bounce and (has_speed or has_size) then
             addSet(summary.deferred_reasons, "bounce_modifier_deferred")
         end
+        if has_bounce and has_homing then
+            addSet(summary.deferred_reasons, "bounce_homing_deferred")
+        end
 
         if has_homing and (
             has_chain
-            or has_bounce
             or has_multicast
             or has_pattern
             or has_speed
@@ -389,6 +442,10 @@ local function buildSummary(plan)
     summary.contexts.primary.simple_projectile = true
 
     scanGroups(plan and plan.groups or {}, summary, 0, {})
+
+    if summary.active.bounce and summary.active.chain and not summary.combos.bounce_trigger_chain then
+        addSet(summary.deferred_reasons, "bounce_chain_deferred")
+    end
 
     if summary.max_payload_depth > limits.MAX_NESTED_PAYLOAD_DEPTH then
         addSet(summary.deferred_reasons, "nested_payload_depth_cap_deferred")

@@ -86,6 +86,15 @@ local BOUNCE_TRIGGER_CHAIN_FROST_TARGET = {
     { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
 }
 
+local BOUNCE_TRIGGER_NESTED_TRIGGER_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "shockdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
 local BOUNCE_TRIGGER_MULTICAST_FROST_TARGET = {
     { id = "spellforge_bounce", params = { bounces = 3 } },
     { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
@@ -151,6 +160,12 @@ local BOUNCE_SIZE_PLUS_TARGET = {
     { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
 
+local BOUNCE_HOMING_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "spellforge_homing" },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
 local function applyBounceProbeMode(mode, opts)
     if mode == "bounce_disabled" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
@@ -159,26 +174,57 @@ local function applyBounceProbeMode(mode, opts)
     elseif mode == "bounce_source_only_dry_run" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_FIRE_TARGET }
         opts.force_bounce_enabled = true
+    elseif mode == "bounce_source_only_launch" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_FIRE_TARGET }
+        opts.force_bounce_enabled = true
+        opts.dry_run = false
     elseif mode == "bounce_dry_run" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
+    elseif mode == "bounce_trigger_simple_post_bounce" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.register_bounce_probe_binding = true
     elseif mode == "bounce_launch" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.dry_run = false
+    elseif mode == "bounce_chain_payload_disabled" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_chain_runtime_disabled = true
     elseif mode == "bounce_chain_payload_dry_run" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_chain_runtime_enabled = true
+    elseif mode == "bounce_chain_payload_no_target" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_chain_runtime_enabled = true
+        opts.register_bounce_probe_binding = true
+    elseif mode == "bounce_chain_payload_mock_handoff" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_chain_runtime_enabled = true
+        opts.register_bounce_probe_binding = true
     elseif mode == "bounce_chain_payload_launch" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_chain_runtime_enabled = true
         opts.dry_run = false
+    elseif mode == "bounce_trigger_multicast_disabled" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_disabled = true
     elseif mode == "bounce_trigger_multicast_dry_run" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
         opts.force_bounce_enabled = true
@@ -190,6 +236,12 @@ local function applyBounceProbeMode(mode, opts)
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.register_bounce_probe_binding = true
+    elseif mode == "bounce_trigger_pattern_disabled" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.force_payload_pattern_disabled = true
     elseif mode == "bounce_trigger_burst_dry_run" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
         opts.force_bounce_enabled = true
@@ -215,12 +267,20 @@ local function applyBounceProbeMode(mode, opts)
     elseif mode == "bounce_chain_deferred" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_CHAIN_TARGET }
         opts.force_bounce_enabled = true
+    elseif mode == "bounce_nested_payload_deferred" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_NESTED_TRIGGER_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
     elseif mode == "bounce_speed_plus_deferred" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_SPEED_PLUS_TARGET }
         opts.force_bounce_enabled = true
     elseif mode == "bounce_size_plus_deferred" then
         opts._spellforge_probe_root = { real_effects = BOUNCE_SIZE_PLUS_TARGET }
         opts.force_bounce_enabled = true
+    elseif mode == "bounce_homing_deferred" then
+        opts._spellforge_probe_root = { real_effects = BOUNCE_HOMING_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_homing_enabled = true
     else
         return false
     end
@@ -1340,6 +1400,22 @@ local function chainLiveCandidates(case_name)
         end
         return candidates
     end
+end
+
+local function bounceChainMockSourceTarget()
+    return {
+        id = "A",
+        object = "A",
+        position = { x = 0, y = 0, z = 0 },
+        cell = "chain-test-cell",
+        is_actor = true,
+        is_alive = true,
+        is_valid = true,
+    }
+end
+
+local function bounceChainMockCandidates()
+    return chainHopCandidates("hop_bounce")
 end
 
 local function chainTargetingProbe(payload)
@@ -5147,8 +5223,8 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         }, "live_trigger_disabled_rejections")
     end
     if bounce_plan.has_chain_payload == true
-        and options.force_chain_runtime_enabled ~= true
-        and not dev.liveChainRuntimeEnabled() then
+        and (options.force_chain_runtime_disabled == true
+            or (options.force_chain_runtime_enabled ~= true and not dev.liveChainRuntimeEnabled())) then
         return bounceRejected("bounce_chain_payload_disabled", {
             plan_recipe_id = compiled.recipe_id,
             source_slot_id = bounce_plan.source_slot_id,
@@ -5237,6 +5313,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         chain_max_hops = bounce_plan.chain_max_hops,
         chain_targeting_mode = "no_immediate_repeat",
         chain_candidate_provider = options.chain_candidate_provider or options.candidate_provider,
+        chain_source_target = options.chain_source_target,
         candidate_cap = options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
         scan_radius = options.chain_scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
         max_chain_ticks = options.max_chain_ticks,
@@ -5305,6 +5382,19 @@ local function tryBounceDispatch(compiled, launch_payload, options)
                     payload_slot_id = bounce_plan.payload_slot_id,
                     cast_id = cast_id,
                 })
+            end
+            if chain_binding then
+                chain_binding.source_job_id = binding.source_job_id
+                if not live_chain.registerBinding(chain_binding) then
+                    return bounceRejected("bounce_chain_probe_binding_failed", {
+                        recipe_id = result_recipe_id,
+                        plan_recipe_id = compiled.recipe_id,
+                        source_slot_id = bounce_plan.source_slot_id,
+                        payload_slot_id = bounce_plan.payload_slot_id,
+                        chain_id = chain_id,
+                        cast_id = cast_id,
+                    }, "live_bounce_chain_reject")
+                end
             end
 
             local source_payload = source_job.payload or {}
@@ -5375,24 +5465,31 @@ local function tryBounceDispatch(compiled, launch_payload, options)
             plan_recipe_id = compiled.recipe_id,
             slot_id = bounce_plan.source_slot_id,
             helper_engine_id = bounce_plan.source_helper_engine_id,
+            source_slot_id = bounce_plan.source_slot_id,
+            source_helper_engine_id = bounce_plan.source_helper_engine_id,
             slot_ids = { bounce_plan.source_slot_id },
             helper_engine_ids = { bounce_plan.source_helper_engine_id },
             bounce_id = bounce_id,
+            bounce_mode = bounce_plan.has_trigger_payload == true and payload_detonation_mode or "source",
             bounce_max = bounce_plan.bounce_max,
             bounce_power = bounce_plan.bounce_power,
             bounce_detonate_on_actor_hit = false,
-            bounce_trigger_payload_slot_id = bounce_plan.payload_slot_id,
-            trigger_payload_slot_id = bounce_plan.payload_slot_id,
-            trigger_payload_helper_engine_id = bounce_plan.payload_helper_engine_id,
-            trigger_payload_slot_ids = bounce_plan.payload_slot_ids,
-            trigger_payload_helper_engine_ids = bounce_plan.payload_helper_engine_ids,
-            trigger_payload_count = bounce_plan.payload_count,
+            has_trigger_payload = bounce_plan.has_trigger_payload == true,
+            bounce_trigger_payload_slot_id = bounce_plan.has_trigger_payload == true and bounce_plan.payload_slot_id or nil,
+            trigger_payload_slot_id = bounce_plan.has_trigger_payload == true and bounce_plan.payload_slot_id or nil,
+            trigger_payload_helper_engine_id = bounce_plan.has_trigger_payload == true and bounce_plan.payload_helper_engine_id or nil,
+            trigger_payload_slot_ids = bounce_plan.has_trigger_payload == true and bounce_plan.payload_slot_ids or nil,
+            trigger_payload_helper_engine_ids = bounce_plan.has_trigger_payload == true and bounce_plan.payload_helper_engine_ids or nil,
+            trigger_payload_count = bounce_plan.has_trigger_payload == true and bounce_plan.payload_count or nil,
+            payload_count = bounce_plan.payload_count or 0,
+            payload_helper_engine_id = bounce_plan.has_trigger_payload == true and bounce_plan.payload_helper_engine_id or nil,
             payload_multicast = bounce_plan.payload_multicast == true,
             payload_pattern = bounce_plan.payload_pattern == true,
             payload_pattern_kind = bounce_plan.payload_pattern_kind,
             payload_projectile_launches = 0,
             payload_detonation_mode = payload_detonation_mode,
             payload_chain_runtime = bounce_plan.has_chain_payload == true,
+            has_chain_payload = bounce_plan.has_chain_payload == true,
             chain_id = chain_id,
             chain_shape = bounce_plan.chain_shape,
             chain_requested_hops = bounce_plan.chain_requested_hops,
@@ -5407,7 +5504,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
             dispatch_count = 1,
             source_dispatch_count = 1,
             fanout_count = 1,
-            payload_fanout_count = bounce_plan.payload_count,
+            payload_fanout_count = bounce_plan.has_trigger_payload == true and bounce_plan.payload_count or nil,
             simple_note = "bounce_v0",
             live_mode = "bounce",
             cast_id = cast_id,
@@ -5452,6 +5549,24 @@ local function tryBounceDispatch(compiled, launch_payload, options)
     if summary.job_status == "queued" then
         orchestrator.cancel(enqueue.job_id)
     end
+    log.info(string.format(
+        "SPELLFORGE_BOUNCE_SOURCE_LAUNCH_CONFIG recipe_id=%s display_recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s projectile_id_source=%s bounceEnabled=%s bounceMax=%s bouncePower=%s detonateOnActorHit=%s post_launch_bounce_ok=%s post_launch_actor_toggle_ok=%s launch_accepted=%s job_status=%s",
+        tostring(compiled.recipe_id),
+        tostring(result_recipe_id),
+        tostring(cast_id),
+        tostring(bounce_plan.source_slot_id),
+        tostring(bounce_plan.source_helper_engine_id),
+        tostring(summary.projectile_id),
+        tostring(summary.projectile_id_source),
+        tostring(summary.bounceEnabled == true),
+        tostring(summary.bounceMax),
+        tostring(summary.bouncePower),
+        tostring(summary.detonateOnActorHit),
+        tostring(summary.post_launch_bounce_ok == true),
+        tostring(summary.post_launch_detonate_on_actor_ok == true),
+        tostring(summary.launch_accepted == true),
+        tostring(summary.job_status)
+    ))
     if summary.job_status ~= "complete" or summary.launch_accepted ~= true then
         runtime_stats.inc("live_2_2c_dispatch_failed")
         return bridgeError(summary.error or "bounce source launch job did not complete", {
@@ -5506,6 +5621,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         post_launch_detonate_on_actor_ok = summary.post_launch_detonate_on_actor_ok == true,
         post_launch_bounce_error = summary.post_launch_bounce_error,
         post_launch_detonate_on_actor_error = summary.post_launch_detonate_on_actor_error,
+        has_trigger_payload = bounce_plan.has_trigger_payload == true,
         trigger_payload_slot_id = bounce_plan.payload_slot_id,
         trigger_payload_helper_engine_id = bounce_plan.payload_helper_engine_id,
         trigger_payload_slot_ids = bounce_plan.payload_slot_ids,
@@ -5517,6 +5633,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         payload_projectile_launches = 0,
         payload_detonation_mode = payload_detonation_mode,
         payload_chain_runtime = bounce_plan.has_chain_payload == true,
+        has_chain_payload = bounce_plan.has_chain_payload == true,
         chain_id = chain_id,
         chain_shape = bounce_plan.chain_shape,
         chain_requested_hops = bounce_plan.chain_requested_hops,
@@ -6315,7 +6432,48 @@ function live_simple_dispatch.onProbe(payload)
         source_recipe_id = "live-simple-probe",
     }
 
-    if mode == "adapter_capabilities" then
+    if mode == "bounce_event_count_check" then
+        local projectile_id = payload and payload.projectile_id or nil
+        local event_count = live_bounce.bounceEventCount(projectile_id)
+        local wait_seconds = tonumber(payload and payload.wait_seconds) or nil
+        local timed_out = event_count <= 0
+        if timed_out then
+            runtime_stats.inc("live_bounce_surface_timeout_no_event")
+            log.info(string.format(
+                "SPELLFORGE_BOUNCE_SURFACE_TIMEOUT_NO_EVENT recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s wait_seconds=%s context=%s",
+                tostring(payload and payload.recipe_id),
+                tostring(payload and payload.cast_id),
+                tostring(payload and payload.source_slot_id),
+                tostring(payload and payload.helper_engine_id),
+                tostring(projectile_id),
+                tostring(wait_seconds),
+                tostring(payload and payload.context)
+            ))
+        else
+            runtime_stats.inc("live_bounce_surface_event_observed")
+            log.info(string.format(
+                "SPELLFORGE_BOUNCE_SURFACE_EVENT_OBSERVED recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s event_count=%s context=%s",
+                tostring(payload and payload.recipe_id),
+                tostring(payload and payload.cast_id),
+                tostring(payload and payload.source_slot_id),
+                tostring(payload and payload.helper_engine_id),
+                tostring(projectile_id),
+                tostring(event_count),
+                tostring(payload and payload.context)
+            ))
+        end
+        send(sender, events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT, {
+            request_id = payload and payload.request_id,
+            ok = true,
+            mode = mode,
+            projectile_id = projectile_id,
+            event_count = event_count,
+            timed_out = timed_out,
+            wait_seconds = wait_seconds,
+            context = payload and payload.context,
+        })
+        return
+    elseif mode == "adapter_capabilities" then
         send(sender, events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT, adapterCapabilitiesProbe(payload))
         return
     elseif mode == "adapter_launch_fields" then
@@ -6669,6 +6827,19 @@ function live_simple_dispatch.onProbe(payload)
     elseif applyBounceProbeMode(mode, opts) then
         probe_root = opts._spellforge_probe_root
         opts._spellforge_probe_root = nil
+        if mode == "bounce_chain_payload_no_target" then
+            opts.chain_candidate_provider = function(hop_context)
+                return {
+                    { id = "bounce-chain-caster", object = hop_context and hop_context.caster or "bounce-chain-caster", position = { x = 0, y = 0, z = 0 }, cell = "bounce-chain-test-cell", is_actor = true, is_alive = true, is_valid = true },
+                    { id = "bounce-chain-invalid", object = "bounce-chain-invalid", position = { x = 25, y = 0, z = 0 }, cell = "bounce-chain-test-cell", is_actor = true, is_alive = true, is_valid = false },
+                    { id = "bounce-chain-dead", object = "bounce-chain-dead", position = { x = 30, y = 0, z = 0 }, cell = "bounce-chain-test-cell", is_actor = true, is_alive = false, is_valid = true },
+                    { id = "bounce-chain-far", object = "bounce-chain-far", position = { x = limits.MAX_CHAIN_SCAN_RADIUS + 1000, y = 0, z = 0 }, cell = "bounce-chain-test-cell", is_actor = true, is_alive = true, is_valid = false },
+                }
+            end
+        elseif mode == "bounce_chain_payload_mock_handoff" then
+            opts.chain_source_target = bounceChainMockSourceTarget()
+            opts.chain_candidate_provider = bounceChainMockCandidates()
+        end
     elseif mode == "trigger_payload_multicast_disabled" then
         probe_root = { real_effects = TRIGGER_PAYLOAD_MULTICAST_X3_TARGET }
         opts.force_trigger_enabled = true
@@ -7037,31 +7208,46 @@ function live_simple_dispatch.onProbe(payload)
             runtime_stats.inc("live_trigger_post_hit_smoke_observed")
         end
     end
-    if mode == "bounce_trigger_multicast_post_bounce"
+    if (mode == "bounce_trigger_simple_post_bounce"
+        or mode == "bounce_trigger_multicast_post_bounce"
+        or mode == "bounce_chain_payload_no_target"
+        or mode == "bounce_chain_payload_mock_handoff")
         and result.ok == true
         and result.pending_source_launch_job ~= true then
         local source_job = result.jobs and result.jobs[1] or nil
         local user_data = source_job and source_job.launch_user_data or nil
+        local bounce_hit_pos = payload and payload.start_pos
+        local bounce_hit_normal = payload and payload.direction
+        if mode == "bounce_chain_payload_mock_handoff" then
+            bounce_hit_pos = { x = 0, y = 0, z = 0 }
+            bounce_hit_normal = { x = 1, y = 0, z = 0 }
+        end
         local bounce_payload = {
             spellId = result.helper_engine_id,
             projectileId = result.projectile_id or ((payload and payload.request_id or "bounce-post-bounce") .. ":source-projectile"),
             userData = user_data,
             attacker = payload and (payload.actor or payload.sender),
-            hitPos = payload and payload.start_pos,
-            hitNormal = payload and payload.direction,
+            hitPos = bounce_hit_pos,
+            hitNormal = bounce_hit_normal,
             bounceCount = 1,
         }
         local bounce_opts = {
             force_enabled = true,
             force_trigger_enabled = true,
-            force_payload_multicast_enabled = true,
             simulate_update_ticks = true,
         }
+        if mode == "bounce_trigger_multicast_post_bounce" then
+            bounce_opts.force_payload_multicast_enabled = true
+        elseif mode == "bounce_chain_payload_no_target"
+            or mode == "bounce_chain_payload_mock_handoff" then
+            bounce_opts.force_chain_runtime_enabled = true
+        end
         local first = live_bounce.handleBouncePayload(bounce_payload, bounce_opts)
         local duplicate = live_bounce.handleBouncePayload(bounce_payload, bounce_opts)
         local first_payload = first and first.trigger_result or first
         result.post_bounce_result = first
         result.duplicate_bounce_result = duplicate
+        result.bounce_trigger_route = first_payload and first_payload.trigger_route or nil
         result.bounce_trigger_payload_job_id = first_payload and first_payload.job_id or nil
         result.bounce_trigger_payload_job_ids = first_payload and first_payload.job_ids or nil
         result.bounce_trigger_payload_jobs = first_payload and first_payload.jobs or nil
@@ -7071,6 +7257,12 @@ function live_simple_dispatch.onProbe(payload)
         result.bounce_trigger_payload_launch_count = first_payload and first_payload.launch_count or nil
         result.bounce_trigger_payload_projectile_ids = first_payload and first_payload.projectile_ids or nil
         result.bounce_trigger_payload_launch_user_data = first_payload and first_payload.launch_user_data or nil
+        result.bounce_chain_stop_reason = first_payload and first_payload.stop_reason or nil
+        result.bounce_chain_result = first_payload and first_payload.chain_result or nil
+        result.bounce_chain_provider = first_payload and first_payload.provider or nil
+        result.bounce_chain_hop_index = first_payload and first_payload.chain_hop_index or nil
+        result.bounce_chain_current_hit_target_id = first_payload and first_payload.current_hit_target_id or nil
+        result.bounce_chain_selected_target_id = first_payload and first_payload.selected_target_id or nil
         result.bounce_duplicate_suppressed = duplicate and duplicate.duplicate_suppressed == true
         if first and first.ok == true and duplicate and duplicate.duplicate_suppressed == true then
             runtime_stats.inc("live_bounce_trigger_payload_smoke_observed")
@@ -7127,7 +7319,7 @@ function live_simple_dispatch.onProbe(payload)
         result.expected_payload_count = expected_payload_count
     end
     local ok = false
-    if mode == "non_qualifying" or mode == "multicast_disabled" or mode == "spread_disabled" or mode == "burst_disabled" or mode == "trigger_disabled" or mode == "timer_disabled" or mode == "speed_plus_disabled" or mode == "size_plus_disabled" or mode == "homing_disabled" or mode == "bounce_disabled" or mode == "bounce_over_cap" or mode == "bounce_fanout_deferred" or mode == "bounce_timer_deferred" or mode == "bounce_chain_deferred" or mode == "bounce_speed_plus_deferred" or mode == "bounce_size_plus_deferred" or mode == "payload_multicast_disabled" or mode == "trigger_payload_multicast_disabled" or mode == "timer_payload_multicast_disabled" or mode == "trigger_payload_pattern_disabled" or mode == "timer_payload_pattern_disabled" or mode == "nested_trigger_timer_disabled" or mode == "nested_tt_depth_reject" or mode == "nested_tt_same_kind_reject" or mode == "nested_tt_fanout_reject" or mode == "nested_final_fanout_disabled" or mode == "nested_final_fanout_cap_reject" or mode == "chaos_multicast_over_cap" or mode == "chaos_nested_final_fanout_over_cap" or mode == "chaos_chain_multicast_still_deferred" then
+    if mode == "non_qualifying" or mode == "multicast_disabled" or mode == "spread_disabled" or mode == "burst_disabled" or mode == "trigger_disabled" or mode == "timer_disabled" or mode == "speed_plus_disabled" or mode == "size_plus_disabled" or mode == "homing_disabled" or mode == "bounce_disabled" or mode == "bounce_over_cap" or mode == "bounce_fanout_deferred" or mode == "bounce_timer_deferred" or mode == "bounce_chain_deferred" or mode == "bounce_chain_payload_disabled" or mode == "bounce_nested_payload_deferred" or mode == "bounce_speed_plus_deferred" or mode == "bounce_size_plus_deferred" or mode == "bounce_homing_deferred" or mode == "bounce_trigger_multicast_disabled" or mode == "bounce_trigger_pattern_disabled" or mode == "payload_multicast_disabled" or mode == "trigger_payload_multicast_disabled" or mode == "timer_payload_multicast_disabled" or mode == "trigger_payload_pattern_disabled" or mode == "timer_payload_pattern_disabled" or mode == "nested_trigger_timer_disabled" or mode == "nested_tt_depth_reject" or mode == "nested_tt_same_kind_reject" or mode == "nested_tt_fanout_reject" or mode == "nested_final_fanout_disabled" or mode == "nested_final_fanout_cap_reject" or mode == "chaos_multicast_over_cap" or mode == "chaos_nested_final_fanout_over_cap" or mode == "chaos_chain_multicast_still_deferred" then
         ok = result.ok == false and result.used_live_2_2c == false and type(result.fallback_reason) == "string"
     elseif mode == "speed_plus_dry_run" then
         ok = result.ok == true
@@ -7334,11 +7526,54 @@ function live_simple_dispatch.onProbe(payload)
             and result.used_live_2_2c == true
             and result.dry_run == true
             and result.live_mode == "bounce"
+            and result.bounce_mode == "source"
             and result.dispatch_count == 1
+            and result.source_dispatch_count == 1
             and tonumber(result.bounce_max) == 3
             and result.bounce_detonate_on_actor_hit == false
+            and type(result.source_slot_id) == "string"
+            and type(result.source_helper_engine_id) == "string"
+            and result.has_trigger_payload == false
             and result.trigger_payload_slot_id == nil
+            and result.trigger_payload_helper_engine_id == nil
+            and result.trigger_payload_count == nil
+            and result.payload_helper_engine_id == nil
+            and tonumber(result.payload_count) == 0
             and result.payload_fanout_count == nil
+            and result.payload_multicast == false
+            and result.payload_pattern == false
+            and result.payload_chain_runtime == false
+            and result.has_chain_payload == false
+            and result.payload_detonation_mode == nil
+            and result.bounce_probe_binding_registered == false
+    elseif mode == "bounce_source_only_launch" then
+        local job = result.jobs and result.jobs[1] or nil
+        local user_data = job and job.launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.source_dispatch_count == 1
+            and result.fanout_count == 1
+            and result.payload_projectile_launches == 0
+            and result.payload_detonation_mode == nil
+            and result.has_trigger_payload == false
+            and result.trigger_payload_slot_id == nil
+            and tonumber(result.bounce_max) == 3
+            and job
+            and job.job_status == "complete"
+            and job.launch_accepted == true
+            and job.bounceEnabled == true
+            and tonumber(job.bounceMax) == 3
+            and job.detonateOnActorHit == false
+            and job.post_launch_bounce_ok == true
+            and job.post_launch_detonate_on_actor_ok == true
+            and type(user_data) == "table"
+            and user_data.bounce_runtime == true
+            and user_data.bounce_role == "source"
+            and user_data.bounce_trigger_payload_slot_id == nil
+            and user_data.source_prefix_opcode == "Bounce"
+            and user_data.source_postfix_opcode == nil
     elseif mode == "bounce_dry_run" then
         ok = result.ok == true
             and result.used_live_2_2c == true
@@ -7351,6 +7586,24 @@ function live_simple_dispatch.onProbe(payload)
             and tonumber(result.trigger_payload_count) == 1
             and result.payload_projectile_launches == 0
             and result.payload_detonation_mode == "bounce_detonate_at_pos"
+    elseif mode == "bounce_trigger_simple_post_bounce" then
+        local user_data = result.bounce_trigger_payload_launch_user_data
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.bounce_probe_binding_registered == true
+            and result.post_bounce_result
+            and result.post_bounce_result.ok == true
+            and result.bounce_duplicate_suppressed == true
+            and result.bounce_trigger_route == "bounce"
+            and tonumber(result.bounce_trigger_payload_count) == 1
+            and tonumber(result.bounce_trigger_payload_launch_count) == 1
+            and type(user_data) == "table"
+            and user_data.trigger_route == "bounce"
+            and user_data.bounce_role == "trigger_payload_detonation"
+            and user_data.branch_kind == "bounce_trigger_payload"
     elseif mode == "bounce_chain_payload_dry_run" then
         ok = result.ok == true
             and result.used_live_2_2c == true
@@ -7367,6 +7620,65 @@ function live_simple_dispatch.onProbe(payload)
             and result.chain_shape == "trigger_payload_chain"
             and tonumber(result.chain_max_hops) == 3
             and result.targeting_mode == "no_immediate_repeat"
+    elseif mode == "bounce_chain_payload_no_target" then
+        local user_data = result.bounce_trigger_payload_launch_user_data
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.bounce_probe_binding_registered == true
+            and result.payload_chain_runtime == true
+            and result.post_bounce_result
+            and result.post_bounce_result.ok == true
+            and result.bounce_duplicate_suppressed == true
+            and result.bounce_trigger_route == "bounce_chain"
+            and result.bounce_chain_stop_reason == "no_valid_chain_target"
+            and tonumber(result.bounce_trigger_payload_launch_count) == 0
+            and type(user_data) == "table"
+            and user_data.trigger_route == "bounce"
+            and user_data.bounce_role == "trigger_chain_payload"
+            and user_data.branch_kind == "bounce_trigger_chain_payload"
+    elseif mode == "bounce_chain_payload_mock_handoff" then
+        local user_data = result.bounce_trigger_payload_launch_user_data
+        local chain_result = result.bounce_chain_result
+        local first_job = result.bounce_trigger_payload_jobs and result.bounce_trigger_payload_jobs[1] or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "bounce"
+            and result.dispatch_count == 1
+            and result.bounce_probe_binding_registered == true
+            and result.payload_chain_runtime == true
+            and result.post_bounce_result
+            and result.post_bounce_result.ok == true
+            and result.bounce_duplicate_suppressed == true
+            and result.bounce_trigger_route == "bounce_chain"
+            and result.bounce_chain_stop_reason == nil
+            and tonumber(result.bounce_trigger_payload_launch_count) == 1
+            and result.bounce_chain_provider == "mock"
+            and tonumber(result.bounce_chain_hop_index) == 1
+            and result.bounce_chain_current_hit_target_id == "A"
+            and result.bounce_chain_selected_target_id == "B"
+            and type(chain_result) == "table"
+            and chain_result.ok == true
+            and chain_result.provider == "mock"
+            and tonumber(chain_result.launch_count) == 1
+            and type(first_job) == "table"
+            and first_job.chain_runtime == true
+            and first_job.chain_role == "payload"
+            and first_job.branch_kind == "chain"
+            and first_job.bounce_runtime == true
+            and first_job.bounce_role == "chain_branch_scope"
+            and type(first_job.branch_scope) == "string"
+            and string.find(first_job.branch_scope, "bounce:bounce:", 1, true) == nil
+            and type(first_job.branch_id) == "string"
+            and string.find(first_job.branch_id, "bounce:bounce:", 1, true) == nil
+            and first_job.selected_target_id == "B"
+            and type(user_data) == "table"
+            and user_data.trigger_route == "bounce"
+            and user_data.bounce_role == "trigger_chain_payload"
+            and user_data.branch_kind == "bounce_trigger_chain_payload"
     elseif mode == "bounce_trigger_multicast_dry_run" then
         ok = result.ok == true
             and result.used_live_2_2c == true
@@ -7381,6 +7693,8 @@ function live_simple_dispatch.onProbe(payload)
             and result.payload_projectile_launches == 0
             and result.payload_detonation_mode == "bounce_trigger_payload_fanout"
     elseif mode == "bounce_trigger_multicast_post_bounce" then
+        local first_job = result.bounce_trigger_payload_jobs and result.bounce_trigger_payload_jobs[1] or nil
+        local user_data = result.bounce_trigger_payload_launch_user_data
         ok = result.ok == true
             and result.used_live_2_2c == true
             and result.dry_run == true
@@ -7392,10 +7706,19 @@ function live_simple_dispatch.onProbe(payload)
             and result.post_bounce_result
             and result.post_bounce_result.ok == true
             and result.bounce_duplicate_suppressed == true
+            and result.bounce_trigger_route == "bounce"
             and tonumber(result.bounce_trigger_payload_count) == 3
             and tonumber(result.bounce_trigger_payload_launch_count) == 3
             and type(result.bounce_trigger_payload_slot_ids) == "table"
             and #result.bounce_trigger_payload_slot_ids == 3
+            and type(first_job) == "table"
+            and first_job.trigger_route == "bounce"
+            and first_job.bounce_runtime == true
+            and first_job.branch_kind == "bounce_trigger_payload_multicast"
+            and type(user_data) == "table"
+            and user_data.trigger_route == "bounce"
+            and user_data.bounce_role == "trigger_payload_launch"
+            and user_data.branch_kind == "bounce_trigger_payload_multicast"
     elseif mode == "bounce_trigger_burst_dry_run" or mode == "bounce_trigger_spread_dry_run" then
         local expected_count = mode == "bounce_trigger_burst_dry_run" and 5 or 3
         local expected_kind = mode == "bounce_trigger_burst_dry_run" and "Burst" or "Spread"
