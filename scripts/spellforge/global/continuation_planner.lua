@@ -1,4 +1,5 @@
 local limits = require("scripts.spellforge.shared.limits")
+local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
 
 local continuation_planner = {}
 
@@ -317,7 +318,7 @@ local function success(plan, ir, event, source_entry, continuation, payload_entr
     return result
 end
 
-local function validatePayloadSet(entries, features, options)
+local function validatePayloadSet(plan, ir, entries, features, options)
     local max_fanout = tonumber(options.max_fanout) or limits.MAX_NESTED_PAYLOAD_FANOUT
     local max_projectiles = tonumber(options.max_projectiles) or limits.MAX_PROJECTILES_PER_CAST
     if #entries == 0 then
@@ -332,11 +333,23 @@ local function validatePayloadSet(entries, features, options)
     if features.pierce then
         return "pierce_recursion_deferred"
     end
-    if features.speed_plus and not features.chain then
-        return "payload_speed_plus_runtime_deferred"
-    end
-    if features.size_plus and not features.chain then
-        return "payload_size_plus_runtime_deferred"
+    if features.speed_plus or features.size_plus then
+        local policy_options = options
+        if features.chain then
+            policy_options = {}
+            for key, value in pairs(options or {}) do
+                policy_options[key] = value
+            end
+            policy_options.compatibility = "chain"
+            policy_options.require_chain_prefix = true
+            policy_options.allow_chain_multicast = chainMulticastEnabled(options)
+        end
+        for _, entry in ipairs(entries or {}) do
+            local policy = launch_modifier_policy.inspectPayloadEntry(plan, ir, entry, policy_options)
+            if policy.ok ~= true then
+                return policy.rejection_reason or "payload_modifier_combo_deferred"
+            end
+        end
     end
     if features.pattern and not features.multicast then
         return "payload_pattern_fanout_missing"
@@ -394,7 +407,7 @@ local function planPostfixEvent(plan, ir, event, kind, opts)
 
     local payload_entries = entriesForContinuation(ir, continuation)
     local features = payloadFeatures(payload_entries)
-    local payload_reason = validatePayloadSet(payload_entries, features, options)
+    local payload_reason = validatePayloadSet(plan, ir, payload_entries, features, options)
     if payload_reason then
         if payload_reason == "nested_payload_runtime_deferred"
             and options.allow_nested_trigger_timer == true
@@ -435,6 +448,43 @@ local function sourceHasOnlyBounce(entry)
     return bounce_count == 1 and #prefix == 1
 end
 
+local function sourceHasLaunchModifier(entry)
+    return hasOpcode(entry and entry.prefix_ops or nil, "Speed+")
+        or hasOpcode(entry and entry.prefix_ops or nil, "Size+")
+end
+
+local function sourceModifierPolicyOptions(options, source_kind)
+    local opts = {
+        policy_kind = "source",
+        apply_size_to_specs = false,
+        allow_bounce_source = source_kind == "bounce",
+        allow_pierce_source = source_kind == "pierce",
+        force_speed_plus_enabled = options and options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options and options.force_speed_plus_disabled,
+        speed_plus_enabled = options and options.speed_plus_enabled == true,
+        force_size_plus_enabled = options and options.force_size_plus_enabled,
+        force_size_plus_disabled = options and options.force_size_plus_disabled,
+        size_plus_enabled = options and options.size_plus_enabled == true,
+    }
+    return opts
+end
+
+local function validateSourceLaunchModifier(plan, ir, source_entry, options, source_kind)
+    if not sourceHasLaunchModifier(source_entry) then
+        return nil
+    end
+    local policy = launch_modifier_policy.inspectSourceEntry(
+        plan,
+        ir,
+        source_entry,
+        sourceModifierPolicyOptions(options, source_kind)
+    )
+    if policy.ok ~= true then
+        return policy.rejection_reason or "source_modifier_unsupported_prefix"
+    end
+    return nil
+end
+
 local function firstBounceContinuation(ir)
     local continuation = firstContinuation(ir, "Bounce")
     return continuation, continuation and entryBySlot(ir, continuation.source_slot_id) or nil
@@ -458,6 +508,10 @@ local function validateBounceSource(plan, ir, event, source_entry, bounce_contin
     if bounce_count ~= 1 then
         return "source_slot_not_bounce"
     end
+    local source_modifier_reason = validateSourceLaunchModifier(plan, ir, source_entry, options, "bounce")
+    if source_modifier_reason then
+        return source_modifier_reason
+    end
     if hasOpcode(source_entry.prefix_ops, "Chain") or hasDirectBounceChain(ir, source_entry.slot_id) then
         return "bounce_chain_deferred"
     end
@@ -469,10 +523,7 @@ local function validateBounceSource(plan, ir, event, source_entry, bounce_contin
         or hasOpcode(source_entry.prefix_ops, "Burst") then
         return "bounce_fanout_deferred"
     end
-    if hasOpcode(source_entry.prefix_ops, "Speed+") or hasOpcode(source_entry.prefix_ops, "Size+") then
-        return "bounce_modifier_deferred"
-    end
-    if not sourceHasOnlyBounce(source_entry) then
+    if not sourceHasLaunchModifier(source_entry) and not sourceHasOnlyBounce(source_entry) then
         return "bounce_prefix_combo_deferred"
     end
     if hasOpcode(source_entry.postfix_ops, "Timer") then
@@ -547,7 +598,7 @@ local function planBounceEvent(plan, ir, event, opts)
         })
     end
 
-    local payload_reason = validatePayloadSet(payload_entries, features, options)
+    local payload_reason = validatePayloadSet(plan, ir, payload_entries, features, options)
     if payload_reason then
         return reject(plan, ir, event, source_entry, trigger_continuation, payload_reason)
     end
@@ -591,6 +642,10 @@ local function validatePierceSource(plan, ir, event, source_entry, pierce_contin
     if pierce_count ~= 1 then
         return "source_slot_not_pierce"
     end
+    local source_modifier_reason = validateSourceLaunchModifier(plan, ir, source_entry, options, "pierce")
+    if source_modifier_reason then
+        return source_modifier_reason
+    end
     if hasOpcode(source_entry.prefix_ops, "Bounce") then
         return "pierce_bounce_deferred"
     end
@@ -605,10 +660,7 @@ local function validatePierceSource(plan, ir, event, source_entry, pierce_contin
         or hasOpcode(source_entry.prefix_ops, "Burst") then
         return "pierce_fanout_deferred"
     end
-    if hasOpcode(source_entry.prefix_ops, "Speed+") or hasOpcode(source_entry.prefix_ops, "Size+") then
-        return "pierce_modifier_deferred"
-    end
-    if not sourceHasOnlyPierce(source_entry) then
+    if not sourceHasLaunchModifier(source_entry) and not sourceHasOnlyPierce(source_entry) then
         return "pierce_modifier_deferred"
     end
     if hasOpcode(source_entry.postfix_ops, "Timer") then
@@ -693,7 +745,7 @@ local function planPierceEvent(plan, ir, event, opts)
         })
     end
 
-    local payload_reason = validatePayloadSet(payload_entries, features, options)
+    local payload_reason = validatePayloadSet(plan, ir, payload_entries, features, options)
     if payload_reason == "nested_payload_runtime_deferred" then
         payload_reason = "pierce_nested_payload_deferred"
     end
@@ -789,10 +841,6 @@ local function planChainEvent(plan, ir, event, opts)
     if first_entry.payload_depth and first_entry.payload_depth >= 2 then
         return reject(plan, ir, event, first_entry, chain_continuation, "chain_nested_payload_deferred")
     end
-    if hasOpcode(first_entry.prefix_ops, "Speed+") and hasOpcode(first_entry.prefix_ops, "Size+") then
-        return reject(plan, ir, event, first_entry, chain_continuation, "chain_modifier_combo_deferred")
-    end
-
     local source_entry = nil
     local chain_shape = nil
     if first_entry.parent_slot_id == nil then
@@ -820,6 +868,28 @@ local function planChainEvent(plan, ir, event, opts)
     end
     local features = payloadFeatures(payload_entries)
     features.chain = true
+    if features.speed_plus or features.size_plus then
+        for _, entry in ipairs(payload_entries or {}) do
+            local policy = launch_modifier_policy.inspectPayloadEntry(plan, ir, entry, {
+                compatibility = "chain",
+                require_chain_prefix = true,
+                allow_chain_multicast = chainMulticastEnabled(options),
+                force_chain_multicast_enabled = options.force_chain_multicast_enabled,
+                force_chain_multicast_disabled = options.force_chain_multicast_disabled,
+                chain_multicast_enabled = options.chain_multicast_enabled == true,
+                max_chain_multicast_fanout = options.max_chain_multicast_fanout,
+                force_speed_plus_enabled = options.force_speed_plus_enabled,
+                force_speed_plus_disabled = options.force_speed_plus_disabled,
+                speed_plus_enabled = options.speed_plus_enabled == true,
+                force_size_plus_enabled = options.force_size_plus_enabled,
+                force_size_plus_disabled = options.force_size_plus_disabled,
+                size_plus_enabled = options.size_plus_enabled == true,
+            })
+            if policy.ok ~= true then
+                return reject(plan, ir, event, source_entry, chain_continuation, policy.rejection_reason or "chain_payload_modifier_deferred")
+            end
+        end
+    end
     local jobs_per_hop = #payload_entries
     local max_jobs = tonumber(options.max_jobs) or limits.MAX_CHAIN_JOBS_PER_CAST
     if requested_hops * jobs_per_hop > max_jobs then

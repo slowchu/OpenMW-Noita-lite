@@ -246,6 +246,20 @@ local function countOpcode(ops, opcode)
     return count, first
 end
 
+local function sourceModifierPolicyAccepts(options, entry)
+    if not hasOps(entry and entry.prefix_ops) or #(entry.prefix_ops or {}) <= 1 then
+        return true, nil
+    end
+    local policy = options and options.source_modifier_policy or nil
+    if type(policy) ~= "table" or policy.ok ~= true then
+        return false, policy and policy.rejection_reason or "source_modifier_unsupported_prefix"
+    end
+    if policy.mutations and policy.mutations.source_modifier_kind ~= nil then
+        return true, nil
+    end
+    return false, "source_modifier_unsupported_prefix"
+end
+
 local function helperBySlotId(helpers)
     local by_slot = {}
     for _, helper in ipairs(helpers or {}) do
@@ -379,9 +393,6 @@ function live_bounce.selectV0Plan(plan, opts)
     if bounds.has_multicast or bounds.has_pattern then
         return rejectSelect("bounce_fanout_deferred", "live_bounce_fanout_reject")
     end
-    if bounds.has_speed_plus or bounds.has_size_plus then
-        return rejectSelect("bounce_modifier_deferred", "live_bounce_modifier_reject")
-    end
     if bounds.group_count ~= 1 then
         return rejectSelect("not_single_group")
     end
@@ -397,8 +408,9 @@ function live_bounce.selectV0Plan(plan, opts)
     if bounce_count ~= 1 then
         return rejectSelect("missing_bounce_op")
     end
-    if hasOps(group.prefix_ops) and #group.prefix_ops ~= 1 then
-        return rejectSelect("bounce_prefix_combo_deferred", "live_bounce_modifier_reject")
+    local group_prefix_ok, group_prefix_reason = sourceModifierPolicyAccepts(options, group)
+    if not group_prefix_ok then
+        return rejectSelect(group_prefix_reason or "source_modifier_unsupported_prefix", "live_bounce_modifier_reject")
     end
     if not postfixIsEmptyOrTrigger(group) then
         return rejectSelect("bounce_postfix_deferred", "live_bounce_trigger_timer_reject")
@@ -422,7 +434,11 @@ function live_bounce.selectV0Plan(plan, opts)
         return rejectSelect("source_slot_not_primary")
     end
     local slot_bounce_count, _ = countOpcode(source_slot.prefix_ops, "Bounce")
-    if slot_bounce_count ~= 1 or (hasOps(source_slot.prefix_ops) and #source_slot.prefix_ops ~= 1) then
+    local slot_prefix_ok, slot_prefix_reason = sourceModifierPolicyAccepts(options, source_slot)
+    if slot_bounce_count ~= 1 or not slot_prefix_ok then
+        if slot_bounce_count == 1 then
+            return rejectSelect(slot_prefix_reason or "source_modifier_unsupported_prefix", "live_bounce_modifier_reject")
+        end
         return rejectSelect("source_slot_not_bounce")
     end
     if not postfixIsEmptyOrTrigger(source_slot) then
@@ -438,7 +454,11 @@ function live_bounce.selectV0Plan(plan, opts)
         return rejectSelect("source_helper_not_primary")
     end
     local helper_bounce_count, _ = countOpcode(source_helper.prefix_ops, "Bounce")
-    if helper_bounce_count ~= 1 or (hasOps(source_helper.prefix_ops) and #source_helper.prefix_ops ~= 1) then
+    local helper_prefix_ok, helper_prefix_reason = sourceModifierPolicyAccepts(options, source_helper)
+    if helper_bounce_count ~= 1 or not helper_prefix_ok then
+        if helper_bounce_count == 1 then
+            return rejectSelect(helper_prefix_reason or "source_modifier_unsupported_prefix", "live_bounce_modifier_reject")
+        end
         return rejectSelect("source_helper_not_bounce")
     end
     if not postfixIsEmptyOrTrigger(source_helper) then
@@ -1246,6 +1266,7 @@ local function inferBounceChainSourceTarget(route, binding)
         radius = binding.scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
         max_radius = limits.MAX_CHAIN_SCAN_RADIUS,
         candidate_cap = binding.candidate_cap or limits.MAX_CHAIN_SCAN_CANDIDATES,
+        actor_scan_cap = binding.scan_actor_cap or limits.MAX_CHAIN_SCAN_ACTORS,
         max_vertical_delta = limits.BOUNCE_CHAIN_SOURCE_VERTICAL_DELTA or limits.MAX_CHAIN_VERTICAL_DELTA,
         vertical_reference = "aim",
     })

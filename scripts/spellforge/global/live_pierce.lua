@@ -42,6 +42,20 @@ local function hasOpcode(ops, opcode)
     return countOpcode(ops, opcode) > 0
 end
 
+local function sourceModifierPolicyAccepts(options, entry)
+    if type(entry and entry.prefix_ops) ~= "table" or #(entry.prefix_ops or {}) <= 1 then
+        return true, nil
+    end
+    local policy = options and options.source_modifier_policy or nil
+    if type(policy) ~= "table" or policy.ok ~= true then
+        return false, policy and policy.rejection_reason or "source_modifier_unsupported_prefix"
+    end
+    if policy.mutations and policy.mutations.source_modifier_kind ~= nil then
+        return true, nil
+    end
+    return false, "source_modifier_unsupported_prefix"
+end
+
 local function clampPierceCount(value)
     local n = tonumber(value)
     if n == nil or n ~= n or n == math.huge or n == -math.huge then
@@ -132,9 +146,6 @@ function live_pierce.selectV0Plan(plan, opts)
     if bounds.has_multicast or bounds.has_pattern then
         return rejectSelect("pierce_fanout_deferred", "live_pierce_deferred_reject")
     end
-    if bounds.has_speed_plus or bounds.has_size_plus then
-        return rejectSelect("pierce_modifier_deferred", "live_pierce_deferred_reject")
-    end
     if bounds.has_chain then
         local has_trigger_chain = false
         for _, slot in ipairs(plan.emission_slots or {}) do
@@ -159,8 +170,9 @@ function live_pierce.selectV0Plan(plan, opts)
     if pierce_count ~= 1 then
         return rejectSelect("missing_pierce_op")
     end
-    if #(group.prefix_ops or {}) ~= 1 then
-        return rejectSelect("pierce_modifier_deferred", "live_pierce_deferred_reject")
+    local group_prefix_ok, group_prefix_reason = sourceModifierPolicyAccepts(options, group)
+    if not group_prefix_ok then
+        return rejectSelect(group_prefix_reason or "source_modifier_unsupported_prefix", "live_pierce_deferred_reject")
     end
     if not postfixIsEmptyOrTrigger(group) then
         return rejectSelect("pierce_nested_payload_deferred", "live_pierce_deferred_reject")
@@ -178,7 +190,13 @@ function live_pierce.selectV0Plan(plan, opts)
     if not source_slot then
         return rejectSelect("missing_pierce_source_slot")
     end
-    if not postfixIsEmptyOrTrigger(source_slot) or countOpcode(source_slot.prefix_ops, "Pierce") ~= 1 then
+    local slot_prefix_ok, slot_prefix_reason = sourceModifierPolicyAccepts(options, source_slot)
+    if not postfixIsEmptyOrTrigger(source_slot)
+        or countOpcode(source_slot.prefix_ops, "Pierce") ~= 1
+        or not slot_prefix_ok then
+        if slot_prefix_ok == false then
+            return rejectSelect(slot_prefix_reason or "source_modifier_unsupported_prefix", "live_pierce_deferred_reject")
+        end
         return rejectSelect("source_slot_not_pierce")
     end
 
@@ -205,6 +223,12 @@ function live_pierce.selectV0Plan(plan, opts)
         allow_payload_multicast = options.allow_payload_multicast == true,
         allow_payload_pattern = options.allow_payload_pattern == true,
         allow_chain_multicast = options.allow_chain_multicast == true,
+        force_speed_plus_enabled = options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options.force_speed_plus_disabled,
+        speed_plus_enabled = options.speed_plus_enabled == true,
+        force_size_plus_enabled = options.force_size_plus_enabled,
+        force_size_plus_disabled = options.force_size_plus_disabled,
+        size_plus_enabled = options.size_plus_enabled == true,
         max_pierce_count = effective_cap,
         max_fanout = options.max_fanout,
         max_projectiles = options.max_projectiles,

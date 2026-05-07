@@ -11,8 +11,7 @@ local chain_target_provider = require("scripts.spellforge.global.chain_target_pr
 local chain_targeting = require("scripts.spellforge.global.chain_targeting")
 local helper_records = require("scripts.spellforge.global.helper_records")
 local ir_runtime_adapter = require("scripts.spellforge.global.ir_runtime_adapter")
-local live_size_plus = require("scripts.spellforge.global.live_size_plus")
-local live_speed_plus = require("scripts.spellforge.global.live_speed_plus")
+local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
 local runtime_hits = require("scripts.spellforge.global.runtime_hits")
 local runtime_stats = require("scripts.spellforge.global.runtime_stats")
@@ -121,54 +120,6 @@ local function chainMulticastEnabled(options)
         or dev.liveChainMulticastEnabled()
 end
 
-local function modifierEnabled(kind, options)
-    if kind == "speed_plus" then
-        if options.force_speed_plus_disabled == true then
-            return false
-        end
-        return options.force_speed_plus_enabled == true
-            or options.speed_plus_enabled == true
-            or dev.liveSpeedPlusEnabled()
-    elseif kind == "size_plus" then
-        if options.force_size_plus_disabled == true then
-            return false
-        end
-        return options.force_size_plus_enabled == true
-            or options.size_plus_enabled == true
-            or dev.liveSizePlusEnabled()
-    end
-    return true
-end
-
-local function copyModifierFields(target, mutation, kind)
-    if type(target) ~= "table" or type(mutation) ~= "table" then
-        return
-    end
-    target.payload_modifier_kind = kind
-    if kind == "speed_plus" then
-        target.speed = mutation.speed_plus_speed
-        target.maxSpeed = mutation.speed_plus_max_speed
-        target.speed_plus = true
-        target.speed_plus_mode = mutation.speed_plus_mode
-        target.speed_plus_value = mutation.speed_plus_value
-        target.speed_plus_base_speed = mutation.speed_plus_base_speed
-        target.speed_plus_multiplier = mutation.speed_plus_multiplier
-        target.speed_plus_speed = mutation.speed_plus_speed
-        target.speed_plus_max_speed = mutation.speed_plus_max_speed
-        target.speed_plus_field = mutation.speed_plus_field
-        target.speed_plus_capped = mutation.speed_plus_capped
-    elseif kind == "size_plus" then
-        target.size_plus = true
-        target.size_plus_mode = mutation.size_plus_mode
-        target.size_plus_value = mutation.size_plus_value
-        target.size_plus_multiplier = mutation.size_plus_multiplier
-        target.size_plus_field = mutation.size_plus_field
-        target.size_plus_capped = mutation.size_plus_capped
-        target.size_plus_base_area = mutation.size_plus_base_area
-        target.size_plus_area = mutation.size_plus_area
-    end
-end
-
 local function clonePayload(payload)
     local out = {}
     for key, value in pairs(payload or {}) do
@@ -198,6 +149,17 @@ local function irChainRuntimeEnabled(options)
 end
 
 local function irPlannerOptions(binding, options)
+    local modifier_kinds = {}
+    if binding and binding.payload_modifier_kind ~= nil then
+        modifier_kinds[#modifier_kinds + 1] = binding.payload_modifier_kind
+    end
+    if binding and (binding.has_speed_plus_payload == true or type(binding.speed_plus_mutation) == "table") then
+        modifier_kinds[#modifier_kinds + 1] = "speed_plus"
+    end
+    if binding and (binding.has_size_plus_payload == true or type(binding.size_plus_mutation) == "table") then
+        modifier_kinds[#modifier_kinds + 1] = "size_plus"
+    end
+    local gates = launch_modifier_policy.gateHintsForModifierKinds(modifier_kinds, options)
     return {
         allow_chain_multicast = binding and binding.has_multicast_payload == true
             or (options and options.allow_chain_multicast == true)
@@ -210,6 +172,12 @@ local function irPlannerOptions(binding, options)
         max_live_launches_per_tick = binding and binding.max_live_launches_per_tick
             or (options and options.max_live_launches_per_tick),
         chaos_budget_profile = binding and binding.chaos_budget_profile or (options and options.chaos_budget_profile),
+        force_speed_plus_enabled = gates.force_speed_plus_enabled,
+        force_speed_plus_disabled = gates.force_speed_plus_disabled,
+        speed_plus_enabled = gates.speed_plus_enabled,
+        force_size_plus_enabled = gates.force_size_plus_enabled,
+        force_size_plus_disabled = gates.force_size_plus_disabled,
+        size_plus_enabled = gates.size_plus_enabled,
     }
 end
 
@@ -523,6 +491,7 @@ local function collectCandidates(provider, hop_context, binding, options)
         radius = binding and binding.scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
         max_radius = limits.MAX_CHAIN_SCAN_RADIUS,
         candidate_cap = binding and binding.candidate_cap or limits.MAX_CHAIN_SCAN_CANDIDATES,
+        actor_scan_cap = binding and binding.scan_actor_cap or limits.MAX_CHAIN_SCAN_ACTORS,
     })
     if collected and collected.ok then
         return collected.candidates or {}, collected
@@ -718,73 +687,41 @@ local function inspectPayloadModifier(plan, audit, options)
     if prefix.chain_count ~= 1 or prefix.chain_op == nil then
         return nil, "chain_payload_prefix_missing"
     end
-    if prefix.speed_count > 1 or prefix.size_count > 1 or (prefix.speed_count > 0 and prefix.size_count > 0) then
-        return nil, "chain_modifier_combo_deferred"
-    end
-    if prefix.multicast_count > 1 then
-        return nil, "chain_multicast_nested_deferred"
-    end
-    if prefix.multicast_count == 1 and (prefix.speed_count > 0 or prefix.size_count > 0) then
-        return nil, "chain_modifier_combo_deferred"
-    end
-
-    local modifier_count = prefix.speed_count + prefix.size_count
-    local multicast_count = prefix.multicast_count or 0
-    if prefix.unsupported_count > 0 or #(payload_slot.prefix_ops or {}) ~= (1 + modifier_count + multicast_count) then
-        return nil, "chain_payload_modifier_deferred"
-    end
-    local fanout_count = 1
-    if multicast_count == 1 then
-        if not chainMulticastEnabled(options or {}) then
-            return nil, "chain_multicast_disabled"
-        end
-        fanout_count = multicastFanout(prefix.multicast_op)
-        local cap = tonumber(options and options.max_chain_multicast_fanout) or limits.MAX_CHAIN_MULTICAST_FANOUT
-        if fanout_count > cap then
-            return nil, "chain_multicast_fanout_cap_exceeded"
-        end
+    local policy = launch_modifier_policy.inspectPayloadEntry(plan, nil, payload_slot, {
+        compatibility = "chain",
+        require_chain_prefix = true,
+        apply_size_to_specs = options and options.apply_size_to_specs == true,
+        allow_chain_multicast = chainMulticastEnabled(options or {}),
+        force_chain_multicast_enabled = options and options.force_chain_multicast_enabled,
+        force_chain_multicast_disabled = options and options.force_chain_multicast_disabled,
+        chain_multicast_enabled = options and options.chain_multicast_enabled == true,
+        max_chain_multicast_fanout = options and options.max_chain_multicast_fanout or limits.MAX_CHAIN_MULTICAST_FANOUT,
+        force_speed_plus_enabled = options and options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options and options.force_speed_plus_disabled,
+        force_size_plus_enabled = options and options.force_size_plus_enabled,
+        force_size_plus_disabled = options and options.force_size_plus_disabled,
+        speed_plus_enabled = options and options.speed_plus_enabled == true,
+        size_plus_enabled = options and options.size_plus_enabled == true,
+    })
+    if policy.ok ~= true then
+        return nil, policy.rejection_reason or "chain_payload_modifier_deferred"
     end
 
-    local kind = nil
-    local mutation = nil
-    local mutation_err = nil
-    if prefix.speed_count == 1 then
-        kind = "speed_plus"
-        if not modifierEnabled(kind, options or {}) then
-            return nil, "chain_speed_plus_disabled"
-        end
-        if live_speed_plus.launchSpeedField() == nil then
-            return nil, "chain_speed_plus_field_missing"
-        end
-        mutation, mutation_err = live_speed_plus.computeMutation(prefix.speed_op)
-    elseif prefix.size_count == 1 then
-        kind = "size_plus"
-        if not modifierEnabled(kind, options or {}) then
-            return nil, "chain_size_plus_disabled"
-        end
-        mutation, mutation_err = live_size_plus.computeMutation(prefix.size_op)
-    end
-    if kind ~= nil and mutation == nil then
-        return nil, mutation_err or "chain_modifier_value_invalid"
-    end
-
-    local apply_result = nil
-    if kind == "size_plus" and options and options.apply_size_to_specs == true then
-        apply_result, mutation_err = live_size_plus.applyToPayloadSlotHelperSpecs(plan, audit.payload_slot_id, mutation)
-        if not apply_result then
-            return nil, mutation_err or "chain_size_plus_apply_failed"
-        end
-    end
+    local mutations = policy.mutations or {}
+    local kind = mutations.payload_modifier_kind
+    local fanout_count = mutations.chain_multicast_fanout_count or 1
+    local has_speed_plus = type(mutations.speed_plus) == "table"
+    local has_size_plus = type(mutations.size_plus) == "table"
 
     return {
         payload_modifier_kind = kind,
-        has_speed_plus_payload = kind == "speed_plus",
-        has_size_plus_payload = kind == "size_plus",
-        has_multicast_payload = multicast_count == 1,
+        has_speed_plus_payload = has_speed_plus,
+        has_size_plus_payload = has_size_plus,
+        has_multicast_payload = prefix.multicast_count == 1,
         chain_multicast_fanout_count = fanout_count,
-        speed_plus_mutation = kind == "speed_plus" and mutation or nil,
-        size_plus_mutation = kind == "size_plus" and mutation or nil,
-        size_plus_apply_result = apply_result,
+        speed_plus_mutation = mutations.speed_plus,
+        size_plus_mutation = mutations.size_plus,
+        size_plus_apply_result = mutations.size_plus_apply_result,
     }, nil
 end
 
@@ -815,6 +752,13 @@ function live_chain.preparePayloadModifiers(plan, opts)
     audit.has_size_plus_payload = modifier.has_size_plus_payload == true
     audit.has_multicast_payload = modifier.has_multicast_payload == true
     audit.chain_multicast_fanout_count = modifier.chain_multicast_fanout_count
+    log.info(string.format(
+        "SPELLFORGE_CHAIN_MODIFIER_POLICY_COMPAT_OK recipe_id=%s source_slot_id=%s payload_slot_id=%s payload_modifier_kind=%s",
+        tostring(plan and plan.recipe_id),
+        tostring(audit.source_slot_id),
+        tostring(audit.payload_slot_id),
+        tostring(modifier.payload_modifier_kind)
+    ))
     return modifier, nil, audit
 end
 
@@ -844,6 +788,13 @@ function live_chain.selectV0Plan(plan, opts)
             return nil, modifier_reason or "chain_payload_modifier_deferred", audit
         end
     end
+    log.info(string.format(
+        "SPELLFORGE_CHAIN_MODIFIER_POLICY_COMPAT_OK recipe_id=%s source_slot_id=%s payload_slot_id=%s payload_modifier_kind=%s",
+        tostring(plan and plan.recipe_id),
+        tostring(audit.source_slot_id),
+        tostring(audit.payload_slot_id),
+        tostring(modifier.payload_modifier_kind)
+    ))
 
     local slots_by_id = slotById(plan.emission_slots)
     local helpers_by_slot = helperBySlotId(plan.helper_records)
@@ -1722,9 +1673,17 @@ function live_chain.handleResolvedHit(route, opts)
     copyPierceContinuationScope(route, job_input.payload)
 
     local modifier_kind = binding.payload_modifier_kind
-    if modifier_kind == "speed_plus" then
-        copyModifierFields(job_input, binding.speed_plus_mutation, modifier_kind)
-        copyModifierFields(job_input.payload, binding.speed_plus_mutation, modifier_kind)
+    local applied_modifiers = launch_modifier_policy.copyMutationSetFields(job_input, {
+        payload_modifier_kind = modifier_kind,
+        speed_plus = binding.speed_plus_mutation,
+        size_plus = binding.size_plus_mutation,
+    })
+    launch_modifier_policy.copyMutationSetFields(job_input.payload, {
+        payload_modifier_kind = modifier_kind,
+        speed_plus = binding.speed_plus_mutation,
+        size_plus = binding.size_plus_mutation,
+    })
+    if applied_modifiers.speed_plus == true then
         runtime_stats.inc("chain_modifier_speed_jobs")
         runtime_stats.inc("chain_modifier_speed_mutated")
         log.info(string.format(
@@ -1741,9 +1700,8 @@ function live_chain.handleResolvedHit(route, opts)
             tostring(selected.id),
             tostring(binding.speed_plus_mutation and binding.speed_plus_mutation.speed_plus_speed or nil)
         ))
-    elseif modifier_kind == "size_plus" then
-        copyModifierFields(job_input, binding.size_plus_mutation, modifier_kind)
-        copyModifierFields(job_input.payload, binding.size_plus_mutation, modifier_kind)
+    end
+    if applied_modifiers.size_plus == true then
         runtime_stats.inc("chain_modifier_size_jobs")
         runtime_stats.inc("chain_modifier_size_mutated")
         log.info(string.format(

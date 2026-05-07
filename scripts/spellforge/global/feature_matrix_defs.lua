@@ -141,7 +141,7 @@ defs.FEATURE_DEFS = {
         category = "targeting",
         status = "feature_gated_narrow",
         gates = { defs.FLAGS.LIVE_2_2C, defs.FLAGS.CHAIN, defs.FLAGS.CHAIN_MULTICAST },
-        summary = "Bounded sibling fanout per Chain hop with one continuation claim per hop.",
+        summary = "Bounded sibling fanout per Chain hop, including single Speed+ or Size+ payload modifiers, with one continuation claim per hop.",
     },
     {
         id = "bounce",

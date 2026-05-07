@@ -172,8 +172,12 @@ local function mapFinalFanoutReject(reason)
         return "nested_tt_multicast_reject", "nested_final_fanout_cap_reject"
     elseif reason == "payload_pattern_disabled" or reason == "payload_pattern_runtime_deferred" then
         return "nested_tt_pattern_reject", "nested_final_fanout_pattern_reject"
-    elseif reason == "payload_speed_plus_runtime_deferred"
-        or reason == "payload_size_plus_runtime_deferred"
+    elseif reason == "payload_modifier_combo_deferred"
+        or reason == "payload_modifier_pattern_deferred"
+        or reason == "payload_modifier_nested_deferred"
+        or reason == "payload_modifier_unsupported_prefix"
+        or reason == "payload_speed_plus_disabled"
+        or reason == "payload_size_plus_disabled"
         or string.sub(tostring(reason), 1, 28) == "unsupported_payload_prefix_" then
         return "nested_tt_modifier_reject", "nested_final_fanout_nested_behavior_reject"
     elseif reason == "nested_payload_runtime_deferred"

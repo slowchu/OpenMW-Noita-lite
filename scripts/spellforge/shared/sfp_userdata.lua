@@ -137,6 +137,7 @@ function sfp_userdata.buildHelperUserData(args)
     setScalar(out, "pierce_count", input.pierce_count)
     setScalar(out, "pierce_limit", input.pierce_limit)
     setScalar(out, "pierce_trigger_payload_slot_id", input.pierce_trigger_payload_slot_id)
+    setScalar(out, "source_modifier_kind", input.source_modifier_kind)
     setScalar(out, "payload_modifier_kind", input.payload_modifier_kind)
     setScalar(out, "speed_plus", input.speed_plus)
     setScalar(out, "speed_plus_mode", input.speed_plus_mode)
@@ -275,6 +276,7 @@ function sfp_userdata.compactSpellforgeUserData(user_data)
         "pierce_count",
         "pierce_limit",
         "pierce_trigger_payload_slot_id",
+        "source_modifier_kind",
         "payload_modifier_kind",
         "speed_plus",
         "speed_plus_mode",

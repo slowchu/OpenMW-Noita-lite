@@ -3,6 +3,8 @@ local events = require("scripts.spellforge.shared.events")
 local log = require("scripts.spellforge.shared.log").new("global.live_simple_dispatch")
 local limits = require("scripts.spellforge.shared.limits")
 local helper_records = require("scripts.spellforge.global.helper_records")
+local ir_runtime_adapter = require("scripts.spellforge.global.ir_runtime_adapter")
+local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
 local patterns = require("scripts.spellforge.global.patterns")
 local plan_cache = require("scripts.spellforge.global.plan_cache")
@@ -139,6 +141,19 @@ local function applyBounceProbeMode(mode, opts)
         opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_NESTED_TRIGGER_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
+    elseif mode == "bounce_speed_plus_source_policy" then
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_SPEED_PLUS_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_speed_plus_enabled = true
+    elseif mode == "bounce_size_plus_source_policy" then
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_SIZE_PLUS_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_size_plus_enabled = true
+    elseif mode == "bounce_speed_size_plus_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_SPEED_SIZE_PLUS_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_speed_plus_enabled = true
+        opts.force_size_plus_enabled = true
     elseif mode == "bounce_speed_plus_deferred" then
         opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_SPEED_PLUS_TARGET }
         opts.force_bounce_enabled = true
@@ -224,6 +239,19 @@ local function applyPierceProbeMode(mode, opts)
         opts._spellforge_probe_root = { real_effects = recipes.PIERCE_HOMING_TARGET }
         opts.force_pierce_enabled = true
         opts.force_homing_enabled = true
+    elseif mode == "pierce_speed_plus_source_policy" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_SPEED_PLUS_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_speed_plus_enabled = true
+    elseif mode == "pierce_size_plus_source_policy" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_SIZE_PLUS_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_size_plus_enabled = true
+    elseif mode == "pierce_speed_size_plus_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_SPEED_SIZE_PLUS_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_speed_plus_enabled = true
+        opts.force_size_plus_enabled = true
     elseif mode == "pierce_speed_plus_deferred" then
         opts._spellforge_probe_root = { real_effects = recipes.PIERCE_SPEED_PLUS_TARGET }
         opts.force_pierce_enabled = true
@@ -504,6 +532,568 @@ local function adapterDetonateArgsProbe(payload)
         missing_optional_api_graceful = true,
         full_forwarded_fields = full.forwarded_fields,
         legacy_positional_preserved = legacy.legacy_positional == true,
+    }
+end
+
+local function payloadModifierPolicyOptions(kind)
+    local wants_speed = kind == "speed_plus" or kind == "speed_plus_size_plus"
+    local wants_size = kind == "size_plus" or kind == "speed_plus_size_plus"
+    return {
+        allow_payload_launch_modifiers = true,
+        allow_payload_multicast = true,
+        force_speed_plus_enabled = wants_speed,
+        force_speed_plus_disabled = false,
+        speed_plus_enabled = wants_speed,
+        force_size_plus_enabled = wants_size,
+        force_size_plus_disabled = false,
+        size_plus_enabled = wants_size,
+        max_fanout = limits.MAX_NESTED_PAYLOAD_FANOUT,
+        max_projectiles = limits.MAX_PROJECTILES_PER_CAST,
+        max_bounce_count = limits.MAX_BOUNCE_COUNT,
+        max_pierce_count = limits.MAX_PIERCE_COUNT,
+        max_hops = limits.MAX_CHAIN_HOPS,
+        max_jobs = limits.MAX_CHAIN_JOBS_PER_CAST,
+        max_chain_multicast_fanout = limits.MAX_CHAIN_MULTICAST_FANOUT,
+    }
+end
+
+local function payloadModifierPolicyPrepareOptions(kind, source_opcode)
+    local options = payloadModifierPolicyOptions(kind)
+    options.source_opcode = source_opcode
+    options.apply_size_to_specs = true
+    return options
+end
+
+local function payloadModifierPolicyEvent(case)
+    if case.event_kind == "timer_matured" then
+        return {
+            event_kind = "timer_matured",
+            timer_id = "policy-conformance-timer",
+            timer_due_tick = 1,
+            timer_due_seconds = 1.0,
+        }
+    elseif case.event_kind == "bounce" then
+        return {
+            event_kind = "bounce",
+            bounce_id = "policy-conformance-bounce",
+            bounce_index = 1,
+            bounce_max = 3,
+            origin = { x = 0, y = 0, z = 0 },
+            direction = { x = 1, y = 0, z = 0 },
+        }
+    elseif case.event_kind == "pierce" then
+        return {
+            event_kind = "pierce",
+            pierce_id = "policy-conformance-pierce",
+            pierce_count = 1,
+            pierce_limit = 3,
+            current_hit_target_id = "policy-conformance-target",
+            origin = { x = 0, y = 0, z = 0 },
+            direction = { x = 1, y = 0, z = 0 },
+        }
+    end
+    return {
+        event_kind = "trigger_hit",
+        origin = { x = 0, y = 0, z = 0 },
+        direction = { x = 1, y = 0, z = 0 },
+    }
+end
+
+local function policyMutationApplied(job, expected_kind)
+    local payload = job and job.payload or nil
+    if expected_kind == "speed_plus" then
+        return job and job.payload_modifier_kind == "speed_plus"
+            and job.speed_plus == true
+            and job.speed_plus_field == "speed"
+            and type(job.speed_plus_speed) == "number"
+            and payload and payload.payload_modifier_kind == "speed_plus"
+            and payload.speed_plus == true
+    elseif expected_kind == "size_plus" then
+        return job and job.payload_modifier_kind == "size_plus"
+            and job.size_plus == true
+            and job.size_plus_field == "effect.area"
+            and type(job.size_plus_area) == "number"
+            and type(job.size_plus_base_area) == "number"
+            and job.size_plus_area > job.size_plus_base_area
+            and payload and payload.payload_modifier_kind == "size_plus"
+            and payload.size_plus == true
+    elseif expected_kind == "speed_plus_size_plus" then
+        return job and job.payload_modifier_kind == "speed_plus_size_plus"
+            and job.speed_plus == true
+            and job.speed_plus_field == "speed"
+            and type(job.speed_plus_speed) == "number"
+            and job.size_plus == true
+            and job.size_plus_field == "effect.area"
+            and type(job.size_plus_area) == "number"
+            and type(job.size_plus_base_area) == "number"
+            and job.size_plus_area > job.size_plus_base_area
+            and payload and payload.payload_modifier_kind == "speed_plus_size_plus"
+            and payload.speed_plus == true
+            and payload.size_plus == true
+    end
+    return false
+end
+
+local function eventSpecificModifierReason(reason)
+    if type(reason) ~= "string" or reason == "" then
+        return false
+    end
+    local lower = string.lower(reason)
+    return string.find(lower, "trigger_speed_plus", 1, true) ~= nil
+        or string.find(lower, "trigger_size_plus", 1, true) ~= nil
+        or string.find(lower, "timer_speed_plus", 1, true) ~= nil
+        or string.find(lower, "timer_size_plus", 1, true) ~= nil
+        or string.find(lower, "bounce_trigger_speed_plus", 1, true) ~= nil
+        or string.find(lower, "bounce_trigger_size_plus", 1, true) ~= nil
+        or string.find(lower, "pierce_trigger_speed_plus", 1, true) ~= nil
+        or string.find(lower, "pierce_trigger_size_plus", 1, true) ~= nil
+        or string.find(lower, "bounce_speed_plus", 1, true) ~= nil
+        or string.find(lower, "bounce_size_plus", 1, true) ~= nil
+        or string.find(lower, "pierce_speed_plus", 1, true) ~= nil
+        or string.find(lower, "pierce_size_plus", 1, true) ~= nil
+        or string.find(lower, "_speed_plus_supported", 1, true) ~= nil
+        or string.find(lower, "_size_plus_supported", 1, true) ~= nil
+end
+
+local function payloadModifierPolicyCase(case)
+    local compiled = plan_cache.compileOrGet(cloneEffects(case.effects), {
+        source_recipe_id = "payload-modifier-policy-conformance",
+    })
+    if not compiled.ok then
+        return {
+            label = case.label,
+            ok = false,
+            stage = "compile",
+            error = firstErrorMessage(compiled),
+        }
+    end
+
+    local prepared, prepare_reason, prepare_details = launch_modifier_policy.prepareCachedPlanPayloadModifiers(
+        compiled.recipe_id,
+        payloadModifierPolicyPrepareOptions(case.expected_kind, case.source_opcode)
+    )
+    if not prepared then
+        return {
+            label = case.label,
+            ok = false,
+            stage = "policy_prepare",
+            recipe_id = compiled.recipe_id,
+            rejection_reason = prepare_reason,
+            event_specific_reason = eventSpecificModifierReason(prepare_reason),
+            details = prepare_details,
+        }
+    end
+
+    local event = payloadModifierPolicyEvent(case)
+    local planned = ir_runtime_adapter.planEvent(
+        { runtime_ir = prepared.plan and prepared.plan.runtime_ir or nil },
+        prepared.plan,
+        event,
+        payloadModifierPolicyOptions(case.expected_kind)
+    )
+    local job = planned and planned.job_plan and planned.job_plan.planned_jobs and planned.job_plan.planned_jobs[1] or nil
+    local reason = planned and planned.rejection_reason
+        or planned and planned.continuation_plan and planned.continuation_plan.rejection_reason
+        or job and job.payload_modifier_rejection_reason
+        or nil
+    local mutation_ok = policyMutationApplied(job, case.expected_kind)
+    local ok = planned and planned.ok == true
+        and planned.job_plan and planned.job_plan.ok == true
+        and mutation_ok == true
+        and not eventSpecificModifierReason(reason)
+    log.info(string.format(
+        "SPELLFORGE_PAYLOAD_MODIFIER_POLICY_CONFORMANCE_CASE label=%s event_kind=%s expected_kind=%s ok=%s job_modifier_kind=%s rejection_reason=%s",
+        tostring(case.label),
+        tostring(case.event_kind),
+        tostring(case.expected_kind),
+        tostring(ok),
+        tostring(job and job.payload_modifier_kind),
+        tostring(reason)
+    ))
+    return {
+        label = case.label,
+        ok = ok,
+        stage = ok and "policy_job_plan" or "policy_job_plan_failed",
+        recipe_id = compiled.recipe_id,
+        event_kind = case.event_kind,
+        expected_kind = case.expected_kind,
+        prepare_ok = true,
+        plan_ok = planned and planned.ok == true or false,
+        job_plan_ok = planned and planned.job_plan and planned.job_plan.ok == true or false,
+        job_modifier_kind = job and job.payload_modifier_kind or nil,
+        mutation_applied = mutation_ok,
+        rejection_reason = reason,
+        event_specific_reason = eventSpecificModifierReason(reason),
+    }
+end
+
+local function chainPolicyCompatibilityCase(label, effects, expected_kind)
+    local compiled = plan_cache.compileOrGet(cloneEffects(effects), {
+        source_recipe_id = "payload-modifier-policy-conformance-chain",
+    })
+    if not compiled.ok then
+        return {
+            label = label,
+            ok = false,
+            stage = "compile",
+            error = firstErrorMessage(compiled),
+        }
+    end
+    local specs = plan_cache.attachHelperSpecs(compiled.recipe_id)
+    if not specs.ok then
+        return {
+            label = label,
+            ok = false,
+            stage = "helper_specs",
+            recipe_id = compiled.recipe_id,
+            error = firstErrorMessage(specs),
+        }
+    end
+    local wants_speed = expected_kind == "speed_plus" or expected_kind == "speed_plus_size_plus"
+    local wants_size = expected_kind == "size_plus" or expected_kind == "speed_plus_size_plus"
+    local modifier, reason = live_chain.preparePayloadModifiers(specs.plan, {
+        apply_size_to_specs = true,
+        force_speed_plus_enabled = wants_speed,
+        speed_plus_enabled = wants_speed,
+        force_size_plus_enabled = wants_size,
+        size_plus_enabled = wants_size,
+        max_hops = limits.MAX_CHAIN_HOPS,
+        max_jobs = limits.MAX_CHAIN_JOBS_PER_CAST,
+        max_chain_multicast_fanout = limits.MAX_CHAIN_MULTICAST_FANOUT,
+    })
+    local ok = type(modifier) == "table"
+        and modifier.payload_modifier_kind == expected_kind
+        and (wants_speed ~= true or modifier.has_speed_plus_payload == true)
+        and (wants_size ~= true or modifier.has_size_plus_payload == true)
+        and not eventSpecificModifierReason(reason)
+    return {
+        label = label,
+        ok = ok,
+        stage = ok and "chain_policy_compat" or "chain_policy_compat_failed",
+        recipe_id = compiled.recipe_id,
+        expected_kind = expected_kind,
+        payload_modifier_kind = modifier and modifier.payload_modifier_kind or nil,
+        rejection_reason = reason,
+        event_specific_reason = eventSpecificModifierReason(reason),
+    }
+end
+
+local function sourceModifierPolicyOptions(case)
+    local wants_speed = case.expected_kind == "speed_plus"
+    local wants_size = case.expected_kind == "size_plus"
+    return {
+        policy_kind = "source",
+        apply_size_to_specs = true,
+        allow_bounce_source = case.event_kind == "bounce",
+        allow_pierce_source = case.event_kind == "pierce",
+        force_speed_plus_enabled = wants_speed,
+        force_speed_plus_disabled = false,
+        speed_plus_enabled = wants_speed,
+        force_size_plus_enabled = wants_size,
+        force_size_plus_disabled = false,
+        size_plus_enabled = wants_size,
+    }
+end
+
+local function sourceModifierPolicySourceEntry(plan)
+    local source = nil
+    for _, slot in ipairs(plan and plan.emission_slots or {}) do
+        if slot and slot.kind == "primary_emission" and slot.parent_slot_id == nil then
+            if source ~= nil then
+                return nil, "multiple_source_slots"
+            end
+            source = slot
+        end
+    end
+    if source == nil then
+        return nil, "missing_source_slot"
+    end
+    return source, nil
+end
+
+local function sourcePolicyMutationApplied(job, expected_kind)
+    local payload = job and job.payload or nil
+    if expected_kind == "speed_plus" then
+        return job and job.source_modifier_kind == "speed_plus"
+            and job.speed_plus == true
+            and job.speed_plus_field == "speed"
+            and type(job.speed_plus_speed) == "number"
+            and type(job.speed_plus_max_speed) == "number"
+            and payload and payload.source_modifier_kind == "speed_plus"
+            and payload.speed_plus == true
+    elseif expected_kind == "size_plus" then
+        return job and job.source_modifier_kind == "size_plus"
+            and job.size_plus == true
+            and job.size_plus_field == "effect.area"
+            and type(job.size_plus_area) == "number"
+            and type(job.size_plus_base_area) == "number"
+            and job.size_plus_area > job.size_plus_base_area
+            and payload and payload.source_modifier_kind == "size_plus"
+            and payload.size_plus == true
+    end
+    return false
+end
+
+local function sourceModifierPolicyCase(case)
+    local compiled = plan_cache.compileOrGet(cloneEffects(case.effects), {
+        source_recipe_id = "source-modifier-policy-conformance",
+    })
+    if not compiled.ok then
+        return {
+            label = case.label,
+            ok = false,
+            stage = "compile",
+            error = firstErrorMessage(compiled),
+        }
+    end
+
+    local specs = plan_cache.attachHelperSpecs(compiled.recipe_id)
+    if not specs.ok then
+        return {
+            label = case.label,
+            ok = false,
+            stage = "helper_specs",
+            recipe_id = compiled.recipe_id,
+            error = firstErrorMessage(specs),
+        }
+    end
+
+    local source_entry, source_reason = sourceModifierPolicySourceEntry(specs.plan)
+    if not source_entry then
+        return {
+            label = case.label,
+            ok = false,
+            stage = "source_entry",
+            recipe_id = compiled.recipe_id,
+            rejection_reason = source_reason,
+        }
+    end
+
+    local policy_options = sourceModifierPolicyOptions(case)
+    local inspected = launch_modifier_policy.inspectSourceEntry(
+        specs.plan,
+        specs.plan and specs.plan.runtime_ir or nil,
+        source_entry,
+        policy_options
+    )
+    local job = {
+        recipe_id = compiled.recipe_id,
+        slot_id = source_entry.slot_id,
+        payload = {},
+    }
+    local applied = nil
+    if inspected.ok == true then
+        applied = launch_modifier_policy.applySourcePolicyToLaunchSpec(
+            specs.plan,
+            specs.plan and specs.plan.runtime_ir or nil,
+            source_entry,
+            job,
+            { event_kind = case.event_kind },
+            {
+                policy_kind = "source",
+                inspection = inspected,
+            }
+        )
+    end
+    local reason = inspected and inspected.rejection_reason
+        or applied and applied.rejection_reason
+        or job.source_modifier_rejection_reason
+        or nil
+    local mutation_ok = sourcePolicyMutationApplied(job, case.expected_kind)
+    local ok = inspected and inspected.ok == true
+        and applied and applied.ok == true
+        and mutation_ok == true
+        and not eventSpecificModifierReason(reason)
+    log.info(string.format(
+        "SPELLFORGE_SOURCE_MODIFIER_POLICY_CONFORMANCE_CASE label=%s event_kind=%s expected_kind=%s ok=%s source_modifier_kind=%s rejection_reason=%s",
+        tostring(case.label),
+        tostring(case.event_kind),
+        tostring(case.expected_kind),
+        tostring(ok),
+        tostring(job and job.source_modifier_kind),
+        tostring(reason)
+    ))
+    return {
+        label = case.label,
+        ok = ok,
+        stage = ok and "source_policy_launch_spec" or "source_policy_launch_spec_failed",
+        recipe_id = compiled.recipe_id,
+        event_kind = case.event_kind,
+        expected_kind = case.expected_kind,
+        source_modifier_kind = job and job.source_modifier_kind or nil,
+        mutation_applied = mutation_ok,
+        rejection_reason = reason,
+        event_specific_reason = eventSpecificModifierReason(reason),
+    }
+end
+
+local function sourceModifierPolicyConformanceProbe(payload)
+    local cases = {
+        { label = "source_speed", effects = recipes.SPEED_PLUS_FIRE_DAMAGE_TARGET, event_kind = "source", expected_kind = "speed_plus" },
+        { label = "source_size", effects = recipes.SIZE_PLUS_FIRE_DAMAGE_TARGET, event_kind = "source", expected_kind = "size_plus" },
+        { label = "bounce_source_speed", effects = recipes.BOUNCE_SPEED_PLUS_TARGET, event_kind = "bounce", expected_kind = "speed_plus" },
+        { label = "bounce_source_size", effects = recipes.BOUNCE_SIZE_PLUS_TARGET, event_kind = "bounce", expected_kind = "size_plus" },
+        { label = "pierce_source_speed", effects = recipes.PIERCE_SPEED_PLUS_TARGET, event_kind = "pierce", expected_kind = "speed_plus" },
+        { label = "pierce_source_size", effects = recipes.PIERCE_SIZE_PLUS_TARGET, event_kind = "pierce", expected_kind = "size_plus" },
+    }
+    local results = {}
+    local source_events = {}
+    local ok_count = 0
+    local bounce_ok_count = 0
+    local pierce_ok_count = 0
+    local no_event_specific_reasons = true
+    for index, case in ipairs(cases) do
+        local result = sourceModifierPolicyCase(case)
+        results[index] = result
+        if result.ok == true then
+            ok_count = ok_count + 1
+            if case.event_kind == "bounce" then
+                bounce_ok_count = bounce_ok_count + 1
+            elseif case.event_kind == "pierce" then
+                pierce_ok_count = pierce_ok_count + 1
+            end
+        end
+        if result.event_specific_reason == true then
+            no_event_specific_reasons = false
+        end
+        source_events[case.event_kind] = true
+    end
+
+    local source_event_count = 0
+    for _ in pairs(source_events) do
+        source_event_count = source_event_count + 1
+    end
+    local fallback_count = 0
+    local mismatch_count = 0
+    local all_ok = ok_count == #cases
+        and source_event_count == 3
+        and no_event_specific_reasons == true
+        and fallback_count == 0
+        and mismatch_count == 0
+    runtime_stats.inc(all_ok and "source_modifier_policy_conformance_ok" or "source_modifier_policy_conformance_rejected")
+    if bounce_ok_count == 2 then
+        log.info("SPELLFORGE_BOUNCE_SOURCE_MODIFIER_POLICY_OK case_count=2")
+    end
+    if pierce_ok_count == 2 then
+        log.info("SPELLFORGE_PIERCE_SOURCE_MODIFIER_POLICY_OK case_count=2")
+    end
+    if all_ok then
+        log.info(string.format(
+            "SPELLFORGE_SOURCE_MODIFIER_POLICY_CONFORMANCE_OK source_case_count=%s source_event_count=%s fallback_count=%s mismatch_count=%s",
+            tostring(ok_count),
+            tostring(source_event_count),
+            tostring(fallback_count),
+            tostring(mismatch_count)
+        ))
+    end
+    return {
+        request_id = payload and payload.request_id,
+        ok = all_ok,
+        mode = "source_modifier_policy_conformance",
+        policy_module = "launch_modifier_policy",
+        source_case_count = ok_count,
+        expected_source_case_count = #cases,
+        source_event_count = source_event_count,
+        fallback_count = fallback_count,
+        mismatch_count = mismatch_count,
+        event_source_neutral = source_event_count == 3 and ok_count == #cases,
+        no_event_specific_reasons = no_event_specific_reasons,
+        bounce_source_policy_ok = bounce_ok_count == 2,
+        pierce_source_policy_ok = pierce_ok_count == 2,
+        results = results,
+    }
+end
+
+local function payloadModifierPolicyConformanceProbe(payload)
+    local cases = {
+        { label = "trigger_speed", effects = recipes.TRIGGER_PAYLOAD_SPEED_PLUS_TARGET, source_opcode = "Trigger", event_kind = "trigger_hit", expected_kind = "speed_plus" },
+        { label = "trigger_size", effects = recipes.TRIGGER_PAYLOAD_SIZE_PLUS_TARGET, source_opcode = "Trigger", event_kind = "trigger_hit", expected_kind = "size_plus" },
+        { label = "trigger_speed_size", effects = recipes.TRIGGER_PAYLOAD_SPEED_SIZE_PLUS_TARGET, source_opcode = "Trigger", event_kind = "trigger_hit", expected_kind = "speed_plus_size_plus" },
+        { label = "timer_speed", effects = recipes.TIMER_PAYLOAD_SPEED_PLUS_TARGET, source_opcode = "Timer", event_kind = "timer_matured", expected_kind = "speed_plus" },
+        { label = "timer_size", effects = recipes.TIMER_PAYLOAD_SIZE_PLUS_TARGET, source_opcode = "Timer", event_kind = "timer_matured", expected_kind = "size_plus" },
+        { label = "timer_speed_size", effects = recipes.TIMER_PAYLOAD_SPEED_SIZE_PLUS_TARGET, source_opcode = "Timer", event_kind = "timer_matured", expected_kind = "speed_plus_size_plus" },
+        { label = "bounce_trigger_speed", effects = recipes.BOUNCE_TRIGGER_PAYLOAD_SPEED_PLUS_TARGET, source_opcode = "Trigger", event_kind = "bounce", expected_kind = "speed_plus" },
+        { label = "bounce_trigger_size", effects = recipes.BOUNCE_TRIGGER_PAYLOAD_SIZE_PLUS_TARGET, source_opcode = "Trigger", event_kind = "bounce", expected_kind = "size_plus" },
+        { label = "bounce_trigger_speed_size", effects = recipes.BOUNCE_TRIGGER_PAYLOAD_SPEED_SIZE_PLUS_TARGET, source_opcode = "Trigger", event_kind = "bounce", expected_kind = "speed_plus_size_plus" },
+        { label = "pierce_trigger_speed", effects = recipes.PIERCE_TRIGGER_PAYLOAD_SPEED_PLUS_TARGET, source_opcode = "Trigger", event_kind = "pierce", expected_kind = "speed_plus" },
+        { label = "pierce_trigger_size", effects = recipes.PIERCE_TRIGGER_PAYLOAD_SIZE_PLUS_TARGET, source_opcode = "Trigger", event_kind = "pierce", expected_kind = "size_plus" },
+        { label = "pierce_trigger_speed_size", effects = recipes.PIERCE_TRIGGER_PAYLOAD_SPEED_SIZE_PLUS_TARGET, source_opcode = "Trigger", event_kind = "pierce", expected_kind = "speed_plus_size_plus" },
+    }
+    local results = {}
+    local event_sources = {}
+    local ok_count = 0
+    local no_event_specific_reasons = true
+    for index, case in ipairs(cases) do
+        local result = payloadModifierPolicyCase(case)
+        results[index] = result
+        if result.ok == true then
+            ok_count = ok_count + 1
+        end
+        if result.event_specific_reason == true then
+            no_event_specific_reasons = false
+        end
+        event_sources[case.event_kind] = true
+    end
+
+    local chain_results = {
+        chainPolicyCompatibilityCase("chain_speed", recipes.CHAIN_SPEED_PLUS_FROST_TARGET, "speed_plus"),
+        chainPolicyCompatibilityCase("chain_size", recipes.CHAIN_SIZE_PLUS_FROST_TARGET, "size_plus"),
+        chainPolicyCompatibilityCase("chain_speed_size", recipes.CHAIN_SPEED_SIZE_PLUS_FROST_TARGET, "speed_plus_size_plus"),
+    }
+    local chain_ok_count = 0
+    for _, result in ipairs(chain_results) do
+        if result.ok == true then
+            chain_ok_count = chain_ok_count + 1
+        end
+        if result.event_specific_reason == true then
+            no_event_specific_reasons = false
+        end
+    end
+
+    local event_source_count = 0
+    for _ in pairs(event_sources) do
+        event_source_count = event_source_count + 1
+    end
+    local all_ok = ok_count == #cases
+        and chain_ok_count == #chain_results
+        and event_source_count == 4
+        and no_event_specific_reasons == true
+    runtime_stats.inc(all_ok and "payload_modifier_policy_conformance_ok" or "payload_modifier_policy_conformance_rejected")
+    if all_ok then
+        log.info(string.format(
+            "SPELLFORGE_PAYLOAD_MODIFIER_POLICY_CONFORMANCE_OK event_case_count=%s chain_case_count=%s event_source_count=%s",
+            tostring(ok_count),
+            tostring(chain_ok_count),
+            tostring(event_source_count)
+        ))
+    end
+    return {
+        request_id = payload and payload.request_id,
+        ok = all_ok,
+        mode = "payload_modifier_policy_conformance",
+        policy_module = "launch_modifier_policy",
+        job_planner_module = "runtime_job_planner",
+        event_case_count = ok_count,
+        expected_event_case_count = #cases,
+        chain_case_count = chain_ok_count,
+        expected_chain_case_count = #chain_results,
+        event_source_count = event_source_count,
+        event_source_neutral = event_source_count == 4 and ok_count == #cases,
+        trigger_timer_preflight_shared = results[1] and results[1].prepare_ok == true
+            and results[2] and results[2].prepare_ok == true
+            and results[4] and results[4].prepare_ok == true
+            and results[5] and results[5].prepare_ok == true
+            and results[6] and results[6].prepare_ok == true,
+        bounce_pierce_static_policy = results[7] and results[7].ok == true
+            and results[8] and results[8].ok == true
+            and results[9] and results[9].ok == true
+            and results[10] and results[10].ok == true
+            and results[11] and results[11].ok == true
+            and results[12] and results[12].ok == true,
+        chain_policy_compat = chain_ok_count == #chain_results,
+        no_event_specific_reasons = no_event_specific_reasons,
+        cases = results,
+        chain_cases = chain_results,
     }
 end
 
@@ -812,6 +1402,15 @@ local function chainCandidates(case_name)
     }
 end
 
+local function chainProviderActor(id, x, y, z)
+    return {
+        id = id,
+        object = id,
+        position = { x = x or 0, y = y or 0, z = z or 0 },
+        cell = "chain-test-cell",
+    }
+end
+
 local function chainHopCandidates(case_name)
     if case_name == "hop_bounce"
         or case_name == "direct_chain_3"
@@ -820,8 +1419,14 @@ local function chainHopCandidates(case_name)
         or case_name == "trigger_chain_speed_plus_3"
         or case_name == "direct_chain_size_plus_3"
         or case_name == "trigger_chain_size_plus_3"
+        or case_name == "direct_chain_speed_size_plus_3"
+        or case_name == "trigger_chain_speed_size_plus_3"
         or case_name == "direct_chain_multicast_8"
         or case_name == "trigger_chain_multicast_8"
+        or case_name == "speed_plus_multicast"
+        or case_name == "size_plus_multicast"
+        or case_name == "trigger_chain_speed_plus_multicast"
+        or case_name == "trigger_chain_size_plus_multicast"
         or case_name == "simple" then
         return {
             [1] = {
@@ -1207,7 +1812,7 @@ local function chainPayloadJobsHaveModifier(jobs, kind)
             or user_data.payload_modifier_kind ~= kind then
             return false
         end
-        if kind == "speed_plus" then
+        if kind == "speed_plus" or kind == "speed_plus_size_plus" then
             if job.speed_plus ~= true
                 or user_data.speed_plus ~= true
                 or job.speed ~= job.speed_plus_speed
@@ -1216,7 +1821,8 @@ local function chainPayloadJobsHaveModifier(jobs, kind)
                 or job.speed_plus_speed == job.speed_plus_base_speed then
                 return false
             end
-        elseif kind == "size_plus" then
+        end
+        if kind == "size_plus" or kind == "speed_plus_size_plus" then
             if job.size_plus ~= true
                 or user_data.size_plus ~= true
                 or tonumber(job.size_plus_area) == nil
@@ -1232,6 +1838,87 @@ end
 local function chainRuntimeProbe(payload)
     local chain_case = payload and payload.chain_case or "direct_chain_3"
     local manual_real_gameplay = chain_case == "manual_real_gameplay"
+    if chain_case == "provider_prefilter_caps" then
+        local context = chainHitContext()
+        local normal = chain_target_provider.collectCandidates(context, {
+            active_actors = {
+                chainProviderActor("chain-caster", 10, 0, 0),
+                chainProviderActor("A", 0, 0, 0),
+                chainProviderActor("B", 48, 0, 0),
+                chainProviderActor("C", 96, 0, 0),
+            },
+            radius = limits.MAX_CHAIN_SCAN_RADIUS,
+            candidate_cap = 4,
+            actor_scan_cap = 8,
+        })
+        local capped = chain_target_provider.collectCandidates(context, {
+            active_actors = {
+                chainProviderActor("chain-caster", 10, 0, 0),
+                chainProviderActor("A", 0, 0, 0),
+                chainProviderActor("B", 48, 0, 0),
+                chainProviderActor("C", 96, 0, 0),
+                chainProviderActor("D", 144, 0, 0),
+                chainProviderActor("E", 192, 0, 0),
+            },
+            radius = limits.MAX_CHAIN_SCAN_RADIUS,
+            candidate_cap = 2,
+            actor_scan_cap = 8,
+        })
+        local prefilter_ok = normal.ok == true
+            and normal.current_excluded == 1
+            and normal.caster_excluded == 1
+            and normal.candidate_count == 2
+        local normal_caps_ok = normal.actor_scan_cap_hit == false
+            and normal.candidate_cap_hit == false
+        local cap_separation_ok = capped.ok == true
+            and capped.inspected_count == 6
+            and capped.candidate_count == 2
+            and capped.candidate_cap_hit == true
+            and capped.actor_scan_cap_hit == false
+            and capped.current_excluded == 1
+            and capped.caster_excluded == 1
+        local ok = prefilter_ok and normal_caps_ok and cap_separation_ok
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_PROVIDER_PREFILTER_CAPS_%s normal_candidates=%s normal_inspected=%s normal_current_excluded=%s normal_caster_excluded=%s normal_actor_scan_cap_hit=%s normal_candidate_cap_hit=%s capped_candidates=%s capped_inspected=%s capped_current_excluded=%s capped_caster_excluded=%s capped_actor_scan_cap_hit=%s capped_candidate_cap_hit=%s",
+            ok and "OK" or "MISMATCH",
+            tostring(normal.candidate_count),
+            tostring(normal.inspected_count),
+            tostring(normal.current_excluded),
+            tostring(normal.caster_excluded),
+            tostring(normal.actor_scan_cap_hit),
+            tostring(normal.candidate_cap_hit),
+            tostring(capped.candidate_count),
+            tostring(capped.inspected_count),
+            tostring(capped.current_excluded),
+            tostring(capped.caster_excluded),
+            tostring(capped.actor_scan_cap_hit),
+            tostring(capped.candidate_cap_hit)
+        ))
+        return {
+            request_id = payload and payload.request_id,
+            ok = ok,
+            mode = "chain_runtime",
+            chain_case = chain_case,
+            provider = "injected_active_actors",
+            prefilter_ok = prefilter_ok,
+            normal_caps_ok = normal_caps_ok,
+            cap_separation_ok = cap_separation_ok,
+            normal_candidate_count = normal.candidate_count,
+            normal_inspected_count = normal.inspected_count,
+            normal_current_excluded = normal.current_excluded,
+            normal_caster_excluded = normal.caster_excluded,
+            normal_actor_scan_cap_hit = normal.actor_scan_cap_hit,
+            normal_candidate_cap_hit = normal.candidate_cap_hit,
+            capped_candidate_count = capped.candidate_count,
+            capped_inspected_count = capped.inspected_count,
+            capped_current_excluded = capped.current_excluded,
+            capped_caster_excluded = capped.caster_excluded,
+            capped_actor_scan_cap_hit = capped.actor_scan_cap_hit,
+            capped_candidate_cap_hit = capped.candidate_cap_hit,
+            sfp_launch_unchanged = true,
+            rejection_reason = (not ok) and "chain_provider_prefilter_caps_regression" or nil,
+        }
+    end
     if chain_case == "real_provider_availability" then
         local supported = chain_target_provider.isSupported()
         local context = chainHitContext()
@@ -1288,6 +1975,15 @@ local function chainRuntimeProbe(payload)
         effects = recipes.TRIGGER_CHAIN_SIZE_PLUS_FROST_TARGET
         opts.force_trigger_enabled = true
         opts.force_size_plus_enabled = true
+    elseif chain_case == "direct_chain_speed_size_plus_3" then
+        effects = recipes.CHAIN_SPEED_SIZE_PLUS_FROST_TARGET
+        opts.force_speed_plus_enabled = true
+        opts.force_size_plus_enabled = true
+    elseif chain_case == "trigger_chain_speed_size_plus_3" then
+        effects = recipes.TRIGGER_CHAIN_SPEED_SIZE_PLUS_FROST_TARGET
+        opts.force_trigger_enabled = true
+        opts.force_speed_plus_enabled = true
+        opts.force_size_plus_enabled = true
     elseif chain_case == "direct_chain_multicast_8" then
         effects = recipes.CHAIN_MULTICAST_X8_TARGET
         opts.force_chaos_budget_enabled = true
@@ -1313,9 +2009,31 @@ local function chainRuntimeProbe(payload)
     elseif chain_case == "speed_plus_multicast" then
         effects = recipes.CHAIN_SPEED_PLUS_MULTICAST_TARGET
         opts.force_speed_plus_enabled = true
+        opts.force_chain_multicast_enabled = true
+        opts.force_payload_multicast_enabled = true
     elseif chain_case == "size_plus_multicast" then
         effects = recipes.CHAIN_SIZE_PLUS_MULTICAST_TARGET
         opts.force_size_plus_enabled = true
+        opts.force_chain_multicast_enabled = true
+        opts.force_payload_multicast_enabled = true
+    elseif chain_case == "trigger_chain_speed_plus_multicast" then
+        effects = recipes.TRIGGER_CHAIN_SPEED_PLUS_MULTICAST_TARGET
+        opts.force_trigger_enabled = true
+        opts.force_speed_plus_enabled = true
+        opts.force_chain_multicast_enabled = true
+        opts.force_payload_multicast_enabled = true
+    elseif chain_case == "trigger_chain_size_plus_multicast" then
+        effects = recipes.TRIGGER_CHAIN_SIZE_PLUS_MULTICAST_TARGET
+        opts.force_trigger_enabled = true
+        opts.force_size_plus_enabled = true
+        opts.force_chain_multicast_enabled = true
+        opts.force_payload_multicast_enabled = true
+    elseif chain_case == "speed_size_plus_multicast" then
+        effects = recipes.CHAIN_SPEED_SIZE_PLUS_MULTICAST_TARGET
+        opts.force_speed_plus_enabled = true
+        opts.force_size_plus_enabled = true
+        opts.force_chain_multicast_enabled = true
+        opts.force_payload_multicast_enabled = true
     elseif chain_case == "speed_plus_pattern" then
         effects = recipes.CHAIN_SPEED_PLUS_BURST_MULTICAST_TARGET
         opts.force_speed_plus_enabled = true
@@ -1464,13 +2182,26 @@ local function chainRuntimeProbe(payload)
         or chain_case == "trigger_chain_speed_plus_3"
         or chain_case == "direct_chain_size_plus_3"
         or chain_case == "trigger_chain_size_plus_3"
+        or chain_case == "direct_chain_speed_size_plus_3"
+        or chain_case == "trigger_chain_speed_size_plus_3"
         or chain_case == "direct_chain_multicast_8"
         or chain_case == "trigger_chain_multicast_8"
+        or chain_case == "speed_plus_multicast"
+        or chain_case == "size_plus_multicast"
+        or chain_case == "trigger_chain_speed_plus_multicast"
+        or chain_case == "trigger_chain_size_plus_multicast"
         or chain_case == "filters"
     local expected_fanout_count = (chain_case == "direct_chain_multicast_8"
-        or chain_case == "trigger_chain_multicast_8") and recipes.CHAOS_CHAIN_MULTICAST_FANOUT_COUNT or 1
+        or chain_case == "trigger_chain_multicast_8") and recipes.CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        or (chain_case == "speed_plus_multicast"
+            or chain_case == "size_plus_multicast"
+            or chain_case == "trigger_chain_speed_plus_multicast"
+            or chain_case == "trigger_chain_size_plus_multicast") and 3
+        or 1
     local expected_modifier_kind = nil
-    if string.find(chain_case, "speed_plus", 1, true) then
+    if string.find(chain_case, "speed_size_plus", 1, true) then
+        expected_modifier_kind = "speed_plus_size_plus"
+    elseif string.find(chain_case, "speed_plus", 1, true) then
         expected_modifier_kind = "speed_plus"
     elseif string.find(chain_case, "size_plus", 1, true) then
         expected_modifier_kind = "size_plus"
@@ -2297,6 +3028,131 @@ local function buildJobInputs(selected_helpers, compiled_recipe_id, cast_id, lau
     return jobs
 end
 
+local function hasSourceLaunchModifier(entry)
+    for _, op in ipairs(entry and entry.prefix_ops or {}) do
+        if op and (op.opcode == "Speed+" or op.opcode == "Size+") then
+            return true
+        end
+    end
+    return false
+end
+
+local function singleSourceLaunchModifierSlot(plan)
+    local source_slot = nil
+    for _, slot in ipairs(plan and plan.emission_slots or {}) do
+        if slot and slot.kind == "primary_emission" and hasSourceLaunchModifier(slot) then
+            if source_slot then
+                return nil, "source_modifier_cap_exceeded"
+            end
+            source_slot = slot
+        end
+    end
+    return source_slot, nil
+end
+
+local function sourcePolicyOptions(options, source_kind)
+    local opts = {
+        policy_kind = "source",
+        apply_size_to_specs = true,
+        allow_bounce_source = source_kind == "bounce",
+        allow_pierce_source = source_kind == "pierce",
+        force_speed_plus_enabled = options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options.force_speed_plus_disabled,
+        speed_plus_enabled = dev.liveSpeedPlusEnabled() == true,
+        force_size_plus_enabled = options.force_size_plus_enabled,
+        force_size_plus_disabled = options.force_size_plus_disabled,
+        size_plus_enabled = dev.liveSizePlusEnabled() == true,
+    }
+    return opts
+end
+
+local function attachHelperRecordsWithSourcePolicy(compiled, options, source_kind)
+    local attached_specs = plan_cache.attachHelperSpecs(compiled.recipe_id, { limits = options.budget_limits })
+    if not attached_specs.ok then
+        runtime_stats.inc("helper_records_attach_failed")
+        return nil, "helper_specs_failed", {
+            plan_recipe_id = compiled.recipe_id,
+            error = firstErrorMessage(attached_specs),
+            errors = attached_specs.errors,
+        }
+    end
+
+    local source_slot, source_reason = singleSourceLaunchModifierSlot(attached_specs.plan)
+    if source_reason then
+        return nil, source_reason, {
+            plan_recipe_id = compiled.recipe_id,
+        }
+    end
+
+    local inspection = nil
+    if source_slot then
+        inspection = launch_modifier_policy.inspectSourceEntry(
+            attached_specs.plan,
+            attached_specs.plan.runtime_ir,
+            source_slot,
+            sourcePolicyOptions(options, source_kind)
+        )
+        if inspection.ok ~= true then
+            return nil, inspection.rejection_reason or "source_modifier_unsupported_prefix", {
+                plan_recipe_id = compiled.recipe_id,
+                source_slot_id = source_slot.slot_id,
+            }
+        end
+    end
+
+    local materialized = helper_records.materialize({
+        recipe_id = attached_specs.plan.recipe_id,
+        specs = attached_specs.plan.helper_specs,
+    }, { limits = options.budget_limits })
+    if not materialized.ok then
+        runtime_stats.inc("helper_records_attach_failed")
+        return nil, "helper_records_failed", {
+            plan_recipe_id = compiled.recipe_id,
+            error = firstErrorMessage(materialized),
+            errors = materialized.errors,
+        }
+    end
+
+    attached_specs.plan.helper_records = materialized.records
+    attached_specs.plan.helper_record_count = materialized.record_count
+    attached_specs.plan.helper_records_reused = materialized.reused
+    runtime_stats.inc("helper_records_attached", materialized.record_count or 0)
+
+    return {
+        ok = true,
+        recipe_id = compiled.recipe_id,
+        record_count = materialized.record_count,
+        reused = materialized.reused,
+        warnings = materialized.warnings,
+        plan = attached_specs.plan,
+        source_slot = source_slot,
+        source_policy = inspection,
+    }, nil, nil
+end
+
+local function applySourcePolicyToJob(policy_plan, source_job, event_kind)
+    if type(policy_plan) ~= "table" or type(source_job) ~= "table" then
+        return nil
+    end
+    local source_slot = policy_plan.source_slot
+    local policy = policy_plan.source_policy
+    if type(source_slot) ~= "table" or type(policy) ~= "table" then
+        return nil
+    end
+    local applied = launch_modifier_policy.applySourcePolicyToLaunchSpec(
+        policy_plan.plan,
+        policy_plan.plan and policy_plan.plan.runtime_ir or nil,
+        source_slot,
+        source_job,
+        { event_kind = event_kind },
+        {
+            policy_kind = "source",
+            inspection = policy,
+        }
+    )
+    return applied
+end
+
 local function jobSummary(job_id)
     local job = orchestrator.getJob(job_id)
     local payload = job and job.payload or nil
@@ -2360,6 +3216,7 @@ local function jobSummary(job_id)
         post_launch_detonate_on_actor_attempted = job and job.post_launch_detonate_on_actor_attempted == true or false,
         post_launch_detonate_on_actor_ok = job and job.post_launch_detonate_on_actor_ok == true or false,
         post_launch_detonate_on_actor_error = job and job.post_launch_detonate_on_actor_error or nil,
+        source_modifier_kind = job and (job.source_modifier_kind or (payload and payload.source_modifier_kind)) or nil,
         payload_modifier_kind = job and (job.payload_modifier_kind or (payload and payload.payload_modifier_kind)) or nil,
         source_slot_id = job and job.source_slot_id or nil,
         source_prefix_opcode = job and (job.source_prefix_opcode or (payload and payload.source_prefix_opcode)) or nil,
@@ -2921,7 +3778,40 @@ local function trySpeedPlusDispatch(compiled, launch_payload, options)
     end
 
     local speed_info = speed_plan.mutation
+    local source_policy_plan = nil
+    if speed_plan.primary_mode == "single" then
+        local source_entry = selected_helpers[1] and selected_helpers[1].slot or nil
+        local source_policy = launch_modifier_policy.inspectSourceEntry(
+            attached.plan,
+            attached.plan and attached.plan.runtime_ir or nil,
+            source_entry,
+            sourcePolicyOptions(options, nil)
+        )
+        if source_policy.ok ~= true then
+            return speedPlusRejected(source_policy.rejection_reason or "source_modifier_unsupported_prefix", {
+                plan_recipe_id = compiled.recipe_id,
+                slot_id = source_entry and source_entry.slot_id or nil,
+            })
+        end
+        source_policy_plan = {
+            plan = attached.plan,
+            source_slot = source_entry,
+            source_policy = source_policy,
+        }
+        speed_info = source_policy.mutations and source_policy.mutations.speed_plus or speed_info
+    end
     local job_inputs = buildJobInputs(selected_helpers, compiled.recipe_id, cast_id, launch_payload, pattern_info, nil, speed_info)
+    if source_policy_plan ~= nil then
+        for _, job_input in ipairs(job_inputs) do
+            local applied = applySourcePolicyToJob(source_policy_plan, job_input, "source")
+            if not applied or applied.ok ~= true then
+                return speedPlusRejected(applied and applied.rejection_reason or "source_modifier_unsupported_prefix", {
+                    plan_recipe_id = compiled.recipe_id,
+                    slot_id = job_input and job_input.slot_id or nil,
+                })
+            end
+        end
+    end
     local slot_ids = {}
     local helper_engine_ids = {}
     local emission_indexes = {}
@@ -2954,6 +3844,7 @@ local function trySpeedPlusDispatch(compiled, launch_payload, options)
             helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
             dispatch_count = #selected_helpers,
             fanout_count = #selected_helpers,
+            source_modifier_kind = job_inputs[1] and job_inputs[1].source_modifier_kind or nil,
             speed_plus_primary_mode = speed_plan.primary_mode,
             speed_plus_mode = speed_info and speed_info.speed_plus_mode or nil,
             speed_plus_value = speed_info and speed_info.speed_plus_value or nil,
@@ -3085,6 +3976,7 @@ local function trySpeedPlusDispatch(compiled, launch_payload, options)
         fallback = false,
         dispatch_count = #job_ids,
         fanout_count = #selected_helpers,
+        source_modifier_kind = first_job.source_modifier_kind,
         slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
         helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
         effect_id = selected_helpers[1] and selected_helpers[1].slot.effects and selected_helpers[1].slot.effects[1] and selected_helpers[1].slot.effects[1].id or nil,
@@ -3158,7 +4050,38 @@ local function trySizePlusDispatch(compiled, launch_payload, options)
         })
     end
 
-    local apply_result, apply_err = live_size_plus.applyToHelperSpecs(attached_specs.plan, size_plan.mutation)
+    local source_policy_plan = nil
+    local apply_result = nil
+    local apply_err = nil
+    if size_plan.primary_mode == "single" then
+        local source_entry, source_reason = sourceModifierPolicySourceEntry(attached_specs.plan)
+        if not source_entry then
+            return sizePlusRejected(source_reason or "missing_source_slot", {
+                plan_recipe_id = compiled.recipe_id,
+            }, "live_size_plus_unsupported_combo_rejections")
+        end
+        local source_policy = launch_modifier_policy.inspectSourceEntry(
+            attached_specs.plan,
+            attached_specs.plan and attached_specs.plan.runtime_ir or nil,
+            source_entry,
+            sourcePolicyOptions(options, nil)
+        )
+        if source_policy.ok ~= true then
+            return sizePlusRejected(source_policy.rejection_reason or "source_modifier_unsupported_prefix", {
+                plan_recipe_id = compiled.recipe_id,
+                slot_id = source_entry.slot_id,
+            })
+        end
+        source_policy_plan = {
+            plan = attached_specs.plan,
+            source_slot = source_entry,
+            source_policy = source_policy,
+        }
+        size_plan.mutation = source_policy.mutations and source_policy.mutations.size_plus or size_plan.mutation
+        apply_result = source_policy.mutations and source_policy.mutations.size_plus_apply_result or nil
+    else
+        apply_result, apply_err = live_size_plus.applyToHelperSpecs(attached_specs.plan, size_plan.mutation)
+    end
     if not apply_result then
         local counter = nil
         if apply_err == "size_plus_field_missing" then
@@ -3258,6 +4181,17 @@ local function trySizePlusDispatch(compiled, launch_payload, options)
 
     local size_info = size_plan.mutation
     local job_inputs = buildJobInputs(selected_helpers, compiled.recipe_id, cast_id, launch_payload, pattern_info, size_info)
+    if source_policy_plan ~= nil then
+        for _, job_input in ipairs(job_inputs) do
+            local applied = applySourcePolicyToJob(source_policy_plan, job_input, "source")
+            if not applied or applied.ok ~= true then
+                return sizePlusRejected(applied and applied.rejection_reason or "source_modifier_unsupported_prefix", {
+                    plan_recipe_id = compiled.recipe_id,
+                    slot_id = job_input and job_input.slot_id or nil,
+                })
+            end
+        end
+    end
     local slot_ids = {}
     local helper_engine_ids = {}
     local emission_indexes = {}
@@ -3290,6 +4224,7 @@ local function trySizePlusDispatch(compiled, launch_payload, options)
             helper_record_count = plan.helper_record_count or #plan.helper_records,
             dispatch_count = #selected_helpers,
             fanout_count = #selected_helpers,
+            source_modifier_kind = job_inputs[1] and job_inputs[1].source_modifier_kind or nil,
             size_plus_primary_mode = size_plan.primary_mode,
             size_plus_mode = size_info and size_info.size_plus_mode or nil,
             size_plus_value = size_info and size_info.size_plus_value or nil,
@@ -3420,6 +4355,7 @@ local function trySizePlusDispatch(compiled, launch_payload, options)
         fallback = false,
         dispatch_count = #job_ids,
         fanout_count = #selected_helpers,
+        source_modifier_kind = first_job.source_modifier_kind,
         slot_count = plan.slot_count or #plan.emission_slots,
         helper_record_count = plan.helper_record_count or #plan.helper_records,
         effect_id = selected_helpers[1] and selected_helpers[1].slot.effects and selected_helpers[1].slot.effects[1] and selected_helpers[1].slot.effects[1].id or nil,
@@ -4063,9 +4999,10 @@ local function tryChainDispatch(compiled, launch_payload, options)
     end
     if modifier_plan.payload_modifier_kind ~= nil then
         runtime_stats.inc("chain_modifier_qualified")
-        if modifier_plan.payload_modifier_kind == "speed_plus" then
+        if modifier_plan.has_speed_plus_payload == true then
             runtime_stats.inc("chain_modifier_speed_qualified")
-        elseif modifier_plan.payload_modifier_kind == "size_plus" then
+        end
+        if modifier_plan.has_size_plus_payload == true then
             runtime_stats.inc("chain_modifier_size_qualified")
             runtime_stats.inc("chain_modifier_size_specs_mutated", modifier_plan.size_plus_apply_result and modifier_plan.size_plus_apply_result.specs_mutated or 0)
         end
@@ -4164,6 +5101,8 @@ local function tryChainDispatch(compiled, launch_payload, options)
         payload_modifier_kind = chain_plan.payload_modifier_kind,
         has_multicast_payload = chain_plan.has_multicast_payload == true,
         chain_multicast_fanout_count = chain_plan.chain_multicast_fanout_count or 1,
+        has_speed_plus_payload = chain_plan.has_speed_plus_payload == true,
+        has_size_plus_payload = chain_plan.has_size_plus_payload == true,
         speed_plus_mutation = chain_plan.speed_plus_mutation,
         size_plus_mutation = chain_plan.size_plus_mutation,
         payload_emission_index = chain_plan.payload.slot.emission_index or chain_plan.payload.helper.emission_index,
@@ -4172,6 +5111,7 @@ local function tryChainDispatch(compiled, launch_payload, options)
         requested_hops = chain_plan.requested_hops,
         max_hops = chain_plan.max_hops,
         candidate_cap = chain_plan.candidate_cap or options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
+        scan_actor_cap = options.max_chain_scan_actors or limits.MAX_CHAIN_SCAN_ACTORS,
         targeting_mode = "no_immediate_repeat",
         actor = launch_payload.actor or launch_payload.sender,
         candidate_provider = options.chain_candidate_provider or options.candidate_provider,
@@ -4251,7 +5191,7 @@ local function tryChainDispatch(compiled, launch_payload, options)
             payload_modifier_kind = chain_plan.payload_modifier_kind,
             has_multicast_payload = chain_plan.has_multicast_payload == true,
             chain_multicast_fanout_count = chain_plan.chain_multicast_fanout_count or 1,
-            speed_plus = chain_plan.payload_modifier_kind == "speed_plus" or nil,
+            speed_plus = chain_plan.has_speed_plus_payload == true or nil,
             speed_plus_mode = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_mode or nil,
             speed_plus_value = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_value or nil,
             speed_plus_base_speed = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_base_speed or nil,
@@ -4259,7 +5199,7 @@ local function tryChainDispatch(compiled, launch_payload, options)
             speed_plus_speed = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_speed or nil,
             speed_plus_max_speed = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_max_speed or nil,
             speed_plus_field = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_field or nil,
-            size_plus = chain_plan.payload_modifier_kind == "size_plus" or nil,
+            size_plus = chain_plan.has_size_plus_payload == true or nil,
             size_plus_mode = chain_plan.size_plus_mutation and chain_plan.size_plus_mutation.size_plus_mode or nil,
             size_plus_value = chain_plan.size_plus_mutation and chain_plan.size_plus_mutation.size_plus_value or nil,
             size_plus_multiplier = chain_plan.size_plus_mutation and chain_plan.size_plus_mutation.size_plus_multiplier or nil,
@@ -4344,7 +5284,7 @@ local function tryChainDispatch(compiled, launch_payload, options)
         payload_modifier_kind = chain_plan.payload_modifier_kind,
         has_multicast_payload = chain_plan.has_multicast_payload == true,
         chain_multicast_fanout_count = chain_plan.chain_multicast_fanout_count or 1,
-        speed_plus = chain_plan.payload_modifier_kind == "speed_plus" or nil,
+        speed_plus = chain_plan.has_speed_plus_payload == true or nil,
         speed_plus_mode = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_mode or nil,
         speed_plus_value = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_value or nil,
         speed_plus_base_speed = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_base_speed or nil,
@@ -4352,7 +5292,7 @@ local function tryChainDispatch(compiled, launch_payload, options)
         speed_plus_speed = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_speed or nil,
         speed_plus_max_speed = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_max_speed or nil,
         speed_plus_field = chain_plan.speed_plus_mutation and chain_plan.speed_plus_mutation.speed_plus_field or nil,
-        size_plus = chain_plan.payload_modifier_kind == "size_plus" or nil,
+        size_plus = chain_plan.has_size_plus_payload == true or nil,
         size_plus_mode = chain_plan.size_plus_mutation and chain_plan.size_plus_mutation.size_plus_mode or nil,
         size_plus_value = chain_plan.size_plus_mutation and chain_plan.size_plus_mutation.size_plus_value or nil,
         size_plus_multiplier = chain_plan.size_plus_mutation and chain_plan.size_plus_mutation.size_plus_multiplier or nil,
@@ -4398,6 +5338,35 @@ local function tryTimerDispatch(compiled, launch_payload, options)
         }, "live_timer_disabled_rejections")
     end
 
+    if compiled.plan then
+        local prepared, prepare_reason, prepare_details = launch_modifier_policy.prepareCachedPlanPayloadModifiers(compiled.recipe_id, {
+            source_opcode = "Timer",
+            apply_size_to_specs = true,
+            allow_payload_launch_modifiers = true,
+            allow_payload_multicast = payloadMulticastRuntimeEnabled(options),
+            force_speed_plus_enabled = options.force_speed_plus_enabled,
+            force_speed_plus_disabled = options.force_speed_plus_disabled,
+            speed_plus_enabled = dev.liveSpeedPlusEnabled() == true,
+            force_size_plus_enabled = options.force_size_plus_enabled,
+            force_size_plus_disabled = options.force_size_plus_disabled,
+            size_plus_enabled = dev.liveSizePlusEnabled() == true,
+            max_fanout = options.max_payload_fanout,
+            max_projectiles = options.max_projectiles,
+        })
+        if not prepared then
+            if prepare_reason == "helper_specs_failed" then
+                return timerRejected("helper_specs_failed", {
+                    plan_recipe_id = compiled.recipe_id,
+                    error = firstErrorMessage(prepare_details),
+                    errors = prepare_details and prepare_details.errors,
+                })
+            end
+            return timerRejected(prepare_reason or "payload_modifier_combo_deferred", {
+                plan_recipe_id = compiled.recipe_id,
+            })
+        end
+    end
+
     local attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
     if not attached.ok then
         return timerRejected("helper_records_failed", {
@@ -4410,6 +5379,13 @@ local function tryTimerDispatch(compiled, launch_payload, options)
     local timer_plan, timer_reason = live_timer.selectV0Plan(attached.plan, {
         allow_payload_multicast = payloadMulticastRuntimeEnabled(options),
         allow_payload_pattern = payloadPatternRuntimeEnabled(options),
+        allow_payload_launch_modifiers = true,
+        force_speed_plus_enabled = options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options.force_speed_plus_disabled,
+        speed_plus_enabled = dev.liveSpeedPlusEnabled() == true,
+        force_size_plus_enabled = options.force_size_plus_enabled,
+        force_size_plus_disabled = options.force_size_plus_disabled,
+        size_plus_enabled = dev.liveSizePlusEnabled() == true,
         max_depth = options.max_nested_payload_depth,
         max_jobs = options.max_nested_payload_jobs,
         max_fanout = options.max_payload_fanout,
@@ -4449,6 +5425,8 @@ local function tryTimerDispatch(compiled, launch_payload, options)
         payload_pattern = timer_plan.payload_pattern == true,
         payload_pattern_kind = timer_plan.payload_pattern_kind,
         payload_pattern_op = timer_plan.payload_pattern_op,
+        has_payload_modifier = timer_plan.has_payload_modifier == true,
+        payload_modifier_kinds = timer_plan.payload_modifier_kinds,
         plan = attached.plan,
         max_payload_fanout = timer_plan.max_payload_fanout,
         max_projectiles = timer_plan.max_projectiles,
@@ -4484,6 +5462,8 @@ local function tryTimerDispatch(compiled, launch_payload, options)
             payload_multicast = timer_plan.payload_multicast == true,
             payload_pattern = timer_plan.payload_pattern == true,
             payload_pattern_kind = timer_plan.payload_pattern_kind,
+            has_payload_modifier = timer_plan.has_payload_modifier == true,
+            payload_modifier_kinds = timer_plan.payload_modifier_kinds,
             timer_payload_effect_id = timer_plan.payload_effect_id,
             timer_seconds = timer_plan.timer_seconds,
             timer_delay_ticks = timer_plan.timer_delay_ticks,
@@ -4621,6 +5601,8 @@ local function tryTimerDispatch(compiled, launch_payload, options)
         payload_multicast = timer_plan.payload_multicast == true,
         payload_pattern = timer_plan.payload_pattern == true,
         payload_pattern_kind = timer_plan.payload_pattern_kind,
+        has_payload_modifier = timer_plan.has_payload_modifier == true,
+        payload_modifier_kinds = timer_plan.payload_modifier_kinds,
         payload_pattern_direction_keys = schedule.payload_pattern_direction_keys,
         timer_payload_effect_id = timer_plan.payload_effect_id,
         timer_seconds = timer_plan.timer_seconds,
@@ -4689,13 +5671,11 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         }, "live_bounce_capability_rejections")
     end
 
-    local attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
-    if not attached.ok then
-        return bounceRejected("helper_records_failed", {
-            plan_recipe_id = compiled.recipe_id,
-            error = firstErrorMessage(attached),
-            errors = attached.errors,
-        })
+    local attached, attach_reason, attach_details = attachHelperRecordsWithSourcePolicy(compiled, options, "bounce")
+    if not attached then
+        attach_details = attach_details or {}
+        attach_details.plan_recipe_id = attach_details.plan_recipe_id or compiled.recipe_id
+        return bounceRejected(attach_reason or "helper_records_failed", attach_details)
     end
 
     local bounce_plan, bounce_reason = live_bounce.selectV0Plan(attached.plan, {
@@ -4714,6 +5694,13 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         allow_pending_launch_jobs = options.allow_pending_launch_jobs,
         allow_payload_multicast = payloadMulticastRuntimeEnabled(options),
         allow_payload_pattern = payloadPatternRuntimeEnabled(options),
+        force_speed_plus_enabled = options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options.force_speed_plus_disabled,
+        speed_plus_enabled = dev.liveSpeedPlusEnabled() == true,
+        force_size_plus_enabled = options.force_size_plus_enabled,
+        force_size_plus_disabled = options.force_size_plus_disabled,
+        size_plus_enabled = dev.liveSizePlusEnabled() == true,
+        source_modifier_policy = attached.source_policy,
     })
     if not bounce_plan then
         return bounceRejected(bounce_reason or "bounce_v0_rejected", {
@@ -4794,6 +5781,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
     local selected_helpers = { bounce_plan.source }
     local job_inputs = buildJobInputs(selected_helpers, compiled.recipe_id, cast_id, launch_payload, nil)
     local source_job = job_inputs[1]
+    applySourcePolicyToJob(attached, source_job, "bounce")
     local binding = {
         recipe_id = compiled.recipe_id,
         plan = attached.plan,
@@ -4824,6 +5812,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         chain_candidate_provider = options.chain_candidate_provider or options.candidate_provider,
         chain_source_target = options.chain_source_target,
         candidate_cap = options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
+        scan_actor_cap = options.max_chain_scan_actors or limits.MAX_CHAIN_SCAN_ACTORS,
         scan_radius = options.chain_scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
         max_chain_ticks = options.max_chain_ticks,
         max_jobs_per_tick = bounce_plan.max_jobs_per_tick,
@@ -4868,6 +5857,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
             requested_hops = bounce_plan.chain_requested_hops,
             max_hops = bounce_plan.chain_max_hops,
             candidate_cap = options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
+            scan_actor_cap = options.max_chain_scan_actors or limits.MAX_CHAIN_SCAN_ACTORS,
             targeting_mode = "no_immediate_repeat",
             actor = launch_payload.actor or launch_payload.sender,
             candidate_provider = options.chain_candidate_provider or options.candidate_provider,
@@ -4942,6 +5932,24 @@ local function tryBounceDispatch(compiled, launch_payload, options)
                 branch_kind = source_payload.branch_kind,
                 branch_index = source_payload.branch_index,
                 branch_count = source_payload.branch_count,
+                source_modifier_kind = source_payload.source_modifier_kind,
+                speed_plus = source_payload.speed_plus,
+                speed_plus_mode = source_payload.speed_plus_mode,
+                speed_plus_value = source_payload.speed_plus_value,
+                speed_plus_base_speed = source_payload.speed_plus_base_speed,
+                speed_plus_multiplier = source_payload.speed_plus_multiplier,
+                speed_plus_speed = source_payload.speed_plus_speed,
+                speed_plus_max_speed = source_payload.speed_plus_max_speed,
+                speed_plus_field = source_payload.speed_plus_field,
+                speed_plus_capped = source_payload.speed_plus_capped,
+                size_plus = source_payload.size_plus,
+                size_plus_mode = source_payload.size_plus_mode,
+                size_plus_value = source_payload.size_plus_value,
+                size_plus_multiplier = source_payload.size_plus_multiplier,
+                size_plus_field = source_payload.size_plus_field,
+                size_plus_capped = source_payload.size_plus_capped,
+                size_plus_base_area = source_payload.size_plus_base_area,
+                size_plus_area = source_payload.size_plus_area,
             })
             probe_projectile_id = string.format("probe_projectile:%s:%s", tostring(cast_id), tostring(bounce_plan.source_slot_id))
             probe_source_job = {
@@ -4960,6 +5968,17 @@ local function tryBounceDispatch(compiled, launch_payload, options)
                 bounceMax = bounce_plan.bounce_max,
                 bouncePower = bounce_plan.bounce_power,
                 detonateOnActorHit = false,
+                source_modifier_kind = source_payload.source_modifier_kind,
+                speed = source_payload.speed,
+                maxSpeed = source_payload.maxSpeed,
+                speed_plus = source_payload.speed_plus,
+                speed_plus_field = source_payload.speed_plus_field,
+                speed_plus_speed = source_payload.speed_plus_speed,
+                speed_plus_max_speed = source_payload.speed_plus_max_speed,
+                size_plus = source_payload.size_plus,
+                size_plus_field = source_payload.size_plus_field,
+                size_plus_base_area = source_payload.size_plus_base_area,
+                size_plus_area = source_payload.size_plus_area,
                 launch_accepted = false,
                 projectile_id = probe_projectile_id,
                 projectile_registered = false,
@@ -4979,6 +5998,15 @@ local function tryBounceDispatch(compiled, launch_payload, options)
             helper_engine_id = bounce_plan.source_helper_engine_id,
             source_slot_id = bounce_plan.source_slot_id,
             source_helper_engine_id = bounce_plan.source_helper_engine_id,
+            source_modifier_kind = source_job and source_job.source_modifier_kind or nil,
+            speed_plus = source_job and source_job.speed_plus or nil,
+            speed_plus_field = source_job and source_job.speed_plus_field or nil,
+            speed_plus_speed = source_job and source_job.speed_plus_speed or nil,
+            speed_plus_max_speed = source_job and source_job.speed_plus_max_speed or nil,
+            size_plus = source_job and source_job.size_plus or nil,
+            size_plus_field = source_job and source_job.size_plus_field or nil,
+            size_plus_base_area = source_job and source_job.size_plus_base_area or nil,
+            size_plus_area = source_job and source_job.size_plus_area or nil,
             slot_ids = { bounce_plan.source_slot_id },
             helper_engine_ids = { bounce_plan.source_helper_engine_id },
             bounce_id = bounce_id,
@@ -5125,6 +6153,15 @@ local function tryBounceDispatch(compiled, launch_payload, options)
         helper_engine_id = bounce_plan.source_helper_engine_id,
         slot_ids = { bounce_plan.source_slot_id },
         helper_engine_ids = { bounce_plan.source_helper_engine_id },
+        source_modifier_kind = summary.source_modifier_kind,
+        speed_plus = summary.speed_plus,
+        speed_plus_field = summary.speed_plus_field,
+        speed_plus_speed = summary.speed_plus_speed,
+        speed_plus_max_speed = summary.speed_plus_max_speed,
+        size_plus = summary.size_plus,
+        size_plus_field = summary.size_plus_field,
+        size_plus_base_area = summary.size_plus_base_area,
+        size_plus_area = summary.size_plus_area,
         bounce_id = bounce_id,
         bounce_max = bounce_plan.bounce_max,
         bounce_power = bounce_plan.bounce_power,
@@ -5195,13 +6232,11 @@ local function tryPierceDispatch(compiled, launch_payload, options)
         }, "live_pierce_capability_rejections")
     end
 
-    local attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
-    if not attached.ok then
-        return pierceRejected("helper_records_failed", {
-            plan_recipe_id = compiled.recipe_id,
-            error = firstErrorMessage(attached),
-            errors = attached.errors,
-        })
+    local attached, attach_reason, attach_details = attachHelperRecordsWithSourcePolicy(compiled, options, "pierce")
+    if not attached then
+        attach_details = attach_details or {}
+        attach_details.plan_recipe_id = attach_details.plan_recipe_id or compiled.recipe_id
+        return pierceRejected(attach_reason or "helper_records_failed", attach_details)
     end
 
     local pierce_plan, pierce_reason = live_pierce.selectV0Plan(attached.plan, {
@@ -5217,6 +6252,13 @@ local function tryPierceDispatch(compiled, launch_payload, options)
         chaos_budget_profile = options.chaos_budget_profile,
         max_jobs_per_tick = options.max_jobs_per_tick,
         max_live_launches_per_tick = options.max_live_launches_per_tick,
+        force_speed_plus_enabled = options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options.force_speed_plus_disabled,
+        speed_plus_enabled = dev.liveSpeedPlusEnabled() == true,
+        force_size_plus_enabled = options.force_size_plus_enabled,
+        force_size_plus_disabled = options.force_size_plus_disabled,
+        size_plus_enabled = dev.liveSizePlusEnabled() == true,
+        source_modifier_policy = attached.source_policy,
     })
     if not pierce_plan then
         return pierceRejected(pierce_reason or "pierce_v0_rejected", {
@@ -5255,6 +6297,7 @@ local function tryPierceDispatch(compiled, launch_payload, options)
             source_slot_id = pierce_plan.source_slot_id,
         })
     end
+    applySourcePolicyToJob(attached, source_job, "pierce")
 
     local binding = {
         plan = attached.plan,
@@ -5312,6 +6355,7 @@ local function tryPierceDispatch(compiled, launch_payload, options)
             requested_hops = pierce_plan.chain_requested_hops,
             max_hops = pierce_plan.chain_max_hops,
             candidate_cap = options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
+            scan_actor_cap = options.max_chain_scan_actors or limits.MAX_CHAIN_SCAN_ACTORS,
             targeting_mode = "no_immediate_repeat",
             actor = launch_payload.actor or launch_payload.sender,
             candidate_provider = options.chain_candidate_provider or options.candidate_provider,
@@ -5385,6 +6429,24 @@ local function tryPierceDispatch(compiled, launch_payload, options)
                 branch_kind = source_payload.branch_kind,
                 branch_index = source_payload.branch_index,
                 branch_count = source_payload.branch_count,
+                source_modifier_kind = source_payload.source_modifier_kind,
+                speed_plus = source_payload.speed_plus,
+                speed_plus_mode = source_payload.speed_plus_mode,
+                speed_plus_value = source_payload.speed_plus_value,
+                speed_plus_base_speed = source_payload.speed_plus_base_speed,
+                speed_plus_multiplier = source_payload.speed_plus_multiplier,
+                speed_plus_speed = source_payload.speed_plus_speed,
+                speed_plus_max_speed = source_payload.speed_plus_max_speed,
+                speed_plus_field = source_payload.speed_plus_field,
+                speed_plus_capped = source_payload.speed_plus_capped,
+                size_plus = source_payload.size_plus,
+                size_plus_mode = source_payload.size_plus_mode,
+                size_plus_value = source_payload.size_plus_value,
+                size_plus_multiplier = source_payload.size_plus_multiplier,
+                size_plus_field = source_payload.size_plus_field,
+                size_plus_capped = source_payload.size_plus_capped,
+                size_plus_base_area = source_payload.size_plus_base_area,
+                size_plus_area = source_payload.size_plus_area,
             })
             probe_projectile_id = string.format("probe_projectile:%s:%s", tostring(cast_id), tostring(pierce_plan.source_slot_id))
             probe_source_job = {
@@ -5400,6 +6462,17 @@ local function tryPierceDispatch(compiled, launch_payload, options)
                 pierce_limit = pierce_plan.pierce_limit,
                 piercing = true,
                 pierceLimit = pierce_plan.pierce_limit,
+                source_modifier_kind = source_payload.source_modifier_kind,
+                speed = source_payload.speed,
+                maxSpeed = source_payload.maxSpeed,
+                speed_plus = source_payload.speed_plus,
+                speed_plus_field = source_payload.speed_plus_field,
+                speed_plus_speed = source_payload.speed_plus_speed,
+                speed_plus_max_speed = source_payload.speed_plus_max_speed,
+                size_plus = source_payload.size_plus,
+                size_plus_field = source_payload.size_plus_field,
+                size_plus_base_area = source_payload.size_plus_base_area,
+                size_plus_area = source_payload.size_plus_area,
                 launch_accepted = false,
                 projectile_id = probe_projectile_id,
                 projectile_registered = false,
@@ -5418,6 +6491,15 @@ local function tryPierceDispatch(compiled, launch_payload, options)
             helper_engine_id = pierce_plan.source_helper_engine_id,
             source_slot_id = pierce_plan.source_slot_id,
             source_helper_engine_id = pierce_plan.source_helper_engine_id,
+            source_modifier_kind = source_job and source_job.source_modifier_kind or nil,
+            speed_plus = source_job and source_job.speed_plus or nil,
+            speed_plus_field = source_job and source_job.speed_plus_field or nil,
+            speed_plus_speed = source_job and source_job.speed_plus_speed or nil,
+            speed_plus_max_speed = source_job and source_job.speed_plus_max_speed or nil,
+            size_plus = source_job and source_job.size_plus or nil,
+            size_plus_field = source_job and source_job.size_plus_field or nil,
+            size_plus_base_area = source_job and source_job.size_plus_base_area or nil,
+            size_plus_area = source_job and source_job.size_plus_area or nil,
             slot_ids = { pierce_plan.source_slot_id },
             helper_engine_ids = { pierce_plan.source_helper_engine_id },
             pierce_id = pierce_id,
@@ -5531,6 +6613,15 @@ local function tryPierceDispatch(compiled, launch_payload, options)
         helper_engine_id = pierce_plan.source_helper_engine_id,
         slot_ids = { pierce_plan.source_slot_id },
         helper_engine_ids = { pierce_plan.source_helper_engine_id },
+        source_modifier_kind = summary.source_modifier_kind,
+        speed_plus = summary.speed_plus,
+        speed_plus_field = summary.speed_plus_field,
+        speed_plus_speed = summary.speed_plus_speed,
+        speed_plus_max_speed = summary.speed_plus_max_speed,
+        size_plus = summary.size_plus,
+        size_plus_field = summary.size_plus_field,
+        size_plus_base_area = summary.size_plus_base_area,
+        size_plus_area = summary.size_plus_area,
         pierce_id = pierce_id,
         pierce_limit = pierce_plan.pierce_limit,
         piercing = summary.piercing == true,
@@ -5589,7 +6680,37 @@ local function tryTriggerDispatch(compiled, launch_payload, options)
         }, "live_trigger_disabled_rejections")
     end
 
-    local attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
+    local attached = nil
+    if compiled.plan then
+        local prepared, prepare_reason, prepare_details = launch_modifier_policy.prepareCachedPlanPayloadModifiers(compiled.recipe_id, {
+            source_opcode = "Trigger",
+            apply_size_to_specs = true,
+            allow_payload_launch_modifiers = true,
+            allow_payload_multicast = payloadMulticastRuntimeEnabled(options),
+            force_speed_plus_enabled = options.force_speed_plus_enabled,
+            force_speed_plus_disabled = options.force_speed_plus_disabled,
+            speed_plus_enabled = dev.liveSpeedPlusEnabled() == true,
+            force_size_plus_enabled = options.force_size_plus_enabled,
+            force_size_plus_disabled = options.force_size_plus_disabled,
+            size_plus_enabled = dev.liveSizePlusEnabled() == true,
+            max_fanout = options.max_payload_fanout,
+            max_projectiles = options.max_projectiles,
+        })
+        if not prepared then
+            if prepare_reason == "helper_specs_failed" then
+                return triggerRejected("helper_specs_failed", {
+                    plan_recipe_id = compiled.recipe_id,
+                    error = firstErrorMessage(prepare_details),
+                    errors = prepare_details and prepare_details.errors,
+                })
+            end
+            return triggerRejected(prepare_reason or "payload_modifier_combo_deferred", {
+                plan_recipe_id = compiled.recipe_id,
+            })
+        end
+    end
+
+    attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
     if not attached.ok then
         return triggerRejected("helper_records_failed", {
             plan_recipe_id = compiled.recipe_id,
@@ -5601,6 +6722,13 @@ local function tryTriggerDispatch(compiled, launch_payload, options)
     local trigger_plan, trigger_reason = live_trigger.selectV0Plan(attached.plan, {
         allow_payload_multicast = payloadMulticastRuntimeEnabled(options),
         allow_payload_pattern = payloadPatternRuntimeEnabled(options),
+        allow_payload_launch_modifiers = true,
+        force_speed_plus_enabled = options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options.force_speed_plus_disabled,
+        speed_plus_enabled = dev.liveSpeedPlusEnabled() == true,
+        force_size_plus_enabled = options.force_size_plus_enabled,
+        force_size_plus_disabled = options.force_size_plus_disabled,
+        size_plus_enabled = dev.liveSizePlusEnabled() == true,
         max_depth = options.max_nested_payload_depth,
         max_jobs = options.max_nested_payload_jobs,
         max_fanout = options.max_payload_fanout,
@@ -5641,6 +6769,8 @@ local function tryTriggerDispatch(compiled, launch_payload, options)
         payload_pattern = trigger_plan.payload_pattern == true,
         payload_pattern_kind = trigger_plan.payload_pattern_kind,
         payload_pattern_op = trigger_plan.payload_pattern_op,
+        has_payload_modifier = trigger_plan.has_payload_modifier == true,
+        payload_modifier_kinds = trigger_plan.payload_modifier_kinds,
         max_payload_fanout = trigger_plan.max_payload_fanout,
         max_projectiles = trigger_plan.max_projectiles,
         max_jobs_per_tick = trigger_plan.max_jobs_per_tick,
@@ -5843,6 +6973,32 @@ local function tryTriggerDispatch(compiled, launch_payload, options)
     }
 end
 
+local function opsHaveLaunchModifier(ops)
+    for _, op in ipairs(ops or {}) do
+        if op and (op.opcode == "Speed+" or op.opcode == "Size+") then
+            return true
+        end
+    end
+    return false
+end
+
+local function planHasTriggerPayloadLaunchModifier(plan)
+    for _, group in ipairs(plan and plan.groups or {}) do
+        local payload = group and group.payload
+        if payload and opsHaveLaunchModifier(payload.prefix_ops) then
+            return true
+        end
+    end
+    for _, slot in ipairs(plan and plan.emission_slots or {}) do
+        if slot and slot.kind == "payload_emission"
+            and slot.source_postfix_opcode == "Trigger"
+            and opsHaveLaunchModifier(slot.prefix_ops) then
+            return true
+        end
+    end
+    return false
+end
+
 function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
     local options = chaos_budget.withBudget(opts or {})
     if options.force_disabled == true then
@@ -6017,6 +7173,11 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
 
     if has_timer_effect and has_trigger_effect then
         return tryNestedTriggerTimerDispatch(compiled, launch_payload, options)
+    end
+
+    if compiled.plan and compiled.plan.bounds and compiled.plan.bounds.has_trigger
+        and planHasTriggerPayloadLaunchModifier(compiled.plan) then
+        return tryTriggerDispatch(compiled, launch_payload, options)
     end
 
     if compiled.plan and compiled.plan.bounds and compiled.plan.bounds.has_size_plus then
@@ -6409,6 +7570,12 @@ function live_simple_dispatch.onProbe(payload)
     elseif mode == "adapter_detonate_args" then
         send(sender, events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT, adapterDetonateArgsProbe(payload))
         return
+    elseif mode == "payload_modifier_policy_conformance" then
+        send(sender, events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT, payloadModifierPolicyConformanceProbe(payload))
+        return
+    elseif mode == "source_modifier_policy_conformance" then
+        send(sender, events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT, sourceModifierPolicyConformanceProbe(payload))
+        return
     elseif mode == "timer_detonation_audit" then
         send(sender, events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT, timerDetonationAuditProbe(payload))
         return
@@ -6756,6 +7923,22 @@ function live_simple_dispatch.onProbe(payload)
         probe_root = { real_effects = recipes.TRIGGER_FIRE_FROST_TARGET }
         opts.force_trigger_enabled = true
         opts.dry_run = false
+    elseif mode == "trigger_payload_speed_plus_post_hit" then
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_SPEED_PLUS_TARGET }
+        opts.force_trigger_enabled = true
+        opts.force_speed_plus_enabled = true
+        opts.dry_run = false
+    elseif mode == "trigger_payload_size_plus_post_hit" then
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_SIZE_PLUS_TARGET }
+        opts.force_trigger_enabled = true
+        opts.force_size_plus_enabled = true
+        opts.dry_run = false
+    elseif mode == "trigger_payload_speed_size_plus_post_hit" then
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_SPEED_SIZE_PLUS_TARGET }
+        opts.force_trigger_enabled = true
+        opts.force_speed_plus_enabled = true
+        opts.force_size_plus_enabled = true
+        opts.dry_run = false
     elseif applyBounceProbeMode(mode, opts) then
         probe_root = opts._spellforge_probe_root
         opts._spellforge_probe_root = nil
@@ -6844,6 +8027,25 @@ function live_simple_dispatch.onProbe(payload)
         probe_root = { real_effects = recipes.TIMER_PAYLOAD_MULTICAST_X3_TARGET }
         opts.force_timer_enabled = true
         opts.force_payload_multicast_enabled = true
+        opts.dry_run = false
+        opts.timer_duplicate_schedule_probe = true
+    elseif mode == "timer_payload_speed_plus_sequence" then
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_SPEED_PLUS_TARGET }
+        opts.force_timer_enabled = true
+        opts.force_speed_plus_enabled = true
+        opts.dry_run = false
+        opts.timer_duplicate_schedule_probe = true
+    elseif mode == "timer_payload_size_plus_sequence" then
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_SIZE_PLUS_TARGET }
+        opts.force_timer_enabled = true
+        opts.force_size_plus_enabled = true
+        opts.dry_run = false
+        opts.timer_duplicate_schedule_probe = true
+    elseif mode == "timer_payload_speed_size_plus_sequence" then
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_SPEED_SIZE_PLUS_TARGET }
+        opts.force_timer_enabled = true
+        opts.force_speed_plus_enabled = true
+        opts.force_size_plus_enabled = true
         opts.dry_run = false
         opts.timer_duplicate_schedule_probe = true
     elseif mode == "chaos_timer_payload_multicast_sequence" then
@@ -7093,6 +8295,9 @@ function live_simple_dispatch.onProbe(payload)
     local result = safeTryDispatch(payload, probe_entry, probe_root, opts)
     if (mode == "trigger_post_hit"
         or mode == "trigger_post_hit_fallback"
+        or mode == "trigger_payload_speed_plus_post_hit"
+        or mode == "trigger_payload_size_plus_post_hit"
+        or mode == "trigger_payload_speed_size_plus_post_hit"
         or mode == "trigger_payload_multicast_post_hit"
         or mode == "chaos_trigger_payload_multicast_post_hit"
         or mode == "trigger_payload_burst_post_hit"
@@ -7115,7 +8320,14 @@ function live_simple_dispatch.onProbe(payload)
             target = payload and payload.hit_object,
         }
         local hit_opts = { force_enabled = true, simulate_update_ticks = true }
-        if mode == "nested_trigger_timer_sequence" then
+        if mode == "trigger_payload_speed_plus_post_hit" then
+            hit_opts.force_speed_plus_enabled = true
+        elseif mode == "trigger_payload_size_plus_post_hit" then
+            hit_opts.force_size_plus_enabled = true
+        elseif mode == "trigger_payload_speed_size_plus_post_hit" then
+            hit_opts.force_speed_plus_enabled = true
+            hit_opts.force_size_plus_enabled = true
+        elseif mode == "nested_trigger_timer_sequence" then
             hit_opts.force_timer_enabled = true
         elseif mode == "nested_trigger_timer_final_multicast_sequence"
             or mode == "chaos_nested_trigger_timer_final_multicast_sequence"
@@ -7333,6 +8545,9 @@ function live_simple_dispatch.onProbe(payload)
     if (mode == "timer_real_delay_sequence"
         or mode == "timer_payload_multicast_sequence"
         or mode == "chaos_timer_payload_multicast_sequence"
+        or mode == "timer_payload_speed_plus_sequence"
+        or mode == "timer_payload_size_plus_sequence"
+        or mode == "timer_payload_speed_size_plus_sequence"
         or mode == "timer_payload_burst_sequence"
         or mode == "timer_payload_spread_sequence"
         or mode == "chaos_timer_payload_spread_sequence"
@@ -7369,7 +8584,7 @@ function live_simple_dispatch.onProbe(payload)
         result.expected_payload_count = expected_payload_count
     end
     local ok = false
-    if mode == "non_qualifying" or mode == "multicast_disabled" or mode == "spread_disabled" or mode == "burst_disabled" or mode == "trigger_disabled" or mode == "timer_disabled" or mode == "speed_plus_disabled" or mode == "size_plus_disabled" or mode == "homing_disabled" or mode == "bounce_disabled" or mode == "bounce_over_cap" or mode == "bounce_fanout_deferred" or mode == "bounce_timer_deferred" or mode == "bounce_chain_deferred" or mode == "bounce_chain_payload_disabled" or mode == "bounce_nested_payload_deferred" or mode == "bounce_speed_plus_deferred" or mode == "bounce_size_plus_deferred" or mode == "bounce_homing_deferred" or mode == "bounce_trigger_multicast_disabled" or mode == "bounce_trigger_pattern_disabled" or mode == "pierce_disabled" or mode == "pierce_trigger_multicast_disabled" or mode == "pierce_trigger_pattern_disabled" or mode == "pierce_chain_payload_disabled" or mode == "pierce_timer_deferred" or mode == "pierce_bounce_deferred" or mode == "pierce_homing_deferred" or mode == "pierce_speed_plus_deferred" or mode == "pierce_size_plus_deferred" or mode == "pierce_chain_deferred" or mode == "pierce_fanout_deferred" or mode == "pierce_nested_payload_deferred" or mode == "pierce_recursion_deferred" or mode == "payload_multicast_disabled" or mode == "trigger_payload_multicast_disabled" or mode == "timer_payload_multicast_disabled" or mode == "trigger_payload_pattern_disabled" or mode == "timer_payload_pattern_disabled" or mode == "nested_trigger_timer_disabled" or mode == "nested_tt_depth_reject" or mode == "nested_tt_same_kind_reject" or mode == "nested_tt_fanout_reject" or mode == "nested_final_fanout_disabled" or mode == "nested_final_fanout_cap_reject" or mode == "chaos_multicast_over_cap" or mode == "chaos_nested_final_fanout_over_cap" or mode == "chaos_chain_multicast_still_deferred" then
+    if mode == "non_qualifying" or mode == "multicast_disabled" or mode == "spread_disabled" or mode == "burst_disabled" or mode == "trigger_disabled" or mode == "timer_disabled" or mode == "speed_plus_disabled" or mode == "size_plus_disabled" or mode == "homing_disabled" or mode == "bounce_disabled" or mode == "bounce_over_cap" or mode == "bounce_fanout_deferred" or mode == "bounce_timer_deferred" or mode == "bounce_chain_deferred" or mode == "bounce_chain_payload_disabled" or mode == "bounce_nested_payload_deferred" or mode == "bounce_speed_plus_deferred" or mode == "bounce_size_plus_deferred" or mode == "bounce_speed_size_plus_deferred" or mode == "bounce_homing_deferred" or mode == "bounce_trigger_multicast_disabled" or mode == "bounce_trigger_pattern_disabled" or mode == "pierce_disabled" or mode == "pierce_trigger_multicast_disabled" or mode == "pierce_trigger_pattern_disabled" or mode == "pierce_chain_payload_disabled" or mode == "pierce_timer_deferred" or mode == "pierce_bounce_deferred" or mode == "pierce_homing_deferred" or mode == "pierce_speed_plus_deferred" or mode == "pierce_size_plus_deferred" or mode == "pierce_speed_size_plus_deferred" or mode == "pierce_chain_deferred" or mode == "pierce_fanout_deferred" or mode == "pierce_nested_payload_deferred" or mode == "pierce_recursion_deferred" or mode == "payload_multicast_disabled" or mode == "trigger_payload_multicast_disabled" or mode == "timer_payload_multicast_disabled" or mode == "trigger_payload_pattern_disabled" or mode == "timer_payload_pattern_disabled" or mode == "nested_trigger_timer_disabled" or mode == "nested_tt_depth_reject" or mode == "nested_tt_same_kind_reject" or mode == "nested_tt_fanout_reject" or mode == "nested_final_fanout_disabled" or mode == "nested_final_fanout_cap_reject" or mode == "chaos_multicast_over_cap" or mode == "chaos_nested_final_fanout_over_cap" or mode == "chaos_chain_multicast_still_deferred" then
         ok = result.ok == false and result.used_live_2_2c == false and type(result.fallback_reason) == "string"
     elseif mode == "speed_plus_dry_run" then
         ok = result.ok == true
@@ -7989,6 +9204,50 @@ function live_simple_dispatch.onProbe(payload)
             and (result.trigger_payload_launch_count == expected_count or pending_ok)
             and type(result.trigger_payload_slot_ids) == "table"
             and #result.trigger_payload_slot_ids == expected_count)
+    elseif mode == "trigger_payload_speed_plus_post_hit" then
+        local user_data = result and result.trigger_payload_launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "trigger"
+            and result.post_hit_result
+            and result.post_hit_result.ok == true
+            and result.trigger_duplicate_suppressed == true
+            and result.trigger_payload_count == 1
+            and result.trigger_payload_launch_count == 1
+            and type(user_data) == "table"
+            and user_data.payload_modifier_kind == "speed_plus"
+            and user_data.speed_plus == true
+            and user_data.speed_plus_field == "speed"
+    elseif mode == "trigger_payload_size_plus_post_hit" then
+        local user_data = result and result.trigger_payload_launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "trigger"
+            and result.post_hit_result
+            and result.post_hit_result.ok == true
+            and result.trigger_duplicate_suppressed == true
+            and result.trigger_payload_count == 1
+            and result.trigger_payload_launch_count == 1
+            and type(user_data) == "table"
+            and user_data.payload_modifier_kind == "size_plus"
+            and user_data.size_plus == true
+            and user_data.size_plus_field == "effect.area"
+    elseif mode == "trigger_payload_speed_size_plus_post_hit" then
+        local user_data = result and result.trigger_payload_launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "trigger"
+            and result.post_hit_result
+            and result.post_hit_result.ok == true
+            and result.trigger_duplicate_suppressed == true
+            and result.trigger_payload_count == 1
+            and result.trigger_payload_launch_count == 1
+            and type(user_data) == "table"
+            and user_data.payload_modifier_kind == "speed_plus_size_plus"
+            and user_data.speed_plus == true
+            and user_data.speed_plus_field == "speed"
+            and user_data.size_plus == true
+            and user_data.size_plus_field == "effect.area"
     elseif mode == "trigger_payload_burst_post_hit" or mode == "trigger_payload_spread_post_hit" or mode == "chaos_trigger_payload_burst_post_hit" then
         local expected_count = mode == "trigger_payload_burst_post_hit" and 5 or (mode == "chaos_trigger_payload_burst_post_hit" and recipes.CHAOS_HIGH_FANOUT_COUNT or 3)
         local expected_kind = (mode == "trigger_payload_burst_post_hit" or mode == "chaos_trigger_payload_burst_post_hit") and "Burst" or "Spread"
@@ -8082,6 +9341,66 @@ function live_simple_dispatch.onProbe(payload)
             and result.timer_payload_launch_count == 0
             and result.timer_duplicate_suppressed == true
             and result.timer_payload_count == expected_count
+            and result.timer_delay_semantics == "async_simulation_timer"
+            and result.real_delay_test == true
+    elseif mode == "timer_payload_speed_plus_sequence" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "timer"
+            and type(result.timer_id) == "string"
+            and result.async_timer_scheduled == true
+            and result.timer_status_after_schedule
+            and result.timer_status_after_schedule.pending == true
+            and tonumber(result.pending_count) == 1
+            and result.timer_immediate_payload_count == 0
+            and result.timer_before_delay_payload_count == 0
+            and result.timer_after_delay_payload_count == 0
+            and result.timer_payload_launch_count == 0
+            and result.timer_duplicate_suppressed == true
+            and result.timer_payload_count == 1
+            and result.has_payload_modifier == true
+            and type(result.payload_modifier_kinds) == "table"
+            and result.payload_modifier_kinds[1] == "speed_plus"
+            and result.timer_delay_semantics == "async_simulation_timer"
+            and result.real_delay_test == true
+    elseif mode == "timer_payload_size_plus_sequence" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "timer"
+            and type(result.timer_id) == "string"
+            and result.async_timer_scheduled == true
+            and result.timer_status_after_schedule
+            and result.timer_status_after_schedule.pending == true
+            and tonumber(result.pending_count) == 1
+            and result.timer_immediate_payload_count == 0
+            and result.timer_before_delay_payload_count == 0
+            and result.timer_after_delay_payload_count == 0
+            and result.timer_payload_launch_count == 0
+            and result.timer_duplicate_suppressed == true
+            and result.timer_payload_count == 1
+            and result.has_payload_modifier == true
+            and type(result.payload_modifier_kinds) == "table"
+            and result.payload_modifier_kinds[1] == "size_plus"
+            and result.timer_delay_semantics == "async_simulation_timer"
+            and result.real_delay_test == true
+    elseif mode == "timer_payload_speed_size_plus_sequence" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "timer"
+            and type(result.timer_id) == "string"
+            and result.async_timer_scheduled == true
+            and result.timer_status_after_schedule
+            and result.timer_status_after_schedule.pending == true
+            and tonumber(result.pending_count) == 1
+            and result.timer_immediate_payload_count == 0
+            and result.timer_before_delay_payload_count == 0
+            and result.timer_after_delay_payload_count == 0
+            and result.timer_payload_launch_count == 0
+            and result.timer_duplicate_suppressed == true
+            and result.timer_payload_count == 1
+            and result.has_payload_modifier == true
+            and type(result.payload_modifier_kinds) == "table"
+            and result.payload_modifier_kinds[1] == "speed_plus_size_plus"
             and result.timer_delay_semantics == "async_simulation_timer"
             and result.real_delay_test == true
     elseif mode == "timer_payload_burst_sequence" or mode == "timer_payload_spread_sequence" or mode == "chaos_timer_payload_spread_sequence" then

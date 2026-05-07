@@ -493,7 +493,7 @@ function runtime_stats.summaryLines()
             g("branch_observability_max_branch_fanout")
         ),
         string.format(
-            "chain_provider attempts=%d real_attempts=%d real_ok=%d real_unavailable=%d real_failed=%d mock_attempts=%d candidates_seen=%d candidates_returned=%d cap_hit=%d radius_applied=%d context_missing=%d position_missing=%d cell_missing=%d object_invalid=%d selected_real=%d selected_mock=%d",
+            "chain_provider attempts=%d real_attempts=%d real_ok=%d real_unavailable=%d real_failed=%d mock_attempts=%d candidates_seen=%d candidates_returned=%d candidate_cap_hit=%d actor_scan_cap_hit=%d current_excluded=%d caster_excluded=%d radius_applied=%d context_missing=%d position_missing=%d cell_missing=%d object_invalid=%d selected_real=%d selected_mock=%d",
             g("chain_provider_attempts"),
             g("chain_provider_real_attempts"),
             g("chain_provider_real_ok"),
@@ -503,6 +503,9 @@ function runtime_stats.summaryLines()
             g("chain_provider_candidates_seen"),
             g("chain_provider_candidates_returned"),
             g("chain_provider_candidate_cap_hit"),
+            g("chain_provider_actor_scan_cap_hit"),
+            g("chain_provider_current_target_excluded"),
+            g("chain_provider_caster_excluded"),
             g("chain_provider_radius_applied"),
             g("chain_provider_context_missing"),
             g("chain_provider_position_missing"),

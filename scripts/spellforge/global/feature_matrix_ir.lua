@@ -309,11 +309,11 @@ local function scanGroup(group, summary, depth, payload_stack, visiting)
     if has_chain and (has_trigger or has_timer) then
         addSet(summary.deferred_reasons, "chain_trigger_timer_deferred")
     end
-    if has_chain and (has_speed or has_size) and has_multicast then
-        addSet(summary.deferred_reasons, "chain_modifier_multicast_deferred")
-    end
-    if has_chain and has_speed and has_size then
+    if has_chain and has_speed and has_size and has_multicast then
         addSet(summary.deferred_reasons, "chain_modifier_combo_deferred")
+    end
+    if depth == 0 and has_speed and has_size and not has_chain then
+        addSet(summary.deferred_reasons, "source_modifier_combo_deferred")
     end
     if has_chain and hasSet(payload_stack, "Chain") then
         addSet(summary.deferred_reasons, "chain_recursion_deferred")
@@ -321,11 +321,16 @@ local function scanGroup(group, summary, depth, payload_stack, visiting)
     if has_chain and depth >= 2 then
         addSet(summary.deferred_reasons, "chain_nested_payload_deferred")
     end
-    if depth > 0 and has_speed and not has_chain then
-        addSet(summary.deferred_reasons, "payload_speed_plus_runtime_deferred")
-    end
-    if depth > 0 and has_size and not has_chain then
-        addSet(summary.deferred_reasons, "payload_size_plus_runtime_deferred")
+    if depth > 0 and (has_speed or has_size) and not has_chain then
+        if has_pattern then
+            addSet(summary.deferred_reasons, "payload_modifier_pattern_deferred")
+        elseif has_homing then
+            addSet(summary.deferred_reasons, "payload_modifier_homing_deferred")
+        elseif has_trigger or has_timer then
+            addSet(summary.deferred_reasons, "payload_modifier_nested_deferred")
+        elseif has_speed and has_size and has_multicast then
+            addSet(summary.deferred_reasons, "payload_modifier_combo_deferred")
+        end
     end
 
     if has_bounce and has_timer then
@@ -338,7 +343,17 @@ local function scanGroup(group, summary, depth, payload_stack, visiting)
         addSet(summary.deferred_reasons, "bounce_chain_deferred")
     end
     if has_bounce and (has_speed or has_size) then
-        addSet(summary.deferred_reasons, "bounce_modifier_deferred")
+        if has_speed and has_size then
+            addSet(summary.deferred_reasons, "source_modifier_combo_deferred")
+        elseif has_multicast or has_pattern then
+            addSet(summary.deferred_reasons, "source_modifier_pattern_deferred")
+        elseif has_homing then
+            addSet(summary.deferred_reasons, "source_modifier_homing_deferred")
+        elseif has_chain then
+            addSet(summary.deferred_reasons, "source_modifier_chain_deferred")
+        elseif has_trigger or has_timer or has_payload_effects then
+            addSet(summary.deferred_reasons, "source_modifier_nested_deferred")
+        end
     end
     if has_bounce and has_homing then
         addSet(summary.deferred_reasons, "bounce_homing_deferred")
@@ -357,7 +372,17 @@ local function scanGroup(group, summary, depth, payload_stack, visiting)
         addSet(summary.deferred_reasons, "pierce_chain_deferred")
     end
     if has_pierce and (has_speed or has_size) then
-        addSet(summary.deferred_reasons, "pierce_modifier_deferred")
+        if has_speed and has_size then
+            addSet(summary.deferred_reasons, "source_modifier_combo_deferred")
+        elseif has_multicast or has_pattern then
+            addSet(summary.deferred_reasons, "source_modifier_pattern_deferred")
+        elseif has_homing then
+            addSet(summary.deferred_reasons, "source_modifier_homing_deferred")
+        elseif has_chain then
+            addSet(summary.deferred_reasons, "source_modifier_chain_deferred")
+        elseif has_trigger or has_timer or has_payload_effects then
+            addSet(summary.deferred_reasons, "source_modifier_nested_deferred")
+        end
     end
     if has_pierce and has_homing then
         addSet(summary.deferred_reasons, "pierce_homing_deferred")

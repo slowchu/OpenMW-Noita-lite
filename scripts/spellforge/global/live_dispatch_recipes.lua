@@ -43,6 +43,28 @@ recipes.TRIGGER_FIRE_FROST_TARGET = {
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
 
+recipes.TRIGGER_PAYLOAD_SPEED_PLUS_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+recipes.TRIGGER_PAYLOAD_SIZE_PLUS_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_size_plus", params = { percent = 125 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+recipes.TRIGGER_PAYLOAD_SPEED_SIZE_PLUS_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "spellforge_size_plus", params = { percent = 125 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
 recipes.BOUNCE_FIRE_TARGET = {
     { id = "spellforge_bounce", params = { bounces = 3 } },
     { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
@@ -52,6 +74,31 @@ recipes.BOUNCE_TRIGGER_FIRE_FROST_TARGET = {
     { id = "spellforge_bounce", params = { bounces = 3 } },
     { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
     { id = "spellforge_trigger" },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+recipes.BOUNCE_TRIGGER_PAYLOAD_SPEED_PLUS_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+recipes.BOUNCE_TRIGGER_PAYLOAD_SIZE_PLUS_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+recipes.BOUNCE_TRIGGER_PAYLOAD_SPEED_SIZE_PLUS_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
     { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
 }
 
@@ -107,6 +154,31 @@ recipes.PIERCE_TRIGGER_FIRE_FROST_TARGET = {
     { id = "spellforge_pierce", params = { pierces = 3 } },
     { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
     { id = "spellforge_trigger" },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+recipes.PIERCE_TRIGGER_PAYLOAD_SPEED_PLUS_TARGET = {
+    { id = "spellforge_pierce", params = { pierces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+recipes.PIERCE_TRIGGER_PAYLOAD_SIZE_PLUS_TARGET = {
+    { id = "spellforge_pierce", params = { pierces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
+}
+
+recipes.PIERCE_TRIGGER_PAYLOAD_SPEED_SIZE_PLUS_TARGET = {
+    { id = "spellforge_pierce", params = { pierces = 3 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
     { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
 }
 
@@ -171,6 +243,13 @@ recipes.PIERCE_SPEED_PLUS_TARGET = {
 
 recipes.PIERCE_SIZE_PLUS_TARGET = {
     { id = "spellforge_pierce", params = { pierces = 3 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+recipes.PIERCE_SPEED_SIZE_PLUS_TARGET = {
+    { id = "spellforge_pierce", params = { pierces = 3 } },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
     { id = "spellforge_size_plus", params = { percent = 100 } },
     { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
@@ -240,6 +319,13 @@ recipes.BOUNCE_SPEED_PLUS_TARGET = {
 
 recipes.BOUNCE_SIZE_PLUS_TARGET = {
     { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+recipes.BOUNCE_SPEED_SIZE_PLUS_TARGET = {
+    { id = "spellforge_bounce", params = { bounces = 3 } },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
     { id = "spellforge_size_plus", params = { percent = 100 } },
     { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
@@ -319,6 +405,14 @@ recipes.CHAIN_SIZE_PLUS_FROST_TARGET = {
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
 
+recipes.CHAIN_SPEED_SIZE_PLUS_FROST_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
 recipes.CHAIN_MULTICAST_TARGET = {
     { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
     { id = "spellforge_chain", params = { hops = 3 } },
@@ -344,6 +438,15 @@ recipes.CHAIN_SPEED_PLUS_MULTICAST_TARGET = {
 recipes.CHAIN_SIZE_PLUS_MULTICAST_TARGET = {
     { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
     { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "spellforge_multicast", params = { count = 3 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+recipes.CHAIN_SPEED_SIZE_PLUS_MULTICAST_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
     { id = "spellforge_size_plus", params = { percent = 100 } },
     { id = "spellforge_multicast", params = { count = 3 } },
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
@@ -424,10 +527,37 @@ recipes.TRIGGER_CHAIN_SIZE_PLUS_FROST_TARGET = {
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
 
+recipes.TRIGGER_CHAIN_SPEED_SIZE_PLUS_FROST_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
 recipes.TRIGGER_CHAIN_MULTICAST_TARGET = {
     { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
     { id = "spellforge_trigger" },
     { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_multicast", params = { count = 3 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+recipes.TRIGGER_CHAIN_SPEED_PLUS_MULTICAST_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "spellforge_multicast", params = { count = 3 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
+recipes.TRIGGER_CHAIN_SIZE_PLUS_MULTICAST_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_trigger" },
+    { id = "spellforge_chain", params = { hops = 3 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
     { id = "spellforge_multicast", params = { count = 3 } },
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
@@ -705,6 +835,14 @@ recipes.TIMER_PAYLOAD_SIZE_PLUS_TARGET = {
     { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
 }
 
+recipes.TIMER_PAYLOAD_SPEED_SIZE_PLUS_TARGET = {
+    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+    { id = "spellforge_timer", params = { seconds = 1.0 } },
+    { id = "spellforge_speed_plus", params = { percent = 50 } },
+    { id = "spellforge_size_plus", params = { percent = 100 } },
+    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
+}
+
 recipes.NESTED_DEPTH_REJECTION_TARGET = {
     { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
     { id = "spellforge_timer", params = { seconds = 1.0 } },
@@ -725,6 +863,7 @@ recipes.NESTED_AUDIT_TARGETS = {
     timer_inside_trigger = recipes.TIMER_INSIDE_TRIGGER_TARGET,
     timer_payload_speed_plus = recipes.TIMER_PAYLOAD_SPEED_PLUS_TARGET,
     timer_payload_size_plus = recipes.TIMER_PAYLOAD_SIZE_PLUS_TARGET,
+    timer_payload_speed_size_plus = recipes.TIMER_PAYLOAD_SPEED_SIZE_PLUS_TARGET,
     chain = recipes.NON_QUALIFYING_CHAIN_FIRE_DAMAGE_TARGET,
     depth_rejection = recipes.NESTED_DEPTH_REJECTION_TARGET,
 }
@@ -733,6 +872,8 @@ recipes.CHAIN_AUDIT_TARGETS = {
     simple = recipes.CHAIN_FIRE_FROST_TARGET,
     direct_chain_3 = recipes.CHAIN_FIRE_FROST_TARGET,
     trigger_chain_3 = recipes.TRIGGER_CHAIN_FROST_TARGET,
+    direct_chain_speed_size_plus_3 = recipes.CHAIN_SPEED_SIZE_PLUS_FROST_TARGET,
+    trigger_chain_speed_size_plus_3 = recipes.TRIGGER_CHAIN_SPEED_SIZE_PLUS_FROST_TARGET,
     hop_bounce = recipes.CHAIN_FIRE_FROST_TARGET,
     hop_no_target = recipes.CHAIN_FIRE_FROST_TARGET,
     multicast = recipes.CHAIN_MULTICAST_TARGET,

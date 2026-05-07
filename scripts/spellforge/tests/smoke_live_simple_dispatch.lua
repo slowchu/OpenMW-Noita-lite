@@ -659,6 +659,15 @@ local function counter(snapshot, name)
     return tonumber(snapshot[name]) or 0
 end
 
+local function counterDelta(before_snapshot, after_snapshot, name)
+    local before_value = counter(before_snapshot, name)
+    local after_value = counter(after_snapshot, name)
+    if after_value < before_value then
+        return after_value
+    end
+    return after_value - before_value
+end
+
 local function assertCounterAtLeast(snapshot, name, minimum, label)
     local value = counter(snapshot, name)
     assertLine(value >= minimum, label, string.format("%s=%s expected>=%s", tostring(name), tostring(value), tostring(minimum)))
@@ -1534,6 +1543,36 @@ local function runChainRuntimeSmoke(callback)
             end,
         },
         {
+            chain_case = "direct_chain_speed_size_plus_3",
+            label = "direct Chain 3 Speed+ Size+ live runtime",
+            check = function(result)
+                assertLine(result and result.payload_modifier_kind == "speed_plus_size_plus", "direct Chain Speed+ Size+ reports payload modifier")
+                assertLine(selectedSequence(result) == "B,A,B", "direct Chain Speed+ Size+ launches B,A,B sequence", selectedSequence(result))
+                assertLine(result and result.chain_payload_launch_count == 3, "direct Chain Speed+ Size+ launches three modified payloads")
+                assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "direct Chain Speed+ Size+ payload userData keeps Chain continuation")
+                assertLine(jobsCarrySpeedPlusUserData(result and result.chain_payload_jobs, 3, result and result.dispatch and result.dispatch.cast_id), "direct Chain Speed+ Size+ payload userData keeps Speed+ metadata")
+                assertLine(jobsCarrySizePlusUserData(result and result.chain_payload_jobs, 3, result and result.dispatch and result.dispatch.cast_id), "direct Chain Speed+ Size+ payload userData keeps Size+ metadata")
+                assertLine(result and result.stop_reason == "max_hops_reached", "direct Chain Speed+ Size+ stops at max hops", result and result.stop_reason)
+                assertIrChainRuntimeUsed(result, 3, 3, "direct Chain Speed+ Size+ runtime")
+            end,
+        },
+        {
+            chain_case = "trigger_chain_speed_size_plus_3",
+            label = "Trigger Chain 3 Speed+ Size+ live runtime",
+            check = function(result)
+                assertLine(result and result.chain_shape == "trigger_payload_chain", "Trigger Chain Speed+ Size+ reports Trigger payload Chain shape")
+                assertLine(result and result.payload_modifier_kind == "speed_plus_size_plus", "Trigger Chain Speed+ Size+ reports payload modifier")
+                assertLine(selectedSequence(result) == "B,A,B", "Trigger Chain Speed+ Size+ launches B,A,B sequence", selectedSequence(result))
+                assertLine(result and result.chain_payload_launch_count == 3, "Trigger Chain Speed+ Size+ launches three modified payloads")
+                assertLine(result and result.duplicate_source_suppressed == true, "Trigger Chain Speed+ Size+ suppresses duplicate root Trigger hit")
+                assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain Speed+ Size+ suppresses duplicate chained payload hit")
+                assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "Trigger Chain Speed+ Size+ payload userData keeps Chain continuation")
+                assertLine(jobsCarrySpeedPlusUserData(result and result.chain_payload_jobs, 3, result and result.dispatch and result.dispatch.cast_id), "Trigger Chain Speed+ Size+ payload userData keeps Speed+ metadata")
+                assertLine(jobsCarrySizePlusUserData(result and result.chain_payload_jobs, 3, result and result.dispatch and result.dispatch.cast_id), "Trigger Chain Speed+ Size+ payload userData keeps Size+ metadata")
+                assertIrChainRuntimeUsed(result, 3, 3, "Trigger Chain Speed+ Size+ runtime")
+            end,
+        },
+        {
             chain_case = "no_valid",
             label = "Chain no-target early stop",
             check = function(result)
@@ -1567,6 +1606,27 @@ local function runChainRuntimeSmoke(callback)
             check = function(result)
                 assertLine(result and (result.provider_supported == true or result.provider == "unavailable"), "Chain real provider reports supported or unavailable")
                 assertLine(result and result.sfp_launch_unchanged == true, "Chain real provider availability probe does not call SFP")
+            end,
+        },
+        {
+            chain_case = "provider_prefilter_caps",
+            label = "Chain provider prefilter/cap regression",
+            check = function(result)
+                assertLine(result and result.ok == true, "Chain provider prefilter/cap regression passes", result and result.rejection_reason)
+                assertLine(result and result.prefilter_ok == true, "Chain provider prefilters current/caster before LOS")
+                assertLine(result and result.normal_caps_ok == true, "Chain provider normal small set hits no caps")
+                assertLine(result and result.cap_separation_ok == true, "Chain provider separates actor scan cap from returned candidate cap")
+                assertLine(result and result.normal_current_excluded == 1, "Chain provider excludes current hit target once", result and tostring(result.normal_current_excluded))
+                assertLine(result and result.normal_caster_excluded == 1, "Chain provider excludes caster once", result and tostring(result.normal_caster_excluded))
+                assertLine(result and result.normal_actor_scan_cap_hit == false, "Chain provider normal actor scan cap not hit")
+                assertLine(result and result.normal_candidate_cap_hit == false, "Chain provider normal candidate cap not hit")
+                assertLine(
+                    result and (tonumber(result.capped_inspected_count) or 0) > (tonumber(result.capped_candidate_count) or 0),
+                    "Chain provider inspects beyond returned candidate cap"
+                )
+                assertLine(result and result.capped_candidate_cap_hit == true, "Chain provider reports returned candidate cap when trimming")
+                assertLine(result and result.capped_actor_scan_cap_hit == false, "Chain provider does not confuse candidate cap with actor scan cap")
+                assertLine(result and result.sfp_launch_unchanged == true, "Chain provider prefilter/cap probe does not call SFP")
             end,
         },
         {
@@ -1620,26 +1680,82 @@ local function runChainRuntimeSmoke(callback)
         },
         {
             chain_case = "speed_plus_multicast",
-            label = "Chain Speed+ Multicast live deferral",
+            label = "Chain Speed+ Multicast live runtime",
             check = function(result)
-                assertLine(
-                    result and (result.fallback_reason == "chain_multicast_deferred"
-                        or result.fallback_reason == "chain_modifier_combo_deferred"),
-                    "Chain Speed+ Multicast live defers"
-                )
-                assertLine(result and result.chain_payload_launch_count == 0, "Chain Speed+ Multicast launches no Chain payload")
+                local fanout_count = 3
+                assertLine(result and result.live_mode == "chain", "Chain Speed+ Multicast reports Chain mode")
+                assertLine(result and result.chain_shape == "source_chain_payload", "Chain Speed+ Multicast reports direct shape")
+                assertLine(result and result.payload_modifier_kind == "speed_plus", "Chain Speed+ Multicast reports Speed+ modifier")
+                assertLine(result and result.has_multicast_payload == true, "Chain Speed+ Multicast reports payload fanout")
+                assertLine(result and result.chain_multicast_fanout_count == fanout_count, "Chain Speed+ Multicast reports fanout count")
+                assertLine(selectedSequence(result) == "B,A,B", "Chain Speed+ Multicast advances one continuation per hop", selectedSequence(result))
+                assertLine(result and result.chain_payload_launch_count == 3 * fanout_count, "Chain Speed+ Multicast launches modified sibling payloads")
+                assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), "Chain Speed+ Multicast payload userData carries branch identity")
+                assertLine(jobsCarrySpeedPlusUserData(result and result.chain_payload_jobs, 3 * fanout_count, result and result.dispatch and result.dispatch.cast_id), "Chain Speed+ Multicast payload userData keeps Speed+ metadata")
+                assertIrChainRuntimeUsed(result, 3, 3 * fanout_count, "Chain Speed+ Multicast runtime")
             end,
         },
         {
             chain_case = "size_plus_multicast",
-            label = "Chain Size+ Multicast live deferral",
+            label = "Chain Size+ Multicast live runtime",
             check = function(result)
-                assertLine(
-                    result and (result.fallback_reason == "chain_multicast_deferred"
-                        or result.fallback_reason == "chain_modifier_combo_deferred"),
-                    "Chain Size+ Multicast live defers"
-                )
-                assertLine(result and result.chain_payload_launch_count == 0, "Chain Size+ Multicast launches no Chain payload")
+                local fanout_count = 3
+                assertLine(result and result.live_mode == "chain", "Chain Size+ Multicast reports Chain mode")
+                assertLine(result and result.chain_shape == "source_chain_payload", "Chain Size+ Multicast reports direct shape")
+                assertLine(result and result.payload_modifier_kind == "size_plus", "Chain Size+ Multicast reports Size+ modifier")
+                assertLine(result and result.has_multicast_payload == true, "Chain Size+ Multicast reports payload fanout")
+                assertLine(result and result.chain_multicast_fanout_count == fanout_count, "Chain Size+ Multicast reports fanout count")
+                assertLine(selectedSequence(result) == "B,A,B", "Chain Size+ Multicast advances one continuation per hop", selectedSequence(result))
+                assertLine(result and result.chain_payload_launch_count == 3 * fanout_count, "Chain Size+ Multicast launches modified sibling payloads")
+                assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), "Chain Size+ Multicast payload userData carries branch identity")
+                assertLine(jobsCarrySizePlusUserData(result and result.chain_payload_jobs, 3 * fanout_count, result and result.dispatch and result.dispatch.cast_id), "Chain Size+ Multicast payload userData keeps Size+ metadata")
+                assertIrChainRuntimeUsed(result, 3, 3 * fanout_count, "Chain Size+ Multicast runtime")
+            end,
+        },
+        {
+            chain_case = "trigger_chain_speed_plus_multicast",
+            label = "Trigger Chain Speed+ Multicast live runtime",
+            check = function(result)
+                local fanout_count = 3
+                assertLine(result and result.live_mode == "chain", "Trigger Chain Speed+ Multicast reports Chain mode")
+                assertLine(result and result.chain_shape == "trigger_payload_chain", "Trigger Chain Speed+ Multicast reports Trigger payload shape")
+                assertLine(result and result.payload_modifier_kind == "speed_plus", "Trigger Chain Speed+ Multicast reports Speed+ modifier")
+                assertLine(result and result.has_multicast_payload == true, "Trigger Chain Speed+ Multicast reports payload fanout")
+                assertLine(result and result.chain_multicast_fanout_count == fanout_count, "Trigger Chain Speed+ Multicast reports fanout count")
+                assertLine(selectedSequence(result) == "B,A,B", "Trigger Chain Speed+ Multicast advances one continuation per hop", selectedSequence(result))
+                assertLine(result and result.chain_payload_launch_count == 3 * fanout_count, "Trigger Chain Speed+ Multicast launches modified sibling payloads")
+                assertLine(result and result.duplicate_source_suppressed == true, "Trigger Chain Speed+ Multicast suppresses duplicate root Trigger hit")
+                assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain Speed+ Multicast suppresses duplicate sibling hit")
+                assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), "Trigger Chain Speed+ Multicast payload userData carries branch identity")
+                assertLine(jobsCarrySpeedPlusUserData(result and result.chain_payload_jobs, 3 * fanout_count, result and result.dispatch and result.dispatch.cast_id), "Trigger Chain Speed+ Multicast payload userData keeps Speed+ metadata")
+                assertIrChainRuntimeUsed(result, 3, 3 * fanout_count, "Trigger Chain Speed+ Multicast runtime")
+            end,
+        },
+        {
+            chain_case = "trigger_chain_size_plus_multicast",
+            label = "Trigger Chain Size+ Multicast live runtime",
+            check = function(result)
+                local fanout_count = 3
+                assertLine(result and result.live_mode == "chain", "Trigger Chain Size+ Multicast reports Chain mode")
+                assertLine(result and result.chain_shape == "trigger_payload_chain", "Trigger Chain Size+ Multicast reports Trigger payload shape")
+                assertLine(result and result.payload_modifier_kind == "size_plus", "Trigger Chain Size+ Multicast reports Size+ modifier")
+                assertLine(result and result.has_multicast_payload == true, "Trigger Chain Size+ Multicast reports payload fanout")
+                assertLine(result and result.chain_multicast_fanout_count == fanout_count, "Trigger Chain Size+ Multicast reports fanout count")
+                assertLine(selectedSequence(result) == "B,A,B", "Trigger Chain Size+ Multicast advances one continuation per hop", selectedSequence(result))
+                assertLine(result and result.chain_payload_launch_count == 3 * fanout_count, "Trigger Chain Size+ Multicast launches modified sibling payloads")
+                assertLine(result and result.duplicate_source_suppressed == true, "Trigger Chain Size+ Multicast suppresses duplicate root Trigger hit")
+                assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain Size+ Multicast suppresses duplicate sibling hit")
+                assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), "Trigger Chain Size+ Multicast payload userData carries branch identity")
+                assertLine(jobsCarrySizePlusUserData(result and result.chain_payload_jobs, 3 * fanout_count, result and result.dispatch and result.dispatch.cast_id), "Trigger Chain Size+ Multicast payload userData keeps Size+ metadata")
+                assertIrChainRuntimeUsed(result, 3, 3 * fanout_count, "Trigger Chain Size+ Multicast runtime")
+            end,
+        },
+        {
+            chain_case = "speed_size_plus_multicast",
+            label = "Chain Speed+ Size+ Multicast live deferral",
+            check = function(result)
+                assertLine(result and result.fallback_reason == "chain_modifier_combo_deferred", "Chain Speed+ Size+ Multicast live defers", result and result.fallback_reason)
+                assertLine(result and result.chain_payload_launch_count == 0, "Chain Speed+ Size+ Multicast launches no Chain payload")
             end,
         },
         {
@@ -1741,7 +1857,7 @@ local function runChainRuntimeSmoke(callback)
             requestRuntimeStats(false, function(stats_result)
                 local snapshot = stats_result and stats_result.snapshot or {}
                 assertLine(stats_result and stats_result.ok == true, "runtime stats snapshot returned", stats_result and stats_result.error)
-                assertCounterAtLeast(snapshot, "chain_runtime_attempts", #cases - 1, "runtime stats counted Chain runtime attempts")
+                assertCounterAtLeast(snapshot, "chain_runtime_attempts", #cases - 2, "runtime stats counted Chain runtime attempts")
                 assertCounterAtLeast(snapshot, "chain_runtime_qualified", 11, "runtime stats counted Chain runtime qualifications")
                 assertCounterAtLeast(snapshot, "chain_runtime_rejected", 7, "runtime stats counted Chain runtime rejections")
                 assertCounterAtLeast(snapshot, "chain_runtime_disabled_reject", 1, "runtime stats counted Chain runtime disabled rejection")
@@ -1908,58 +2024,148 @@ local function runManualChainRealProbe()
 
     state.running = true
     local start_pos, direction, hit_object = currentLaunchAim()
-    log.info("manual Chain real probe launching: Fire Damage -> Trigger -> Chain 3 -> Frost Damage; aim at one valid actor near another valid actor")
-    requestProbe("chain_runtime", function(result)
-        assertLine(result and result.mode == "chain_runtime", "manual Chain real probe returns runtime mode")
-        assertLine(result and result.ok == true, "manual Chain real probe launched", result and (result.rejection_reason or result.fallback_reason or result.error))
-        assertLine(result and result.chain_shape == "trigger_payload_chain", "manual Chain real probe uses Trigger payload Chain shape", result and tostring(result.chain_shape))
-        assertLine(result and result.requested_hops == 3, "manual Chain real probe requests three hops", result and tostring(result.requested_hops))
-        if result and result.ok == true then
-            log.info("manual Chain real probe live: watch for SPELLFORGE_CHAIN_LOS_REQUESTED, SPELLFORGE_CHAIN_LOS_LOCAL_RESULT, SPELLFORGE_CHAIN_LOS_RESULT, SPELLFORGE_CHAIN_REAL_TARGET_SELECTED, SPELLFORGE_CHAIN_HOP_ENQUEUED, and SPELLFORGE_CHAIN_HOP_PAYLOAD_OK")
-            async:newUnsavableSimulationTimer(2.0, function()
-                requestRuntimeStats(false, function(stats_result)
-                    local snapshot = stats_result and stats_result.snapshot or {}
-                    local los_requests = counter(snapshot, "chain_runtime_los_requests")
-                    local selected_real = counter(snapshot, "chain_provider_selected_real")
-                    local hops_launched = counter(snapshot, "chain_runtime_hops_launched")
-                    local payload_ok = counter(snapshot, "chain_runtime_payload_ok")
-                    local safe_no_target = counter(snapshot, "chain_runtime_stop_no_target")
-                    local positive_handoff = los_requests > 0
-                        and selected_real > 0
-                        and hops_launched > 0
-                        and payload_ok > 0
-                    log.info(string.format(
-                        "SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_STATUS provider_real_ok=%s provider_real_unavailable=%s candidate_positive=%s los_requested=%s los_visible=%s real_target_selected=%s chain_hop_enqueued=%s chain_payload_launch_ok=%s safe_no_target_stop=%s positive_handoff=%s",
-                        tostring(counter(snapshot, "chain_provider_real_ok")),
-                        tostring(counter(snapshot, "chain_provider_real_unavailable")),
-                        tostring(los_requests > 0),
-                        tostring(los_requests),
-                        tostring(counter(snapshot, "chain_runtime_los_visible_candidates")),
-                        tostring(selected_real),
-                        tostring(hops_launched),
-                        tostring(payload_ok),
-                        tostring(safe_no_target),
-                        tostring(positive_handoff)
-                    ))
-                    if positive_handoff then
-                        log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_POSITIVE")
-                    elseif safe_no_target > 0 then
-                        log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_SAFE_NO_TARGET")
-                    else
-                        log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_NO_POSITIVE_PROOF")
-                    end
-                    state.running = false
+    requestRuntimeStats(false, function(before_stats)
+        local before_snapshot = before_stats and before_stats.snapshot or {}
+        local baseline_ok = before_stats and before_stats.ok == true
+        log.info("manual Chain real probe launching: Fire Damage -> Trigger -> Chain 3 -> Frost Damage; aim at one valid actor near another valid actor")
+        requestProbe("chain_runtime", function(result)
+            assertLine(result and result.mode == "chain_runtime", "manual Chain real probe returns runtime mode")
+            assertLine(result and result.ok == true, "manual Chain real probe launched", result and (result.rejection_reason or result.fallback_reason or result.error))
+            assertLine(result and result.chain_shape == "trigger_payload_chain", "manual Chain real probe uses Trigger payload Chain shape", result and tostring(result.chain_shape))
+            assertLine(result and result.requested_hops == 3, "manual Chain real probe requests three hops", result and tostring(result.requested_hops))
+            if result and result.ok == true then
+                log.info("manual Chain real probe live: watch for SPELLFORGE_CHAIN_PROVIDER_REAL_OK, SPELLFORGE_CHAIN_LOS_REQUESTED, SPELLFORGE_CHAIN_LOS_LOCAL_RESULT, SPELLFORGE_CHAIN_LOS_RESULT, SPELLFORGE_CHAIN_REAL_TARGET_SELECTED, SPELLFORGE_CHAIN_HOP_ENQUEUED, and SPELLFORGE_CHAIN_HOP_PAYLOAD_OK")
+                async:newUnsavableSimulationTimer(2.0, function()
+                    requestRuntimeStats(false, function(stats_result)
+                        local snapshot = stats_result and stats_result.snapshot or {}
+                        local followup_ok = stats_result and stats_result.ok == true
+                        local source_hits = counterDelta(before_snapshot, snapshot, "chain_runtime_source_hits")
+                        local provider_attempts = counterDelta(before_snapshot, snapshot, "chain_provider_real_attempts")
+                        local provider_ok = counterDelta(before_snapshot, snapshot, "chain_provider_real_ok")
+                        local provider_unavailable = counterDelta(before_snapshot, snapshot, "chain_provider_real_unavailable")
+                        local provider_failed = counterDelta(before_snapshot, snapshot, "chain_provider_real_failed")
+                        local candidates_seen = counterDelta(before_snapshot, snapshot, "chain_provider_candidates_seen")
+                        local candidates_returned = counterDelta(before_snapshot, snapshot, "chain_provider_candidates_returned")
+                        local actor_scan_cap_hit = counterDelta(before_snapshot, snapshot, "chain_provider_actor_scan_cap_hit")
+                        local candidate_cap_hit = counterDelta(before_snapshot, snapshot, "chain_provider_candidate_cap_hit")
+                        local current_excluded = counterDelta(before_snapshot, snapshot, "chain_provider_current_target_excluded")
+                        local caster_excluded = counterDelta(before_snapshot, snapshot, "chain_provider_caster_excluded")
+                        local vertical_rejected = counterDelta(before_snapshot, snapshot, "chain_provider_vertical_reject")
+                        local los_requests = counterDelta(before_snapshot, snapshot, "chain_runtime_los_requests")
+                        local los_visible = counterDelta(before_snapshot, snapshot, "chain_runtime_los_visible_candidates")
+                        local los_no_visible = counterDelta(before_snapshot, snapshot, "chain_runtime_los_no_visible_target")
+                        local los_unavailable = counterDelta(before_snapshot, snapshot, "chain_runtime_los_unavailable")
+                        local selected_real = counterDelta(before_snapshot, snapshot, "chain_provider_selected_real")
+                        local hops_launched = counterDelta(before_snapshot, snapshot, "chain_runtime_hops_launched")
+                        local payload_ok = counterDelta(before_snapshot, snapshot, "chain_runtime_payload_ok")
+                        local safe_no_target = counterDelta(before_snapshot, snapshot, "chain_runtime_stop_no_target")
+                        local positive_handoff = los_requests > 0
+                            and selected_real > 0
+                            and hops_launched > 0
+                            and payload_ok > 0
+                        local diagnostic = "no_positive_proof"
+                        if positive_handoff then
+                            diagnostic = "positive_handoff"
+                        elseif source_hits == 0 then
+                            diagnostic = "no_source_actor_hit"
+                        elseif provider_attempts == 0 then
+                            diagnostic = "no_real_provider_attempt"
+                        elseif provider_unavailable > 0 then
+                            diagnostic = "provider_unavailable"
+                        elseif provider_failed > 0 then
+                            diagnostic = "provider_failed"
+                        elseif actor_scan_cap_hit > 0 and candidates_returned == 0 then
+                            diagnostic = "actor_scan_cap_exhausted"
+                        elseif candidates_returned == 0 then
+                            diagnostic = "no_candidates_returned"
+                        elseif los_requests > 0 and los_visible == 0 then
+                            diagnostic = "no_visible_target"
+                        elseif los_unavailable > 0 then
+                            diagnostic = "los_unavailable"
+                        elseif selected_real == 0 then
+                            diagnostic = "no_real_target_selected"
+                        elseif hops_launched > 0 and payload_ok == 0 then
+                            diagnostic = "payload_not_confirmed"
+                        elseif safe_no_target > 0 then
+                            diagnostic = "safe_no_target_stop"
+                        end
+                        log.info(string.format(
+                            "SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_STATUS cast_id=%s chain_id=%s source_projectile_id=%s baseline_ok=%s followup_ok=%s provider_real_ok=%s provider_real_unavailable=%s provider_real_failed=%s provider_real_attempts=%s source_hits=%s candidates_seen=%s candidates_returned=%s candidate_positive=%s actor_scan_cap_hit=%s candidate_cap_hit=%s current_excluded=%s caster_excluded=%s vertical_rejected=%s los_requested=%s los_visible=%s los_no_visible=%s los_unavailable=%s real_target_selected=%s chain_hop_enqueued=%s chain_payload_launch_ok=%s safe_no_target_stop=%s positive_handoff=%s diagnostic=%s",
+                            tostring(result.dispatch and result.dispatch.cast_id),
+                            tostring(result.chain_id),
+                            tostring(result.dispatch and result.dispatch.projectile_id),
+                            tostring(baseline_ok),
+                            tostring(followup_ok),
+                            tostring(provider_ok),
+                            tostring(provider_unavailable),
+                            tostring(provider_failed),
+                            tostring(provider_attempts),
+                            tostring(source_hits),
+                            tostring(candidates_seen),
+                            tostring(candidates_returned),
+                            tostring(candidates_returned > 0),
+                            tostring(actor_scan_cap_hit),
+                            tostring(candidate_cap_hit),
+                            tostring(current_excluded),
+                            tostring(caster_excluded),
+                            tostring(vertical_rejected),
+                            tostring(los_requests),
+                            tostring(los_visible),
+                            tostring(los_no_visible),
+                            tostring(los_unavailable),
+                            tostring(selected_real),
+                            tostring(hops_launched),
+                            tostring(payload_ok),
+                            tostring(safe_no_target),
+                            tostring(positive_handoff),
+                            tostring(diagnostic)
+                        ))
+                        log.info(string.format(
+                            "SPELLFORGE_CHAIN_REAL_PROVIDER_DIAGNOSTIC_STATUS diagnostic=%s cast_id=%s chain_id=%s baseline_ok=%s followup_ok=%s source_hits=%s provider_real_attempts=%s candidates_returned=%s los_requested=%s los_visible=%s real_target_selected=%s chain_hop_enqueued=%s chain_payload_launch_ok=%s",
+                            tostring(diagnostic),
+                            tostring(result.dispatch and result.dispatch.cast_id),
+                            tostring(result.chain_id),
+                            tostring(baseline_ok),
+                            tostring(followup_ok),
+                            tostring(source_hits),
+                            tostring(provider_attempts),
+                            tostring(candidates_returned),
+                            tostring(los_requests),
+                            tostring(los_visible),
+                            tostring(selected_real),
+                            tostring(hops_launched),
+                            tostring(payload_ok)
+                        ))
+                        if positive_handoff then
+                            log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_POSITIVE")
+                        elseif diagnostic == "no_source_actor_hit" then
+                            log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_NO_SOURCE_HIT")
+                        elseif diagnostic == "provider_unavailable" then
+                            log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_PROVIDER_UNAVAILABLE")
+                        elseif diagnostic == "no_candidates_returned" then
+                            log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_NO_CANDIDATES")
+                        elseif diagnostic == "actor_scan_cap_exhausted" then
+                            log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_ACTOR_SCAN_CAP")
+                        elseif diagnostic == "no_visible_target" then
+                            log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_NO_VISIBLE_TARGET")
+                        elseif safe_no_target > 0 then
+                            log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_SAFE_NO_TARGET")
+                        else
+                            log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_NO_POSITIVE_PROOF")
+                        end
+                        state.running = false
+                    end)
                 end)
-            end)
-        else
-            state.running = false
-        end
-    end, {
-        chain_case = "manual_real_gameplay",
-        start_pos = start_pos,
-        direction = direction,
-        hit_object = hit_object,
-    })
+            else
+                state.running = false
+            end
+        end, {
+            chain_case = "manual_real_gameplay",
+            start_pos = start_pos,
+            direction = direction,
+            hit_object = hit_object,
+        })
+    end)
 end
 
 local function runIrRuntimeAdapterStatusSmoke()
@@ -1998,7 +2204,7 @@ local function runIrRuntimeAdapterStatusSmoke()
             end, extra)
         end)
     end
-    local function addTimerStep(mode, label, expected_payload_count)
+    local function addTimerStep(mode, label, expected_payload_count, check)
         addStep(function(next_step)
             requestProbe(mode, function(scheduled)
                 assertLine(scheduled and scheduled.ok == true, label .. " schedules", scheduled and scheduled.error)
@@ -2008,6 +2214,9 @@ local function runIrRuntimeAdapterStatusSmoke()
                     assertLine(done and done.ok == true, label .. " callback launches payloads", done and done.error)
                     assertLine(done and done.ir_timer_runtime == true, label .. " enqueues through IR Timer runtime", done and done.ir_timer_runtime_fallback_reason)
                     assertLine(done and done.ir_timer_runtime_fallback_used ~= true, label .. " callback fallback not used", done and done.ir_timer_runtime_fallback_reason)
+                    if check then
+                        check(scheduled, done)
+                    end
                     yieldSmoke(SMOKE_STAGE_YIELD_SECONDS, next_step)
                 end, {
                     observe_matured = true,
@@ -2030,6 +2239,26 @@ local function runIrRuntimeAdapterStatusSmoke()
         end)
     end
 
+    addProbeStep("payload_modifier_policy_conformance", "IR payload modifier policy conformance", function(result)
+        assertLine(result and result.policy_module == "launch_modifier_policy", "payload modifier policy owns modifier decisions")
+        assertLine(result and result.job_planner_module == "runtime_job_planner", "runtime job planner applies policy mutations")
+        assertLine(result and result.event_source_neutral == true, "payload modifier policy is event-source neutral")
+        assertLine(result and result.trigger_timer_preflight_shared == true, "Trigger/Timer payload modifier preflight is shared")
+        assertLine(result and result.bounce_pierce_static_policy == true, "Bounce/Pierce static paths consume policy without live expansion")
+        assertLine(result and result.chain_policy_compat == true, "Chain modifier compatibility consumes policy")
+        assertLine(result and result.no_event_specific_reasons == true, "payload modifier policy avoids event-specific reasons")
+        assertLine(result and tonumber(result.event_case_count) == tonumber(result.expected_event_case_count), "payload modifier policy cases all pass")
+    end)
+    addProbeStep("source_modifier_policy_conformance", "IR source modifier policy conformance", function(result)
+        assertLine(result and result.policy_module == "launch_modifier_policy", "source modifier policy owns modifier decisions")
+        assertLine(result and result.event_source_neutral == true, "source modifier policy is event-source neutral")
+        assertLine(result and result.bounce_source_policy_ok == true, "Bounce source modifiers consume shared policy")
+        assertLine(result and result.pierce_source_policy_ok == true, "Pierce source modifiers consume shared policy")
+        assertLine(result and result.no_event_specific_reasons == true, "source modifier policy avoids event-specific reasons")
+        assertLine(result and tonumber(result.source_case_count) == tonumber(result.expected_source_case_count), "source modifier policy cases all pass")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "source modifier policy has no fallback or mismatch")
+    end)
+
     addProbeStep("trigger_post_hit", "IR adapter Trigger simple payload", function(result)
         assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger simple payload runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
         assertLine(result and result.trigger_duplicate_suppressed == true, "IR Trigger duplicate suppression remains intact")
@@ -2038,6 +2267,21 @@ local function runIrRuntimeAdapterStatusSmoke()
         assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Multicast runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
         assertLine(result and tonumber(result.trigger_payload_count) == 3, "IR Trigger payload Multicast routes three payloads")
     end, launchAimPayload)
+    addProbeStep("trigger_payload_speed_plus_post_hit", "IR adapter Trigger payload Speed+ policy", function(result)
+        local user_data = result and result.trigger_payload_launch_user_data or nil
+        assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Speed+ runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
+        assertLine(type(user_data) == "table" and user_data.payload_modifier_kind == "speed_plus" and user_data.speed_plus == true, "IR Trigger payload Speed+ policy applies")
+    end, launchAimPayload)
+    addProbeStep("trigger_payload_size_plus_post_hit", "IR adapter Trigger payload Size+ policy", function(result)
+        local user_data = result and result.trigger_payload_launch_user_data or nil
+        assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Size+ runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
+        assertLine(type(user_data) == "table" and user_data.payload_modifier_kind == "size_plus" and user_data.size_plus == true, "IR Trigger payload Size+ policy applies")
+    end, launchAimPayload)
+    addProbeStep("trigger_payload_speed_size_plus_post_hit", "IR adapter Trigger payload Speed+ Size+ policy", function(result)
+        local user_data = result and result.trigger_payload_launch_user_data or nil
+        assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Speed+ Size+ runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
+        assertLine(type(user_data) == "table" and user_data.payload_modifier_kind == "speed_plus_size_plus" and user_data.speed_plus == true and user_data.size_plus == true, "IR Trigger payload Speed+ Size+ policy applies")
+    end, launchAimPayload)
     addProbeStep("trigger_payload_burst_post_hit", "IR adapter Trigger payload Pattern", function(result)
         assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Pattern runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
         assertLine(result and result.payload_pattern == true and result.payload_pattern_kind == "Burst", "IR Trigger payload Pattern preserves Burst metadata")
@@ -2045,11 +2289,36 @@ local function runIrRuntimeAdapterStatusSmoke()
 
     addTimerStep("timer_real_delay_sequence", "IR adapter Timer simple payload", 1)
     addTimerStep("timer_payload_multicast_sequence", "IR adapter Timer payload Multicast", 3)
+    addTimerStep("timer_payload_speed_plus_sequence", "IR adapter Timer payload Speed+ policy", 1, function(scheduled, done)
+        assertLine(scheduled and scheduled.has_payload_modifier == true, "IR Timer payload Speed+ schedule reports modifier")
+        assertLine(jobsCarrySpeedPlusUserData(done and done.timer_payload_jobs, 1, done and done.cast_id), "IR Timer payload Speed+ policy applies")
+    end)
+    addTimerStep("timer_payload_size_plus_sequence", "IR adapter Timer payload Size+ policy", 1, function(scheduled, done)
+        assertLine(scheduled and scheduled.has_payload_modifier == true, "IR Timer payload Size+ schedule reports modifier")
+        assertLine(jobsCarrySizePlusUserData(done and done.timer_payload_jobs, 1, done and done.cast_id), "IR Timer payload Size+ policy applies")
+    end)
+    addTimerStep("timer_payload_speed_size_plus_sequence", "IR adapter Timer payload Speed+ Size+ policy", 1, function(scheduled, done)
+        assertLine(scheduled and scheduled.has_payload_modifier == true, "IR Timer payload Speed+ Size+ schedule reports modifier")
+        assertLine(jobsCarrySpeedPlusUserData(done and done.timer_payload_jobs, 1, done and done.cast_id), "IR Timer payload Speed+ Size+ policy applies Speed+")
+        assertLine(jobsCarrySizePlusUserData(done and done.timer_payload_jobs, 1, done and done.cast_id), "IR Timer payload Speed+ Size+ policy applies Size+")
+    end)
     addTimerStep("timer_payload_burst_sequence", "IR adapter Timer payload Pattern", 5)
 
     addProbeStep("bounce_source_only_dry_run", "IR adapter Bounce source-only dry-run", function(result)
         assertLine(result and result.live_mode == "bounce" and result.bounce_mode == "source", "IR adapter Bounce source-only reports source mode")
         assertLine(result and tonumber(result.payload_count) == 0, "IR adapter Bounce source-only is payload-free")
+    end)
+    addProbeStep("bounce_speed_plus_source_policy", "IR adapter Bounce source Speed+ policy", function(result)
+        assertLine(result and result.ok == true and result.live_mode == "bounce", "IR Bounce source Speed+ qualifies")
+        assertLine(result and result.source_modifier_kind == "speed_plus" and result.speed_plus == true, "IR Bounce source Speed+ consumes shared policy")
+        assertLine(result and result.bounce_max ~= nil, "IR Bounce source Speed+ keeps Bounce metadata")
+    end)
+    addProbeStep("bounce_size_plus_source_policy", "IR adapter Bounce source Size+ policy", function(result)
+        local area = tonumber(result and result.size_plus_area)
+        local base_area = tonumber(result and result.size_plus_base_area)
+        assertLine(result and result.ok == true and result.live_mode == "bounce", "IR Bounce source Size+ qualifies")
+        assertLine(result and result.source_modifier_kind == "size_plus" and result.size_plus == true, "IR Bounce source Size+ consumes shared policy")
+        assertLine(area ~= nil and base_area ~= nil and area > base_area, "IR Bounce source Size+ mutates helper area")
     end)
     addProbeStep("bounce_trigger_simple_post_bounce", "IR adapter Bounce Trigger simple payload", function(result)
         assertLine(result and result.ir_bounce_runtime == true, "IR Bounce simple payload runtime plans", result and result.ir_bounce_runtime_fallback_reason)
@@ -2074,6 +2343,10 @@ local function runIrRuntimeAdapterStatusSmoke()
     addChainStep("trigger_chain_multicast_8", "IR adapter Trigger Chain Multicast", 3, 24)
     addChainStep("direct_chain_speed_plus_3", "IR adapter Chain Speed+", 3, 3)
     addChainStep("direct_chain_size_plus_3", "IR adapter Chain Size+", 3, 3)
+    addChainStep("speed_plus_multicast", "IR adapter Chain Speed+ Multicast", 3, 9)
+    addChainStep("size_plus_multicast", "IR adapter Chain Size+ Multicast", 3, 9)
+    addChainStep("trigger_chain_speed_plus_multicast", "IR adapter Trigger Chain Speed+ Multicast", 3, 9)
+    addChainStep("trigger_chain_size_plus_multicast", "IR adapter Trigger Chain Size+ Multicast", 3, 9)
 
     addProbeStep("trigger_payload_multicast_disabled", "IR adapter deferred Trigger payload Multicast", function(result)
         assertLine(result and result.used_live_2_2c == false, "IR adapter deferred Trigger payload Multicast does not enqueue")
@@ -2085,8 +2358,9 @@ local function runIrRuntimeAdapterStatusSmoke()
     addProbeStep("bounce_chain_deferred", "IR adapter deferred direct Bounce Chain", nil)
     addProbeStep("bounce_homing_deferred", "IR adapter deferred Bounce Homing", nil)
     addProbeStep("bounce_fanout_deferred", "IR adapter deferred Bounce source fanout", nil)
-    addProbeStep("bounce_speed_plus_deferred", "IR adapter deferred Bounce source Speed+", nil)
-    addProbeStep("bounce_size_plus_deferred", "IR adapter deferred Bounce source Size+", nil)
+    addProbeStep("bounce_speed_size_plus_deferred", "IR adapter deferred Bounce source Speed+ Size+", function(result)
+        assertLine(result and result.used_live_2_2c == false and result.fallback_reason == "source_modifier_combo_deferred", "IR adapter defers Bounce source Speed+ Size+")
+    end)
     addProbeStep("chain_runtime", "IR adapter deferred Chain Pattern", function(result)
         assertLine(result and type(result.fallback_reason) == "string", "IR adapter deferred Chain Pattern has reason", result and result.fallback_reason)
     end, function()
@@ -2123,10 +2397,19 @@ local function runIrRuntimeAdapterStatusSmoke()
             )
             assertIrRuntimeAdapterClean(snapshot, "all_ir_adapter_smoke")
             assertLine(
+                counter(snapshot, "payload_modifier_policy_conformance_ok") >= 1,
+                "payload modifier policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "source_modifier_policy_conformance_ok") >= 1,
+                "source modifier policy conformance marker observed"
+            )
+            assertLine(
                 counter(snapshot, "payload_multicast_disabled_reject")
                     + counter(snapshot, "payload_pattern_disabled_reject")
+                    + counter(snapshot, "live_bounce_trigger_timer_reject")
                     + counter(snapshot, "live_bounce_fanout_reject")
-                    + counter(snapshot, "live_bounce_modifier_reject")
+                    + counter(snapshot, "source_modifier_policy_deferred")
                     + counter(snapshot, "live_bounce_homing_reject")
                     + counter(snapshot, "live_bounce_chain_reject")
                     + counter(snapshot, "chain_runtime_pattern_reject")
@@ -2283,7 +2566,7 @@ local function runBounceSmoke()
                 assertLine(
                     counter(snapshot, "live_bounce_cap_reject")
                         + counter(snapshot, "live_bounce_fanout_reject")
-                        + counter(snapshot, "live_bounce_modifier_reject")
+                        + counter(snapshot, "source_modifier_policy_deferred")
                         + counter(snapshot, "live_bounce_homing_reject")
                         + counter(snapshot, "live_bounce_nested_payload_reject")
                         + counter(snapshot, "live_bounce_chain_reject") >= 6,
@@ -2302,10 +2585,8 @@ local function runBounceSmoke()
                 assertBounceRejected("bounce_timer_deferred", "Timer", "bounce_timer_deferred", function()
                     assertBounceRejected("bounce_chain_deferred", "direct Chain", "bounce_chain_deferred", function()
                         assertBounceRejected("bounce_nested_payload_deferred", "nested payload", "nested_payload_runtime_deferred", function()
-                            assertBounceRejected("bounce_speed_plus_deferred", "Speed+", "bounce_modifier_deferred", function()
-                                assertBounceRejected("bounce_size_plus_deferred", "Size+", "bounce_modifier_deferred", function()
-                                    assertBounceRejected("bounce_homing_deferred", "Homing", "bounce_homing_deferred", runLiveBounceLaunch)
-                                end)
+                            assertBounceRejected("bounce_speed_size_plus_deferred", "Speed+ Size+", "source_modifier_combo_deferred", function()
+                                assertBounceRejected("bounce_homing_deferred", "Homing", "bounce_homing_deferred", runLiveBounceLaunch)
                             end)
                         end)
                     end)
@@ -2343,6 +2624,18 @@ local function runBounceSmoke()
                 assertLine(source_only and tonumber(source_only.payload_count) == 0 and source_only.payload_fanout_count == nil, "Bounce simple source has no payload fanout", source_only_detail)
                 assertLine(source_only and source_only.payload_chain_runtime == false and source_only.has_chain_payload == false, "Bounce simple source has no Chain payload")
                 assertLine(source_only and source_only.bounce_probe_binding_registered == false, "Bounce simple source dry-run does not register a post-bounce binding")
+
+                requestProbe("bounce_speed_plus_source_policy", function(source_speed)
+                    assertLine(source_speed and source_speed.ok == true, "Bounce source Speed+ policy qualifies", source_speed and (source_speed.fallback_reason or source_speed.error))
+                    assertLine(source_speed and source_speed.source_modifier_kind == "speed_plus" and source_speed.speed_plus == true, "Bounce source Speed+ policy applies")
+                    assertLine(source_speed and tonumber(source_speed.bounce_max) == 3, "Bounce source Speed+ preserves Bounce metadata")
+
+                    requestProbe("bounce_size_plus_source_policy", function(source_size)
+                        local area = tonumber(source_size and source_size.size_plus_area)
+                        local base_area = tonumber(source_size and source_size.size_plus_base_area)
+                        assertLine(source_size and source_size.ok == true, "Bounce source Size+ policy qualifies", source_size and (source_size.fallback_reason or source_size.error))
+                        assertLine(source_size and source_size.source_modifier_kind == "size_plus" and source_size.size_plus == true, "Bounce source Size+ policy applies")
+                        assertLine(area ~= nil and base_area ~= nil and area > base_area, "Bounce source Size+ mutates helper area")
 
                 requestProbe("bounce_dry_run", function(dry)
                     assertLine(dry and dry.ok == true, "Bounce dry-run qualifies", dry and dry.error)
@@ -2447,6 +2740,8 @@ local function runBounceSmoke()
                 end, launchAimPayload())
             end)
             end)
+        end)
+    end)
         end)
     end)
 end
@@ -2725,7 +3020,8 @@ local function runPierceSmoke()
             assertLine(counter(snapshot, "ir_pierce_runtime_mismatch") == 0, "IR Pierce runtime had no planner mismatches")
             assertLine(counter(snapshot, "ir_pierce_runtime_fallback") == 0, "IR Pierce runtime fallback was not used for supported smoke shapes")
             assertCounterAtLeast(snapshot, "live_pierce_duplicate_suppressed", 3, "Pierce duplicate suppression remains intact")
-            assertCounterAtLeast(snapshot, "live_pierce_deferred_reject", 9, "Pierce deferred shapes reject before enqueue")
+            assertCounterAtLeast(snapshot, "live_pierce_deferred_reject", 7, "Pierce deferred shapes reject before enqueue")
+            assertCounterAtLeast(snapshot, "source_modifier_policy_deferred", 1, "Pierce source modifier combo defers through shared policy")
             log.info("smoke live Pierce run complete")
             state.running = false
         end)
@@ -2738,13 +3034,11 @@ local function runPierceSmoke()
                     assertPierceRejected("pierce_timer_deferred", "Timer", "pierce_timer_deferred", function()
                         assertPierceRejected("pierce_bounce_deferred", "Bounce", "pierce_bounce_deferred", function()
                             assertPierceRejected("pierce_homing_deferred", "Homing", "pierce_homing_deferred", function()
-                                assertPierceRejected("pierce_speed_plus_deferred", "Speed+", "pierce_modifier_deferred", function()
-                                    assertPierceRejected("pierce_size_plus_deferred", "Size+", "pierce_modifier_deferred", function()
-                                        assertPierceRejected("pierce_chain_deferred", "direct Chain", "pierce_chain_deferred", function()
-                                            assertPierceRejected("pierce_fanout_deferred", "source fanout", "pierce_fanout_deferred", function()
-                                                assertPierceRejected("pierce_nested_payload_deferred", "nested payload", "pierce_nested_payload_deferred", function()
-                                                    assertPierceRejected("pierce_recursion_deferred", "recursion", "pierce_recursion_deferred", finish)
-                                                end)
+                                assertPierceRejected("pierce_speed_size_plus_deferred", "Speed+ Size+", "source_modifier_combo_deferred", function()
+                                    assertPierceRejected("pierce_chain_deferred", "direct Chain", "pierce_chain_deferred", function()
+                                        assertPierceRejected("pierce_fanout_deferred", "source fanout", "pierce_fanout_deferred", function()
+                                            assertPierceRejected("pierce_nested_payload_deferred", "nested payload", "pierce_nested_payload_deferred", function()
+                                                assertPierceRejected("pierce_recursion_deferred", "recursion", "pierce_recursion_deferred", finish)
                                             end)
                                         end)
                                     end)
@@ -2770,6 +3064,18 @@ local function runPierceSmoke()
                 assertLine(source_only and tonumber(source_only.pierce_limit) == 3, "Pierce source reports three pierces")
                 assertLine(source_only and source_only.dispatch_count == 1 and source_only.source_dispatch_count == 1, "Pierce source plans only one source projectile")
                 assertLine(source_only and source_only.has_trigger_payload == false and tonumber(source_only.payload_count) == 0, "Pierce source has no Trigger payload")
+
+                requestProbe("pierce_speed_plus_source_policy", function(source_speed)
+                    assertLine(source_speed and source_speed.ok == true, "Pierce source Speed+ policy qualifies", source_speed and (source_speed.fallback_reason or source_speed.error))
+                    assertLine(source_speed and source_speed.source_modifier_kind == "speed_plus" and source_speed.speed_plus == true, "Pierce source Speed+ policy applies")
+                    assertLine(source_speed and tonumber(source_speed.pierce_limit) == 3, "Pierce source Speed+ preserves Pierce metadata")
+
+                    requestProbe("pierce_size_plus_source_policy", function(source_size)
+                        local area = tonumber(source_size and source_size.size_plus_area)
+                        local base_area = tonumber(source_size and source_size.size_plus_base_area)
+                        assertLine(source_size and source_size.ok == true, "Pierce source Size+ policy qualifies", source_size and (source_size.fallback_reason or source_size.error))
+                        assertLine(source_size and source_size.source_modifier_kind == "size_plus" and source_size.size_plus == true, "Pierce source Size+ policy applies")
+                        assertLine(area ~= nil and base_area ~= nil and area > base_area, "Pierce source Size+ mutates helper area")
 
                 requestProbe("pierce_source_only_launch", function(source_launch)
                     local source_job = source_launch and source_launch.jobs and source_launch.jobs[1] or nil
@@ -2824,7 +3130,9 @@ local function runPierceSmoke()
                             end, launchAimPayload())
                         end, launchAimPayload())
                     end, launchAimPayload())
-                end, launchAimPayload())
+                    end, launchAimPayload())
+                    end)
+                end)
             end)
         end)
     end)
@@ -4385,7 +4693,7 @@ return {
                 requestBackend()
             elseif state.backend == "READY" and not state.ready_logged then
                 state.ready_logged = true
-                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ and Chain+Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, I for all-IR adapter migration smoke, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0 hardening plus Trigger payload fanout post-bounce probes, H for Bounce Trigger Chain no-target/mock/live probes, J for manual Bounce surface diagnostics, or P for Pierce v0 source/event/runtime smoke")
+                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+, Chain+Multicast, and single-modifier Chain Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, I for all-IR adapter migration plus payload modifier policy conformance smoke, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0 hardening plus Trigger payload fanout post-bounce probes, H for Bounce Trigger Chain no-target/mock/live probes, J for manual Bounce surface diagnostics, or P for Pierce v0 source/event/runtime smoke")
             end
         end,
         onKeyPress = onKeyPress,

@@ -5,6 +5,7 @@ local limits = require("scripts.spellforge.shared.limits")
 local log = require("scripts.spellforge.shared.log").new("global.live_timer")
 local helper_records = require("scripts.spellforge.global.helper_records")
 local ir_runtime_adapter = require("scripts.spellforge.global.ir_runtime_adapter")
+local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
 local payload_multicast = require("scripts.spellforge.global.payload_multicast")
 local payload_pattern = require("scripts.spellforge.global.payload_pattern")
@@ -200,6 +201,13 @@ function live_timer.selectV0Plan(plan, opts)
         source_opcode = "Timer",
         allow_payload_multicast = options.allow_payload_multicast == true,
         allow_payload_pattern = options.allow_payload_pattern == true,
+        allow_payload_launch_modifiers = options.allow_payload_launch_modifiers == true,
+        force_speed_plus_enabled = options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options.force_speed_plus_disabled,
+        speed_plus_enabled = options.speed_plus_enabled == true,
+        force_size_plus_enabled = options.force_size_plus_enabled,
+        force_size_plus_disabled = options.force_size_plus_disabled,
+        size_plus_enabled = options.size_plus_enabled == true,
         max_depth = options.max_depth,
         max_jobs = options.max_jobs,
         max_fanout = options.max_fanout,
@@ -225,8 +233,10 @@ function live_timer.selectV0Plan(plan, opts)
                 runtime_stats.inc("payload_multicast_chain_reject")
             elseif reason == "nested_payload_runtime_deferred"
                 or reason == "payload_pattern_runtime_deferred"
-                or reason == "payload_speed_plus_runtime_deferred"
-                or reason == "payload_size_plus_runtime_deferred" then
+                or reason == "payload_modifier_nested_deferred"
+                or reason == "payload_modifier_combo_deferred"
+                or reason == "payload_speed_plus_disabled"
+                or reason == "payload_size_plus_disabled" then
                 runtime_stats.inc("payload_multicast_nested_reject")
             end
         end
@@ -279,6 +289,8 @@ function live_timer.selectV0Plan(plan, opts)
         payload_pattern = payload_result.is_payload_pattern == true,
         payload_pattern_kind = payload_result.pattern_kind,
         payload_pattern_op = payload_result.pattern_op,
+        has_payload_modifier = payload_result.has_payload_modifier == true,
+        payload_modifier_kinds = payload_result.payload_modifier_kinds,
         payload_multicast_fanout_count = payload_result.fanout_count,
         max_payload_fanout = tonumber(options.max_fanout) or limits.MAX_NESTED_PAYLOAD_FANOUT,
         max_projectiles = tonumber(options.max_projectiles) or limits.MAX_PROJECTILES_PER_CAST,
@@ -602,6 +614,10 @@ local function irTimerRuntimeEnabled(options)
 end
 
 local function irPlannerOptions(binding, options)
+    local gates = launch_modifier_policy.gateHintsForModifierKinds(
+        binding and binding.payload_modifier_kinds,
+        options
+    )
     return {
         allow_payload_multicast = binding.payload_multicast == true
             or (options and options.allow_payload_multicast == true)
@@ -609,6 +625,14 @@ local function irPlannerOptions(binding, options)
         allow_payload_pattern = binding.payload_pattern == true
             or (options and options.allow_payload_pattern == true)
             or (options and options.force_payload_pattern_enabled == true),
+        allow_payload_launch_modifiers = binding.has_payload_modifier == true
+            or (options and options.allow_payload_launch_modifiers == true),
+        force_speed_plus_enabled = gates.force_speed_plus_enabled,
+        force_speed_plus_disabled = gates.force_speed_plus_disabled,
+        speed_plus_enabled = gates.speed_plus_enabled,
+        force_size_plus_enabled = gates.force_size_plus_enabled,
+        force_size_plus_disabled = gates.force_size_plus_disabled,
+        size_plus_enabled = gates.size_plus_enabled,
         max_depth = options and options.max_depth or limits.MAX_RECURSION_DEPTH,
         max_jobs = binding.max_payload_fanout or (options and options.max_jobs),
         max_fanout = binding.max_payload_fanout or (options and options.max_fanout),

@@ -1,6 +1,7 @@
 local limits = require("scripts.spellforge.shared.limits")
 local nested_payload_audit = require("scripts.spellforge.global.nested_payload_audit")
 local chaos_budget = require("scripts.spellforge.global.chaos_budget")
+local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
 
 local payload_multicast = {}
 
@@ -81,10 +82,14 @@ local function cloneOp(op)
     }
 end
 
-local function payloadPrefixPolicy(slot, helper)
+local function payloadPrefixPolicy(plan, slot, helper, options)
     local saw_multicast = false
     local pattern_kind = nil
     local pattern_op = nil
+    local slot_speed_count = 0
+    local slot_size_count = 0
+    local helper_speed_count = 0
+    local helper_size_count = 0
     for _, op in ipairs(slot.prefix_ops or {}) do
         local opcode = op and op.opcode
         if opcode == "Multicast" then
@@ -98,9 +103,9 @@ local function payloadPrefixPolicy(slot, helper)
             pattern_kind = opcode
             pattern_op = pattern_op or op
         elseif opcode == "Speed+" then
-            return nil, "payload_speed_plus_runtime_deferred"
+            slot_speed_count = slot_speed_count + 1
         elseif opcode == "Size+" then
-            return nil, "payload_size_plus_runtime_deferred"
+            slot_size_count = slot_size_count + 1
         else
             return nil, "unsupported_payload_prefix_" .. tostring(opcode)
         end
@@ -119,15 +124,26 @@ local function payloadPrefixPolicy(slot, helper)
             pattern_kind = opcode
             pattern_op = pattern_op or op
         elseif opcode == "Speed+" then
-            return nil, "payload_speed_plus_runtime_deferred"
+            helper_speed_count = helper_speed_count + 1
         elseif opcode == "Size+" then
-            return nil, "payload_size_plus_runtime_deferred"
+            helper_size_count = helper_size_count + 1
         else
             return nil, "unsupported_payload_prefix_" .. tostring(opcode)
         end
     end
 
-    return saw_multicast, nil, pattern_kind, cloneOp(pattern_op)
+    if slot_speed_count ~= helper_speed_count or slot_size_count ~= helper_size_count then
+        return nil, "payload_modifier_unsupported_prefix"
+    end
+    if slot_speed_count > 0 or slot_size_count > 0 then
+        local policy = launch_modifier_policy.inspectPayloadEntry(plan, nil, slot, options)
+        if policy.ok ~= true then
+            return nil, policy.rejection_reason or "payload_modifier_combo_deferred", pattern_kind, cloneOp(pattern_op), policy
+        end
+        return saw_multicast, nil, pattern_kind, cloneOp(pattern_op), policy
+    end
+
+    return saw_multicast, nil, pattern_kind, cloneOp(pattern_op), nil
 end
 
 local function auditAllowsPayloadMulticast(plan, fanout_count, options)
@@ -161,11 +177,18 @@ local function auditAllowsPayloadMulticast(plan, fanout_count, options)
     if audit.has_pattern_payload and options.allow_payload_pattern ~= true then
         return false, "payload_pattern_runtime_deferred", audit
     end
-    if audit.has_speed_plus_payload then
-        return false, "payload_speed_plus_runtime_deferred", audit
-    end
-    if audit.has_size_plus_payload then
-        return false, "payload_size_plus_runtime_deferred", audit
+    if audit.has_speed_plus_payload or audit.has_size_plus_payload then
+        local launch_modifiers_allowed = options.allow_payload_launch_modifiers == true
+            or options.force_speed_plus_enabled == true
+            or options.speed_plus_enabled == true
+            or options.force_size_plus_enabled == true
+            or options.size_plus_enabled == true
+        if not launch_modifiers_allowed then
+            return false, "payload_modifier_combo_deferred", audit
+        end
+        if audit.max_payload_depth ~= 1 or audit.nested_payload_count > 0 then
+            return false, "payload_modifier_nested_deferred", audit
+        end
     end
     if fanout_count > max_fanout then
         recordBudgetCap("fanout")
@@ -207,6 +230,8 @@ function payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, opt
     local saw_pattern = false
     local pattern_kind = nil
     local pattern_op = nil
+    local saw_payload_modifier = false
+    local payload_modifier_kinds = {}
     local saw_unrelated_payload = false
 
     for _, slot in ipairs(plan.emission_slots) do
@@ -241,11 +266,16 @@ function payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, opt
                     return reject("nested_payload_runtime_deferred")
                 end
 
-                local prefix_multicast, prefix_reason, prefix_pattern_kind, prefix_pattern_op = payloadPrefixPolicy(slot, helper)
+                local prefix_multicast, prefix_reason, prefix_pattern_kind, prefix_pattern_op, prefix_policy = payloadPrefixPolicy(plan, slot, helper, options)
                 if prefix_reason then
                     return reject(prefix_reason, {
                         detected_payload_pattern = prefix_reason == "payload_pattern_ambiguous",
+                        detected_payload_modifier = prefix_policy ~= nil,
                     })
+                end
+                if prefix_policy and prefix_policy.mutations and prefix_policy.mutations.payload_modifier_kind ~= nil then
+                    saw_payload_modifier = true
+                    payload_modifier_kinds[#payload_modifier_kinds + 1] = prefix_policy.mutations.payload_modifier_kind
                 end
                 if prefix_pattern_kind ~= nil then
                     if pattern_kind ~= nil and pattern_kind ~= prefix_pattern_kind then
@@ -364,8 +394,11 @@ function payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, opt
         fanout_count = #payloads,
         detected_payload_multicast = is_payload_multicast,
         detected_payload_pattern = is_payload_pattern,
+        detected_payload_modifier = saw_payload_modifier,
         is_payload_multicast = is_payload_multicast,
         is_payload_pattern = is_payload_pattern,
+        has_payload_modifier = saw_payload_modifier,
+        payload_modifier_kinds = payload_modifier_kinds,
         pattern_kind = pattern_kind,
         pattern_op = pattern_op,
         payload_group_key = table.concat(payload_group_key_parts, ","),

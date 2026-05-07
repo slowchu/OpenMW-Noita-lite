@@ -2,6 +2,7 @@ local plan_cache = require("scripts.spellforge.global.plan_cache")
 local continuation_planner = require("scripts.spellforge.global.continuation_planner")
 local feature_matrix = require("scripts.spellforge.global.feature_matrix")
 local feature_matrix_ir = require("scripts.spellforge.global.feature_matrix_ir")
+local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
 local live_bounce = require("scripts.spellforge.global.live_bounce")
 local live_chain = require("scripts.spellforge.global.live_chain")
 local live_pierce = require("scripts.spellforge.global.live_pierce")
@@ -159,6 +160,9 @@ local PLANNER_COMPARE_OPTS = {
     allow_chain_multicast = true,
     force_chain_multicast_enabled = true,
     force_chain_runtime_enabled = true,
+    allow_payload_launch_modifiers = true,
+    force_speed_plus_enabled = true,
+    force_size_plus_enabled = true,
     max_jobs = 32,
     max_projectiles = 32,
     max_pierce_count = 3,
@@ -216,6 +220,62 @@ local function selectorPlan(plan)
     copy.helper_records = syntheticHelperRecords(plan or {})
     copy.helper_record_count = #copy.helper_records
     return copy
+end
+
+local function clonePlannerCompareOptions()
+    local out = {}
+    for key, value in pairs(PLANNER_COMPARE_OPTS) do
+        out[key] = value
+    end
+    return out
+end
+
+local function sourceEntryForEvent(plan, event)
+    local source_slot_id = event and event.source_slot_id or nil
+    if source_slot_id == nil then
+        return nil
+    end
+    for _, slot in ipairs(plan and plan.emission_slots or {}) do
+        if slot and slot.slot_id == source_slot_id then
+            return slot
+        end
+    end
+    return nil
+end
+
+local function hasSourceLaunchModifier(entry)
+    for _, op in ipairs(entry and entry.prefix_ops or {}) do
+        if op and (op.opcode == "Speed+" or op.opcode == "Size+") then
+            return true
+        end
+    end
+    return false
+end
+
+local function legacySelectorOptions(plan, event, source_kind)
+    local opts = clonePlannerCompareOptions()
+    local source_entry = sourceEntryForEvent(plan, event)
+    if hasSourceLaunchModifier(source_entry) then
+        opts.source_modifier_policy = launch_modifier_policy.inspectSourceEntry(
+            plan,
+            plan and plan.runtime_ir or nil,
+            source_entry,
+            {
+                policy_kind = "source",
+                apply_size_to_specs = false,
+                allow_bounce_source = source_kind == "bounce",
+                allow_pierce_source = source_kind == "pierce",
+                force_speed_plus_enabled = opts.force_speed_plus_enabled,
+                force_speed_plus_disabled = opts.force_speed_plus_disabled,
+                speed_plus_enabled = opts.speed_plus_enabled == true,
+                force_size_plus_enabled = opts.force_size_plus_enabled,
+                force_size_plus_disabled = opts.force_size_plus_disabled,
+                size_plus_enabled = opts.size_plus_enabled == true,
+                quiet = true,
+            }
+        )
+    end
+    return opts
 end
 
 local function helperBySlot(plan)
@@ -466,10 +526,10 @@ local function legacyContinuationForCase(label, plan, event)
         result, reason = nested_trigger_timer.selectV1Plan(prepared, PLANNER_COMPARE_OPTS)
         return normalizeLegacyNested(result, reason), "nested_trigger_timer.selectV1Plan"
     elseif event and event.event_kind == "bounce" then
-        result, reason = live_bounce.selectV0Plan(prepared, PLANNER_COMPARE_OPTS)
+        result, reason = live_bounce.selectV0Plan(prepared, legacySelectorOptions(prepared, event, "bounce"))
         return normalizeLegacyBounce(result, reason), "live_bounce.selectV0Plan"
     elseif event and event.event_kind == "pierce" then
-        result, reason = live_pierce.selectV0Plan(prepared, PLANNER_COMPARE_OPTS)
+        result, reason = live_pierce.selectV0Plan(prepared, legacySelectorOptions(prepared, event, "pierce"))
         return normalizeLegacyPierce(result, reason), "live_pierce.selectV0Plan"
     elseif event and event.event_kind == "chain" then
         result, reason = live_chain.selectV0Plan(prepared, PLANNER_COMPARE_OPTS)
@@ -812,6 +872,50 @@ local function compareRuntimeJobPlan(label, plan, ir)
         ))
     end
     assertLine(ok, "24 IR runtime job planner " .. label .. " matches continuation job expectations")
+    if ok and actual.ok == false then
+        return
+    end
+    if ok and string.find(label, "payload Speed Plus Size Plus", 1, true) then
+        local job = job_plan and job_plan.planned_jobs and job_plan.planned_jobs[1] or nil
+        local modifier_ok = job and job.payload_modifier_kind == "speed_plus_size_plus"
+            and job.payload and job.payload.payload_modifier_kind == "speed_plus_size_plus"
+            and job.speed_plus == true
+            and job.size_plus == true
+        if modifier_ok then
+            log.info(string.format(
+                "SPELLFORGE_IR_PAYLOAD_MODIFIER_JOB_PLAN_OK label=%s payload_modifier_kind=speed_plus_size_plus slot_id=%s",
+                tostring(label),
+                tostring(job.payload_slot_id)
+            ))
+        end
+        assertLine(modifier_ok, "24 IR payload modifier job plan " .. label .. " applies Speed+ and Size+ policy")
+    elseif ok and string.find(label, "payload Speed Plus", 1, true) then
+        local job = job_plan and job_plan.planned_jobs and job_plan.planned_jobs[1] or nil
+        local modifier_ok = job and job.payload_modifier_kind == "speed_plus"
+            and job.payload and job.payload.payload_modifier_kind == "speed_plus"
+            and job.speed_plus == true
+        if modifier_ok then
+            log.info(string.format(
+                "SPELLFORGE_IR_PAYLOAD_MODIFIER_JOB_PLAN_OK label=%s payload_modifier_kind=speed_plus slot_id=%s",
+                tostring(label),
+                tostring(job.payload_slot_id)
+            ))
+        end
+        assertLine(modifier_ok, "24 IR payload modifier job plan " .. label .. " applies Speed+ policy")
+    elseif ok and string.find(label, "payload Size Plus", 1, true) then
+        local job = job_plan and job_plan.planned_jobs and job_plan.planned_jobs[1] or nil
+        local modifier_ok = job and job.payload_modifier_kind == "size_plus"
+            and job.payload and job.payload.payload_modifier_kind == "size_plus"
+            and job.size_plus == true
+        if modifier_ok then
+            log.info(string.format(
+                "SPELLFORGE_IR_PAYLOAD_MODIFIER_JOB_PLAN_OK label=%s payload_modifier_kind=size_plus slot_id=%s",
+                tostring(label),
+                tostring(job.payload_slot_id)
+            ))
+        end
+        assertLine(modifier_ok, "24 IR payload modifier job plan " .. label .. " applies Size+ policy")
+    end
 end
 
 local function runtimeIrCase(label, effects, expected)
@@ -1163,7 +1267,7 @@ local function run()
         { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
     }
     local bounce_speed_plus_preview = ui_contract.previewRecipe({
-        request_id = "smoke-ui-bounce-speed-plus-deferred",
+        request_id = "smoke-ui-bounce-speed-plus-source-policy",
         recipe = {
             title = "Smoke Bounce Speed Plus Preview",
             effects = bounce_speed_plus,
@@ -1171,8 +1275,26 @@ local function run()
     })
     local bounce_speed_plus_matrix = bounce_speed_plus_preview.preview and bounce_speed_plus_preview.preview.feature_matrix or {}
     assertLine(bounce_speed_plus_preview.ok == true, "14g ui feature matrix preview accepts Bounce Speed+")
-    assertLine(bounce_speed_plus_matrix.live_runtime_status == "deferred", "14g ui feature matrix marks Bounce Speed+ deferred")
-    assertLine(containsValue(bounce_speed_plus_matrix.deferred_reasons, "bounce_modifier_deferred"), "14g ui feature matrix gives Bounce modifier reason")
+    assertLine(bounce_speed_plus_matrix.live_runtime_status == "feature_gated", "14g ui feature matrix marks Bounce Speed+ feature-gated")
+    assertLine(not containsValue(bounce_speed_plus_matrix.deferred_reasons, "bounce_modifier_deferred"), "14g ui feature matrix does not use event-specific Bounce modifier reason")
+
+    local bounce_speed_size_plus = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 10, duration = 1 },
+    }
+    local bounce_speed_size_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-bounce-speed-size-plus-deferred",
+        recipe = {
+            title = "Smoke Bounce Speed Size Plus Preview",
+            effects = bounce_speed_size_plus,
+        },
+    })
+    local bounce_speed_size_matrix = bounce_speed_size_preview.preview and bounce_speed_size_preview.preview.feature_matrix or {}
+    assertLine(bounce_speed_size_preview.ok == true, "14h ui feature matrix preview accepts Bounce Speed+ Size+")
+    assertLine(bounce_speed_size_matrix.live_runtime_status == "deferred", "14h ui feature matrix marks Bounce Speed+ Size+ deferred")
+    assertLine(containsValue(bounce_speed_size_matrix.deferred_reasons, "source_modifier_combo_deferred"), "14h ui feature matrix gives source modifier combo reason")
 
     local bounce_nested_payload = {
         { id = "spellforge_bounce", params = { bounces = 3 } },
@@ -1190,9 +1312,9 @@ local function run()
         },
     })
     local bounce_nested_payload_matrix = bounce_nested_payload_preview.preview and bounce_nested_payload_preview.preview.feature_matrix or {}
-    assertLine(bounce_nested_payload_preview.ok == true, "14h ui feature matrix preview accepts Bounce nested payload")
-    assertLine(bounce_nested_payload_matrix.live_runtime_status == "deferred", "14h ui feature matrix marks Bounce nested payload deferred")
-    assertLine(containsValue(bounce_nested_payload_matrix.deferred_reasons, "nested_payload_runtime_deferred"), "14h ui feature matrix gives Bounce nested payload reason")
+    assertLine(bounce_nested_payload_preview.ok == true, "14h.1 ui feature matrix preview accepts Bounce nested payload")
+    assertLine(bounce_nested_payload_matrix.live_runtime_status == "deferred", "14h.1 ui feature matrix marks Bounce nested payload deferred")
+    assertLine(containsValue(bounce_nested_payload_matrix.deferred_reasons, "nested_payload_runtime_deferred"), "14h.1 ui feature matrix gives Bounce nested payload reason")
 
     local pierce_timer = {
         { id = "spellforge_pierce", params = { pierces = 3 } },
@@ -1211,6 +1333,38 @@ local function run()
     assertLine(pierce_timer_preview.ok == true, "14i ui feature matrix preview accepts Pierce Timer")
     assertLine(pierce_timer_matrix.live_runtime_status == "deferred", "14i ui feature matrix marks Pierce Timer deferred")
     assertLine(containsValue(pierce_timer_matrix.deferred_reasons, "pierce_timer_deferred"), "14i ui feature matrix gives Pierce Timer reason")
+
+    local pierce_speed_plus_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-pierce-speed-plus-source-policy",
+        recipe = {
+            title = "Smoke Pierce Speed Plus Preview",
+            effects = {
+                { id = "spellforge_pierce", params = { pierces = 3 } },
+                { id = "spellforge_speed_plus", params = { percent = 50 } },
+                { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+            },
+        },
+    })
+    local pierce_speed_plus_matrix = pierce_speed_plus_preview.preview and pierce_speed_plus_preview.preview.feature_matrix or {}
+    assertLine(pierce_speed_plus_preview.ok == true, "14i.1 ui feature matrix preview accepts Pierce Speed+")
+    assertLine(pierce_speed_plus_matrix.live_runtime_status == "feature_gated", "14i.1 ui feature matrix marks Pierce Speed+ feature-gated")
+    assertLine(not containsValue(pierce_speed_plus_matrix.deferred_reasons, "pierce_modifier_deferred"), "14i.1 ui feature matrix does not use event-specific Pierce modifier reason")
+
+    local pierce_size_plus_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-pierce-size-plus-source-policy",
+        recipe = {
+            title = "Smoke Pierce Size Plus Preview",
+            effects = {
+                { id = "spellforge_pierce", params = { pierces = 3 } },
+                { id = "spellforge_size_plus", params = { percent = 125 } },
+                { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 10, duration = 1 },
+            },
+        },
+    })
+    local pierce_size_plus_matrix = pierce_size_plus_preview.preview and pierce_size_plus_preview.preview.feature_matrix or {}
+    assertLine(pierce_size_plus_preview.ok == true, "14i.2 ui feature matrix preview accepts Pierce Size+")
+    assertLine(pierce_size_plus_matrix.live_runtime_status == "feature_gated", "14i.2 ui feature matrix marks Pierce Size+ feature-gated")
+    assertLine(not containsValue(pierce_size_plus_matrix.deferred_reasons, "pierce_modifier_deferred"), "14i.2 ui feature matrix does not use event-specific Pierce modifier reason")
 
     local pierce_trigger_chain = {
         { id = "spellforge_pierce", params = { pierces = 3 } },
@@ -1234,6 +1388,51 @@ local function run()
     assertLine(containsValue(pierce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_pierce_v0"), "14j ui feature matrix lists Pierce gate")
     assertLine(containsValue(pierce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_trigger"), "14j ui feature matrix lists Trigger gate")
     assertLine(containsValue(pierce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_chain_runtime_v0"), "14j ui feature matrix lists Chain runtime gate")
+
+    local chain_speed_multicast = {
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local chain_speed_multicast_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-chain-speed-multicast-supported",
+        recipe = {
+            title = "Smoke Chain Speed Multicast Preview",
+            effects = chain_speed_multicast,
+        },
+    })
+    local chain_speed_multicast_matrix = chain_speed_multicast_preview.preview and chain_speed_multicast_preview.preview.feature_matrix or {}
+    assertLine(chain_speed_multicast_preview.ok == true, "14k ui feature matrix preview accepts Chain Speed+ Multicast")
+    assertLine(chain_speed_multicast_matrix.live_runtime_status == "feature_gated", "14k ui feature matrix marks Chain Speed+ Multicast feature-gated")
+    assertLine(containsValue(chain_speed_multicast_matrix.active_feature_ids, "chain"), "14k ui feature matrix detects Chain")
+    assertLine(containsValue(chain_speed_multicast_matrix.active_feature_ids, "chain_multicast"), "14k ui feature matrix detects Chain Multicast")
+    assertLine(containsValue(chain_speed_multicast_matrix.active_feature_ids, "speed_plus"), "14k ui feature matrix detects Speed+")
+    assertLine(containsValue(chain_speed_multicast_matrix.required_flags, "SpellforgeDev.enable_live_chain_runtime_v0"), "14k ui feature matrix lists Chain runtime gate")
+    assertLine(containsValue(chain_speed_multicast_matrix.required_flags, "SpellforgeDev.enable_live_chain_multicast_v0"), "14k ui feature matrix lists Chain Multicast gate")
+    assertLine(containsValue(chain_speed_multicast_matrix.required_flags, "SpellforgeDev.enable_live_speed_plus"), "14k ui feature matrix lists Speed+ gate")
+    assertLine(not containsValue(chain_speed_multicast_matrix.deferred_reasons, "chain_modifier_combo_deferred"), "14k ui feature matrix does not defer single Chain Speed+ Multicast")
+
+    local chain_speed_size_multicast = {
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local chain_speed_size_multicast_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-chain-speed-size-multicast-deferred",
+        recipe = {
+            title = "Smoke Chain Speed Size Multicast Preview",
+            effects = chain_speed_size_multicast,
+        },
+    })
+    local chain_speed_size_multicast_matrix = chain_speed_size_multicast_preview.preview and chain_speed_size_multicast_preview.preview.feature_matrix or {}
+    assertLine(chain_speed_size_multicast_preview.ok == true, "14l ui feature matrix preview accepts Chain Speed+ Size+ Multicast")
+    assertLine(chain_speed_size_multicast_matrix.live_runtime_status == "deferred", "14l ui feature matrix marks Chain Speed+ Size+ Multicast deferred")
+    assertLine(containsValue(chain_speed_size_multicast_matrix.deferred_reasons, "chain_modifier_combo_deferred"), "14l ui feature matrix gives Chain modifier combo reason")
 
     local catalog = ui_catalog.build({ request_id = "smoke-ui-catalog" })
     assertLine(catalog.ok == true, "15 ui catalog succeeds")
@@ -1391,6 +1590,39 @@ local function run()
         { id = "spellforge_multicast", params = { count = 3 } },
         targetEffect("frostdamage", 8),
     }
+    local trigger_payload_speed_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_payload_size_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_payload_speed_size_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_payload_speed_plus_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_payload_size_plus_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
     local trigger_payload_pattern = {
         targetEffect("firedamage", 1),
         { id = "spellforge_trigger" },
@@ -1414,6 +1646,25 @@ local function run()
         targetEffect("firedamage", 1),
         { id = "spellforge_timer", params = { seconds = 1.0 } },
         { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local timer_payload_speed_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        targetEffect("frostdamage", 8),
+    }
+    local timer_payload_size_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("frostdamage", 8),
+    }
+    local timer_payload_speed_size_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
         targetEffect("frostdamage", 8),
     }
     local timer_payload_spread = {
@@ -1466,6 +1717,55 @@ local function run()
         { id = "spellforge_multicast", params = { count = 3 } },
         targetEffect("frostdamage", 8),
     }
+    local chain_payload_speed_plus_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local chain_payload_size_plus_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_chain_payload_speed_plus_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_chain_payload_size_plus_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local chain_payload_speed_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        targetEffect("frostdamage", 8),
+    }
+    local chain_payload_size_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("frostdamage", 8),
+    }
+    local chain_payload_speed_size_plus = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("frostdamage", 8),
+    }
     local bounce_source = {
         { id = "spellforge_bounce", params = { bounces = 3 } },
         targetEffect("firedamage", 1),
@@ -1478,6 +1778,12 @@ local function run()
     }
     local bounce_size_plus = {
         { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("firedamage", 1),
+    }
+    local bounce_speed_size_plus = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
         { id = "spellforge_size_plus", params = { percent = 125 } },
         targetEffect("firedamage", 1),
     }
@@ -1535,6 +1841,17 @@ local function run()
         { id = "spellforge_speed_plus", params = { percent = 50 } },
         targetEffect("firedamage", 1),
     }
+    local pierce_size_plus = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("firedamage", 1),
+    }
+    local pierce_speed_size_plus = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("firedamage", 1),
+    }
     local pierce_source_multicast = {
         { id = "spellforge_pierce", params = { pierces = 3 } },
         { id = "spellforge_multicast", params = { count = 3 } },
@@ -1572,10 +1889,18 @@ local function run()
     runtimeIrCase("primary Spread Multicast", primary_spread_multicast, { no_continuations = true, min_fanout_entries = 3 })
     runtimeIrCase("Trigger simple payload", trigger, { continuations = { Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
     runtimeIrCase("Timer simple payload", timer_simple, { continuations = { Timer = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Trigger payload Speed Plus", trigger_payload_speed_plus, { continuations = { Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Trigger payload Size Plus", trigger_payload_size_plus, { continuations = { Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Trigger payload Speed Plus Size Plus", trigger_payload_speed_size_plus, { continuations = { Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
     runtimeIrCase("Trigger payload Multicast", trigger_payload_multicast, { continuations = { Trigger = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Trigger payload Speed Plus Multicast", trigger_payload_speed_plus_multicast, { continuations = { Trigger = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Trigger payload Size Plus Multicast", trigger_payload_size_plus_multicast, { continuations = { Trigger = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
     runtimeIrCase("Trigger payload Burst", trigger_payload_pattern, { continuations = { Trigger = 1 }, min_payload_entries = 5, min_payload_depth = 1, min_fanout_entries = 5 })
     runtimeIrCase("Trigger payload Spread", trigger_payload_spread, { continuations = { Trigger = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
     runtimeIrCase("Timer payload Multicast", timer_payload_multicast, { continuations = { Timer = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Timer payload Speed Plus", timer_payload_speed_plus, { continuations = { Timer = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Timer payload Size Plus", timer_payload_size_plus, { continuations = { Timer = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Timer payload Speed Plus Size Plus", timer_payload_speed_size_plus, { continuations = { Timer = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
     runtimeIrCase("Timer payload Burst", timer_burst_payload, { continuations = { Timer = 1 }, min_payload_entries = 8, min_payload_depth = 1, min_fanout_entries = 8 })
     runtimeIrCase("Timer payload Spread", timer_payload_spread, { continuations = { Timer = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
     runtimeIrCase("nested Trigger Timer", trigger_timer_nested, { continuations = { Trigger = 1, Timer = 1 }, min_payload_entries = 2, min_payload_depth = 2 })
@@ -1583,7 +1908,15 @@ local function run()
     runtimeIrCase("nested Trigger Timer final fanout", trigger_timer_final_fanout, { continuations = { Trigger = 1, Timer = 1 }, min_payload_entries = 6, min_payload_depth = 2, min_fanout_entries = 5 })
     runtimeIrCase("nested Timer Trigger final fanout", timer_trigger_final_fanout, { continuations = { Timer = 1, Trigger = 1 }, min_payload_entries = 4, min_payload_depth = 2, min_fanout_entries = 3 })
     runtimeIrCase("Chain simple payload", chain_simple, { continuations = { Chain = 1 } })
+    runtimeIrCase("Chain payload Speed Plus", chain_payload_speed_plus, { continuations = { Chain = 1 } })
+    runtimeIrCase("Chain payload Size Plus", chain_payload_size_plus, { continuations = { Chain = 1 } })
+    runtimeIrCase("Chain payload Speed Plus Size Plus", chain_payload_speed_size_plus, { continuations = { Chain = 1 } })
     runtimeIrCase("Chain payload Multicast", chain_payload_multicast, { continuations = { Chain = 1 }, min_fanout_entries = 3 })
+    runtimeIrCase("Chain payload Speed Plus Multicast", chain_payload_speed_plus_multicast, { continuations = { Chain = 1 }, min_fanout_entries = 3 })
+    runtimeIrCase("Chain payload Size Plus Multicast", chain_payload_size_plus_multicast, { continuations = { Chain = 1 }, min_fanout_entries = 3 })
+    runtimeIrCase("deferred Chain payload Speed Plus Size Plus Multicast", chain_speed_size_multicast, { continuations = { Chain = 1 }, min_fanout_entries = 3 })
+    runtimeIrCase("Trigger Chain payload Speed Plus Multicast", trigger_chain_payload_speed_plus_multicast, { continuations = { Trigger = 1, Chain = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Trigger Chain payload Size Plus Multicast", trigger_chain_payload_size_plus_multicast, { continuations = { Trigger = 1, Chain = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
     runtimeIrCase("Bounce source", bounce_source, { continuations = { Bounce = 1 } })
     runtimeIrCase("Bounce Trigger simple payload", bounce_trigger_simple, { continuations = { Bounce = 1, Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
     runtimeIrCase("Bounce Trigger payload Multicast", bounce_trigger_multicast, { continuations = { Bounce = 1, Trigger = 1 }, min_payload_entries = 8, min_payload_depth = 1, min_fanout_entries = 8 })
@@ -1592,8 +1925,9 @@ local function run()
     runtimeIrCase("deferred Bounce Timer", bounce_timer, { continuations = { Bounce = 1, Timer = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
     runtimeIrCase("deferred direct Bounce Chain", bounce_direct_chain, { continuations = { Bounce = 1, Chain = 1 } })
     runtimeIrCase("deferred Bounce Homing", bounce_homing, { continuations = { Bounce = 1 } })
-    runtimeIrCase("deferred Bounce Speed Plus", bounce_speed_plus, { continuations = { Bounce = 1 } })
-    runtimeIrCase("deferred Bounce Size Plus", bounce_size_plus, { continuations = { Bounce = 1 } })
+    runtimeIrCase("Bounce source Speed Plus", bounce_speed_plus, { continuations = { Bounce = 1 } })
+    runtimeIrCase("Bounce source Size Plus", bounce_size_plus, { continuations = { Bounce = 1 } })
+    runtimeIrCase("deferred Bounce source Speed Plus Size Plus", bounce_speed_size_plus, { continuations = { Bounce = 1 } })
     runtimeIrCase("deferred Bounce nested payload", bounce_nested_payload, { continuations = { Bounce = 1, Trigger = 2 }, min_payload_entries = 2, min_payload_depth = 2 })
     runtimeIrCase("Pierce source", pierce_source, { continuations = { Pierce = 1 } })
     runtimeIrCase("Pierce Trigger simple payload", pierce_trigger_simple, { continuations = { Pierce = 1, Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
@@ -1605,7 +1939,9 @@ local function run()
     runtimeIrCase("deferred direct Pierce Chain", pierce_direct_chain, { continuations = { Pierce = 1, Chain = 1 } })
     runtimeIrCase("deferred Pierce Bounce", pierce_bounce, { continuations = { Pierce = 1, Bounce = 1 } })
     runtimeIrCase("deferred Pierce Homing", pierce_homing, { continuations = { Pierce = 1 } })
-    runtimeIrCase("deferred Pierce Speed Plus", pierce_speed_plus, { continuations = { Pierce = 1 } })
+    runtimeIrCase("Pierce source Speed Plus", pierce_speed_plus, { continuations = { Pierce = 1 } })
+    runtimeIrCase("Pierce source Size Plus", pierce_size_plus, { continuations = { Pierce = 1 } })
+    runtimeIrCase("deferred Pierce source Speed Plus Size Plus", pierce_speed_size_plus, { continuations = { Pierce = 1 } })
     runtimeIrCase("deferred source Pierce Multicast", pierce_source_multicast, { continuations = { Pierce = 1 }, min_fanout_entries = 3 })
     runtimeIrCase("deferred Pierce nested payload", pierce_nested_payload, { continuations = { Pierce = 1, Trigger = 2 }, min_payload_entries = 2, min_payload_depth = 2 })
     runtimeIrCase("deferred Pierce recursion", pierce_recursion, { continuations = { Pierce = 2, Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })

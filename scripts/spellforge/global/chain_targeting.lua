@@ -398,7 +398,7 @@ function chain_targeting.inspectPlan(plan, opts)
             end
             if result.has_speed_plus_payload and result.has_size_plus_payload then
                 result.has_chain_with_modifier_combo = true
-                addReason(reasons, "chain_modifier_combo_deferred")
+                result.payload_modifier_kind = "speed_plus_size_plus"
             elseif result.has_speed_plus_payload then
                 result.payload_modifier_kind = "speed_plus"
             elseif result.has_size_plus_payload then
@@ -527,7 +527,6 @@ function chain_targeting.inspectPlan(plan, opts)
         and (result.has_chain_with_multicast == false or allow_chain_multicast)
         and result.has_chain_with_pattern == false
         and result.has_chain_with_trigger_timer == false
-        and result.has_chain_with_modifier_combo == false
         and result.exceeds_hop_cap == false
         and result.exceeds_job_cap == false
         and (result.has_chain_with_multicast == false or result.chain_multicast_fanout_count <= chain_multicast_fanout_cap)

@@ -1,4 +1,5 @@
 local limits = require("scripts.spellforge.shared.limits")
+local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
 
 local runtime_job_planner = {}
 
@@ -376,6 +377,26 @@ local function payloadMetadata(job)
         pattern_index = job.pattern_index,
         pattern_count = job.pattern_count,
         pattern_direction_key = job.pattern_direction_key,
+        payload_modifier_kind = job.payload_modifier_kind,
+        speed = job.speed,
+        maxSpeed = job.maxSpeed,
+        speed_plus = job.speed_plus,
+        speed_plus_mode = job.speed_plus_mode,
+        speed_plus_value = job.speed_plus_value,
+        speed_plus_base_speed = job.speed_plus_base_speed,
+        speed_plus_multiplier = job.speed_plus_multiplier,
+        speed_plus_speed = job.speed_plus_speed,
+        speed_plus_max_speed = job.speed_plus_max_speed,
+        speed_plus_field = job.speed_plus_field,
+        speed_plus_capped = job.speed_plus_capped,
+        size_plus = job.size_plus,
+        size_plus_mode = job.size_plus_mode,
+        size_plus_value = job.size_plus_value,
+        size_plus_multiplier = job.size_plus_multiplier,
+        size_plus_field = job.size_plus_field,
+        size_plus_capped = job.size_plus_capped,
+        size_plus_base_area = job.size_plus_base_area,
+        size_plus_area = job.size_plus_area,
     }
 end
 
@@ -508,6 +529,15 @@ local function buildJob(plan, ir, continuation_plan, event, opts, planned, index
     end
 
     job.payload = payloadMetadata(job)
+    local policy = launch_modifier_policy.applyToJob(plan, ir, payload_entry, job, event, opts)
+    if policy.ok ~= true then
+        job.payload_modifier_rejection_reason = policy.rejection_reason
+        if type(job.payload) == "table" then
+            job.payload.payload_modifier_rejection_reason = policy.rejection_reason
+        end
+    else
+        job.payload = payloadMetadata(job)
+    end
     return job
 end
 

@@ -298,6 +298,7 @@ function runtime_launch.launchHelper(input)
         pierce_count = launch.pierce_count,
         pierce_limit = launch.pierce_limit,
         pierce_trigger_payload_slot_id = launch.pierce_trigger_payload_slot_id,
+        source_modifier_kind = launch.source_modifier_kind,
         payload_modifier_kind = launch.payload_modifier_kind,
         speed_plus = launch.speed_plus,
         speed_plus_mode = launch.speed_plus_mode,
@@ -701,6 +702,7 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
         pierce_count = firstNonNil(payload.pierce_count, job.pierce_count),
         pierce_limit = firstNonNil(payload.pierce_limit, job.pierce_limit),
         pierce_trigger_payload_slot_id = firstNonNil(payload.pierce_trigger_payload_slot_id, job.pierce_trigger_payload_slot_id),
+        source_modifier_kind = payload.source_modifier_kind or job.source_modifier_kind,
         payload_modifier_kind = payload.payload_modifier_kind or job.payload_modifier_kind,
         speed = firstNonNil(payload.speed, job.speed),
         maxSpeed = firstNonNil(payload.maxSpeed, job.maxSpeed),
@@ -866,6 +868,7 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
     job.pierce_count = firstNonNil(payload.pierce_count, job.pierce_count)
     job.pierce_limit = firstNonNil(payload.pierce_limit, job.pierce_limit)
     job.pierce_trigger_payload_slot_id = firstNonNil(payload.pierce_trigger_payload_slot_id, job.pierce_trigger_payload_slot_id)
+    job.source_modifier_kind = payload.source_modifier_kind or job.source_modifier_kind
     job.payload_modifier_kind = payload.payload_modifier_kind or job.payload_modifier_kind
     job.speed_plus = payload.speed_plus or job.speed_plus
     job.speed_plus_mode = payload.speed_plus_mode or job.speed_plus_mode
