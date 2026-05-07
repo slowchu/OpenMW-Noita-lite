@@ -21,11 +21,17 @@ local KEY_ENABLE_LIVE_NESTED_FINAL_FANOUT = "enable_live_nested_final_fanout_v0"
 local KEY_ENABLE_LIVE_CHAIN_AUDIT = "enable_live_chain_audit_v0"
 local KEY_ENABLE_LIVE_CHAIN_RUNTIME = "enable_live_chain_runtime_v0"
 local KEY_ENABLE_LIVE_BOUNCE = "enable_live_bounce_v0"
+local KEY_ENABLE_LIVE_PIERCE = "enable_live_pierce_v0"
 local KEY_ENABLE_LIVE_HOMING = "enable_live_homing_v0"
 local KEY_ENABLE_LIVE_SOFT_HOMING = "enable_live_soft_homing_v0"
 local KEY_ENABLE_LIVE_SOFT_HOMING_PROBE = "enable_live_soft_homing_probe"
 local KEY_ENABLE_LIVE_CHAIN_MULTICAST = "enable_live_chain_multicast_v0"
 local KEY_ENABLE_CHAOS_BUDGET = "enable_chaos_budget_v0"
+local KEY_ENABLE_IR_TRIGGER_RUNTIME = "enable_ir_trigger_runtime_v0"
+local KEY_ENABLE_IR_TIMER_RUNTIME = "enable_ir_timer_runtime_v0"
+local KEY_ENABLE_IR_BOUNCE_RUNTIME = "enable_ir_bounce_runtime_v0"
+local KEY_ENABLE_IR_CHAIN_RUNTIME = "enable_ir_chain_runtime_v0"
+local KEY_ENABLE_IR_PIERCE_RUNTIME = "enable_ir_pierce_runtime_v0"
 
 local DEFAULT_ENABLE_SMOKE_TESTS = false
 local DEFAULT_ENABLE_DEV_HOTKEYS = false
@@ -45,11 +51,17 @@ local DEFAULT_ENABLE_LIVE_NESTED_FINAL_FANOUT = false
 local DEFAULT_ENABLE_LIVE_CHAIN_AUDIT = false
 local DEFAULT_ENABLE_LIVE_CHAIN_RUNTIME = false
 local DEFAULT_ENABLE_LIVE_BOUNCE = false
+local DEFAULT_ENABLE_LIVE_PIERCE = false
 local DEFAULT_ENABLE_LIVE_HOMING = false
 local DEFAULT_ENABLE_LIVE_SOFT_HOMING = false
 local DEFAULT_ENABLE_LIVE_SOFT_HOMING_PROBE = false
 local DEFAULT_ENABLE_LIVE_CHAIN_MULTICAST = false
 local DEFAULT_ENABLE_CHAOS_BUDGET = false
+local DEFAULT_ENABLE_IR_TRIGGER_RUNTIME = false
+local DEFAULT_ENABLE_IR_TIMER_RUNTIME = false
+local DEFAULT_ENABLE_IR_BOUNCE_RUNTIME = false
+local DEFAULT_ENABLE_IR_CHAIN_RUNTIME = false
+local DEFAULT_ENABLE_IR_PIERCE_RUNTIME = false
 
 local function readBoolean(key, default_value)
     local value = section:get(key)
@@ -131,6 +143,10 @@ function dev.liveBounceEnabled()
     return readBoolean(KEY_ENABLE_LIVE_BOUNCE, DEFAULT_ENABLE_LIVE_BOUNCE)
 end
 
+function dev.livePierceEnabled()
+    return readBoolean(KEY_ENABLE_LIVE_PIERCE, DEFAULT_ENABLE_LIVE_PIERCE)
+end
+
 function dev.liveHomingEnabled()
     return readBoolean(KEY_ENABLE_LIVE_HOMING, DEFAULT_ENABLE_LIVE_HOMING)
 end
@@ -149,6 +165,31 @@ end
 
 function dev.chaosBudgetEnabled()
     return readBoolean(KEY_ENABLE_CHAOS_BUDGET, DEFAULT_ENABLE_CHAOS_BUDGET)
+end
+
+function dev.irTriggerRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_IR_TRIGGER_RUNTIME, DEFAULT_ENABLE_IR_TRIGGER_RUNTIME)
+        or dev.liveTriggerEnabled()
+end
+
+function dev.irTimerRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_IR_TIMER_RUNTIME, DEFAULT_ENABLE_IR_TIMER_RUNTIME)
+        or dev.liveTimerEnabled()
+end
+
+function dev.irBounceRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_IR_BOUNCE_RUNTIME, DEFAULT_ENABLE_IR_BOUNCE_RUNTIME)
+        or dev.liveBounceEnabled()
+end
+
+function dev.irChainRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_IR_CHAIN_RUNTIME, DEFAULT_ENABLE_IR_CHAIN_RUNTIME)
+        or dev.liveChainRuntimeEnabled()
+end
+
+function dev.irPierceRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_IR_PIERCE_RUNTIME, DEFAULT_ENABLE_IR_PIERCE_RUNTIME)
+        or dev.livePierceEnabled()
 end
 
 function dev.smokeTestsSettingKey()
@@ -223,6 +264,10 @@ function dev.liveBounceSettingKey()
     return "SpellforgeDev.enable_live_bounce_v0"
 end
 
+function dev.livePierceSettingKey()
+    return "SpellforgeDev.enable_live_pierce_v0"
+end
+
 function dev.liveHomingSettingKey()
     return "SpellforgeDev.enable_live_homing_v0"
 end
@@ -241,6 +286,26 @@ end
 
 function dev.chaosBudgetSettingKey()
     return "SpellforgeDev.enable_chaos_budget_v0"
+end
+
+function dev.irTriggerRuntimeSettingKey()
+    return "SpellforgeDev.enable_ir_trigger_runtime_v0"
+end
+
+function dev.irTimerRuntimeSettingKey()
+    return "SpellforgeDev.enable_ir_timer_runtime_v0"
+end
+
+function dev.irBounceRuntimeSettingKey()
+    return "SpellforgeDev.enable_ir_bounce_runtime_v0"
+end
+
+function dev.irChainRuntimeSettingKey()
+    return "SpellforgeDev.enable_ir_chain_runtime_v0"
+end
+
+function dev.irPierceRuntimeSettingKey()
+    return "SpellforgeDev.enable_ir_pierce_runtime_v0"
 end
 
 return dev

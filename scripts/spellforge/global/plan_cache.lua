@@ -138,6 +138,7 @@ local function summarizeBounds(groups, effect_count)
         has_pattern = false,
         has_chain = false,
         has_bounce = false,
+        has_pierce = false,
         has_homing = false,
         has_speed_plus = false,
         has_size_plus = false,
@@ -157,6 +158,8 @@ local function summarizeBounds(groups, effect_count)
                 bounds.has_chain = true
             elseif op.opcode == "Bounce" then
                 bounds.has_bounce = true
+            elseif op.opcode == "Pierce" then
+                bounds.has_pierce = true
             elseif op.opcode == "Homing" then
                 bounds.has_homing = true
             elseif op.opcode == "Speed+" then

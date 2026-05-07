@@ -664,6 +664,63 @@ local function assertCounterAtLeast(snapshot, name, minimum, label)
     assertLine(value >= minimum, label, string.format("%s=%s expected>=%s", tostring(name), tostring(value), tostring(minimum)))
 end
 
+local function irAdapterCount(snapshot, adapter, suffix)
+    return counter(snapshot, "ir_" .. adapter .. "_runtime_" .. suffix)
+end
+
+local function irAdapterFallbackCount(snapshot)
+    return irAdapterCount(snapshot, "trigger", "fallback")
+        + irAdapterCount(snapshot, "timer", "fallback")
+        + irAdapterCount(snapshot, "bounce", "fallback")
+        + irAdapterCount(snapshot, "chain", "fallback")
+end
+
+local function irAdapterMismatchCount(snapshot)
+    return irAdapterCount(snapshot, "trigger", "mismatch")
+        + irAdapterCount(snapshot, "timer", "mismatch")
+        + irAdapterCount(snapshot, "bounce", "mismatch")
+        + irAdapterCount(snapshot, "chain", "mismatch")
+end
+
+local function irAdapterStatusDetail(snapshot)
+    return string.format(
+        "trigger_fallback=%s timer_fallback=%s bounce_fallback=%s chain_fallback=%s trigger_mismatch=%s timer_mismatch=%s bounce_mismatch=%s chain_mismatch=%s",
+        tostring(irAdapterCount(snapshot, "trigger", "fallback")),
+        tostring(irAdapterCount(snapshot, "timer", "fallback")),
+        tostring(irAdapterCount(snapshot, "bounce", "fallback")),
+        tostring(irAdapterCount(snapshot, "chain", "fallback")),
+        tostring(irAdapterCount(snapshot, "trigger", "mismatch")),
+        tostring(irAdapterCount(snapshot, "timer", "mismatch")),
+        tostring(irAdapterCount(snapshot, "bounce", "mismatch")),
+        tostring(irAdapterCount(snapshot, "chain", "mismatch"))
+    )
+end
+
+local function logIrRuntimeAdapterStatus(snapshot, context)
+    log.info(string.format(
+        "SPELLFORGE_IR_RUNTIME_ADAPTER_STATUS context=%s trigger_ir_enabled=%s timer_ir_enabled=%s bounce_ir_enabled=%s chain_ir_enabled=%s trigger_fallback_count=%s timer_fallback_count=%s bounce_fallback_count=%s chain_fallback_count=%s trigger_mismatch_count=%s timer_mismatch_count=%s bounce_mismatch_count=%s chain_mismatch_count=%s",
+        tostring(context or "smoke"),
+        tostring(dev.irTriggerRuntimeEnabled()),
+        tostring(dev.irTimerRuntimeEnabled()),
+        tostring(dev.irBounceRuntimeEnabled()),
+        tostring(dev.irChainRuntimeEnabled()),
+        tostring(irAdapterCount(snapshot, "trigger", "fallback")),
+        tostring(irAdapterCount(snapshot, "timer", "fallback")),
+        tostring(irAdapterCount(snapshot, "bounce", "fallback")),
+        tostring(irAdapterCount(snapshot, "chain", "fallback")),
+        tostring(irAdapterCount(snapshot, "trigger", "mismatch")),
+        tostring(irAdapterCount(snapshot, "timer", "mismatch")),
+        tostring(irAdapterCount(snapshot, "bounce", "mismatch")),
+        tostring(irAdapterCount(snapshot, "chain", "mismatch"))
+    ))
+end
+
+local function assertIrRuntimeAdapterClean(snapshot, context)
+    logIrRuntimeAdapterStatus(snapshot, context)
+    assertLine(irAdapterFallbackCount(snapshot) == 0, "IR runtime adapters fallback counts zero", irAdapterStatusDetail(snapshot))
+    assertLine(irAdapterMismatchCount(snapshot) == 0, "IR runtime adapters mismatch counts zero", irAdapterStatusDetail(snapshot))
+end
+
 local function unsupportedContains(result, needle)
     for _, reason in ipairs(result and result.unsupported_reasons or {}) do
         if string.find(tostring(reason), needle, 1, true) ~= nil then
@@ -928,6 +985,22 @@ local function chainMulticastPayloadJobsCarryUserData(jobs, hop_count, fanout_co
         end
     end
     return true
+end
+
+local function assertIrChainRuntimeUsed(result, expected_hops, expected_job_count, label)
+    if not dev.irChainRuntimeEnabled() then
+        return
+    end
+    assertLine(
+        result and tonumber(result.ir_chain_runtime_hops) == expected_hops,
+        label .. " uses IR Chain runtime for each hop",
+        result and tostring(result.ir_chain_runtime_hops)
+    )
+    assertLine(
+        result and tonumber(result.ir_chain_runtime_job_count) == expected_job_count,
+        label .. " plans the expected IR Chain payload jobs",
+        result and tostring(result.ir_chain_runtime_job_count)
+    )
 end
 
 local function runChainTargetingSmoke(callback)
@@ -1348,6 +1421,7 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(result and result.duplicate_hop_suppressed == true, "direct Chain runtime suppresses duplicate chained hit")
                 assertLine(result and result.branch_hop_suppressed == true, "direct Chain runtime suppresses branched chained hit")
                 assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "direct Chain payload userData carries continuation identity")
+                assertIrChainRuntimeUsed(result, 3, 3, "direct Chain runtime")
             end,
         },
         {
@@ -1363,6 +1437,7 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain runtime suppresses duplicate chained payload hit")
                 assertLine(result and result.branch_hop_suppressed == true, "Trigger Chain runtime suppresses branched chained payload hit")
                 assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "Trigger Chain payload userData carries continuation identity")
+                assertIrChainRuntimeUsed(result, 3, 3, "Trigger Chain runtime")
             end,
         },
         {
@@ -1382,6 +1457,7 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(result and result.duplicate_hop_suppressed == true, "direct Chain Multicast suppresses duplicate sibling hit")
                 assertLine(result and result.branch_hop_suppressed == true, "direct Chain Multicast suppresses branched sibling hit")
                 assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), "direct Chain Multicast payload userData carries branch identity")
+                assertIrChainRuntimeUsed(result, 3, 3 * fanout_count, "direct Chain Multicast runtime")
             end,
         },
         {
@@ -1398,6 +1474,7 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(result and result.duplicate_source_suppressed == true, "Trigger Chain Multicast suppresses duplicate root Trigger hit")
                 assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain Multicast suppresses duplicate sibling payload hit")
                 assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), "Trigger Chain Multicast payload userData carries branch identity")
+                assertIrChainRuntimeUsed(result, 3, 3 * fanout_count, "Trigger Chain Multicast runtime")
             end,
         },
         {
@@ -1410,6 +1487,7 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "direct Chain Speed+ payload userData keeps Chain continuation")
                 assertLine(jobsCarrySpeedPlusUserData(result and result.chain_payload_jobs, 3, result and result.dispatch and result.dispatch.cast_id), "direct Chain Speed+ payload userData keeps Speed+ metadata")
                 assertLine(result and result.stop_reason == "max_hops_reached", "direct Chain Speed+ stops at max hops", result and result.stop_reason)
+                assertIrChainRuntimeUsed(result, 3, 3, "direct Chain Speed+ runtime")
             end,
         },
         {
@@ -1424,6 +1502,7 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain Speed+ suppresses duplicate chained payload hit")
                 assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "Trigger Chain Speed+ payload userData keeps Chain continuation")
                 assertLine(jobsCarrySpeedPlusUserData(result and result.chain_payload_jobs, 3, result and result.dispatch and result.dispatch.cast_id), "Trigger Chain Speed+ payload userData keeps Speed+ metadata")
+                assertIrChainRuntimeUsed(result, 3, 3, "Trigger Chain Speed+ runtime")
             end,
         },
         {
@@ -1436,6 +1515,7 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "direct Chain Size+ payload userData keeps Chain continuation")
                 assertLine(jobsCarrySizePlusUserData(result and result.chain_payload_jobs, 3, result and result.dispatch and result.dispatch.cast_id), "direct Chain Size+ payload userData keeps Size+ metadata")
                 assertLine(result and result.stop_reason == "max_hops_reached", "direct Chain Size+ stops at max hops", result and result.stop_reason)
+                assertIrChainRuntimeUsed(result, 3, 3, "direct Chain Size+ runtime")
             end,
         },
         {
@@ -1450,6 +1530,7 @@ local function runChainRuntimeSmoke(callback)
                 assertLine(result and result.duplicate_hop_suppressed == true, "Trigger Chain Size+ suppresses duplicate chained payload hit")
                 assertLine(chainPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, result and result.chain_id, result and result.max_hops), "Trigger Chain Size+ payload userData keeps Chain continuation")
                 assertLine(jobsCarrySizePlusUserData(result and result.chain_payload_jobs, 3, result and result.dispatch and result.dispatch.cast_id), "Trigger Chain Size+ payload userData keeps Size+ metadata")
+                assertIrChainRuntimeUsed(result, 3, 3, "Trigger Chain Size+ runtime")
             end,
         },
         {
@@ -1702,6 +1783,24 @@ local function runChainRuntimeSmoke(callback)
                 assertCounterAtLeast(snapshot, "chain_target_no_immediate_repeat_exclusions", 27, "runtime stats counted live Chain no-immediate-repeat exclusions")
                 assertCounterAtLeast(snapshot, "chain_provider_mock_attempts", 16, "runtime stats counted Chain mock provider use")
                 assertCounterAtLeast(snapshot, "chain_provider_attempts", 16, "runtime stats counted Chain provider attempts")
+                if dev.irChainRuntimeEnabled() then
+                    assertCounterAtLeast(snapshot, "ir_chain_runtime_attempts", 27, "runtime stats counted IR Chain runtime attempts")
+                    assertCounterAtLeast(snapshot, "ir_chain_runtime_enqueued", 27, "runtime stats counted IR Chain runtime enqueue events")
+                    assertCounterAtLeast(snapshot, "ir_chain_runtime_jobs_planned", 69, "runtime stats counted IR Chain runtime planned jobs")
+                    assertCounterAtLeast(snapshot, "ir_chain_runtime_jobs_enqueued", 27, "runtime stats counted IR Chain runtime real enqueued jobs")
+                    assertLine(counter(snapshot, "ir_chain_runtime_fallback") == 0, "IR Chain runtime fallback was not used for supported smoke shapes")
+                    assertLine(counter(snapshot, "ir_chain_runtime_mismatch") == 0, "IR Chain runtime had no planner mismatches")
+                    assertIrRuntimeAdapterClean(snapshot, "chain_runtime")
+                    assertLine(
+                        counter(snapshot, "chain_runtime_pattern_reject")
+                            + counter(snapshot, "chain_runtime_trigger_timer_reject")
+                            + counter(snapshot, "chain_runtime_nested_reject")
+                            + counter(snapshot, "chain_runtime_recursion_reject") >= 4,
+                        "IR runtime adapters deferred shapes do not enqueue"
+                    )
+                    assertLine(counter(snapshot, "branch_observability_events") >= 1, "IR runtime adapters branch metadata stable")
+                    assertLine(counter(snapshot, "chain_runtime_duplicate_suppressed") >= 1, "IR runtime adapters duplicate suppression stable")
+                end
                 assertLine(
                     counter(snapshot, "chain_provider_real_ok") + counter(snapshot, "chain_provider_real_unavailable") >= 1,
                     "runtime stats counted Chain real provider supported or unavailable state",
@@ -1817,14 +1916,259 @@ local function runManualChainRealProbe()
         assertLine(result and result.requested_hops == 3, "manual Chain real probe requests three hops", result and tostring(result.requested_hops))
         if result and result.ok == true then
             log.info("manual Chain real probe live: watch for SPELLFORGE_CHAIN_LOS_REQUESTED, SPELLFORGE_CHAIN_LOS_LOCAL_RESULT, SPELLFORGE_CHAIN_LOS_RESULT, SPELLFORGE_CHAIN_REAL_TARGET_SELECTED, SPELLFORGE_CHAIN_HOP_ENQUEUED, and SPELLFORGE_CHAIN_HOP_PAYLOAD_OK")
+            async:newUnsavableSimulationTimer(2.0, function()
+                requestRuntimeStats(false, function(stats_result)
+                    local snapshot = stats_result and stats_result.snapshot or {}
+                    local los_requests = counter(snapshot, "chain_runtime_los_requests")
+                    local selected_real = counter(snapshot, "chain_provider_selected_real")
+                    local hops_launched = counter(snapshot, "chain_runtime_hops_launched")
+                    local payload_ok = counter(snapshot, "chain_runtime_payload_ok")
+                    local safe_no_target = counter(snapshot, "chain_runtime_stop_no_target")
+                    local positive_handoff = los_requests > 0
+                        and selected_real > 0
+                        and hops_launched > 0
+                        and payload_ok > 0
+                    log.info(string.format(
+                        "SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_STATUS provider_real_ok=%s provider_real_unavailable=%s candidate_positive=%s los_requested=%s los_visible=%s real_target_selected=%s chain_hop_enqueued=%s chain_payload_launch_ok=%s safe_no_target_stop=%s positive_handoff=%s",
+                        tostring(counter(snapshot, "chain_provider_real_ok")),
+                        tostring(counter(snapshot, "chain_provider_real_unavailable")),
+                        tostring(los_requests > 0),
+                        tostring(los_requests),
+                        tostring(counter(snapshot, "chain_runtime_los_visible_candidates")),
+                        tostring(selected_real),
+                        tostring(hops_launched),
+                        tostring(payload_ok),
+                        tostring(safe_no_target),
+                        tostring(positive_handoff)
+                    ))
+                    if positive_handoff then
+                        log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_POSITIVE")
+                    elseif safe_no_target > 0 then
+                        log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_SAFE_NO_TARGET")
+                    else
+                        log.info("SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_NO_POSITIVE_PROOF")
+                    end
+                    state.running = false
+                end)
+            end)
+        else
+            state.running = false
         end
-        state.running = false
     end, {
         chain_case = "manual_real_gameplay",
         start_pos = start_pos,
         direction = direction,
         hit_object = hit_object,
     })
+end
+
+local function runIrRuntimeAdapterStatusSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
+    if not dev.liveSimpleDispatchEnabled() then
+        log.info(string.format("SKIP IR runtime adapter status smoke: enable %s", dev.liveSimpleDispatchSettingKey()))
+        return
+    end
+    if state.running then
+        log.warn("IR runtime adapter status smoke skipped: smoke live simple dispatch already in progress")
+        return
+    end
+    if state.backend ~= "READY" then
+        log.warn("IR runtime adapter status smoke skipped: backend is not READY")
+        return
+    end
+
+    state.running = true
+    log.info("IR runtime adapter smoke accepted; exercising Trigger, Timer, Bounce, and Chain through migrated IR gates")
+
+    local steps = {}
+    local function addStep(step)
+        steps[#steps + 1] = step
+    end
+    local function addProbeStep(mode, label, check, extra_builder)
+        addStep(function(next_step)
+            local extra = extra_builder and extra_builder() or nil
+            requestProbe(mode, function(result)
+                assertLine(result and result.ok == true, label, result and (result.error or result.fallback_reason or result.rejection_reason))
+                if check then
+                    check(result)
+                end
+                yieldSmoke(SMOKE_STAGE_YIELD_SECONDS, next_step)
+            end, extra)
+        end)
+    end
+    local function addTimerStep(mode, label, expected_payload_count)
+        addStep(function(next_step)
+            requestProbe(mode, function(scheduled)
+                assertLine(scheduled and scheduled.ok == true, label .. " schedules", scheduled and scheduled.error)
+                assertLine(scheduled and scheduled.ir_timer_runtime_planned == true, label .. " plans through IR Timer runtime", scheduled and scheduled.ir_timer_runtime_fallback_reason)
+                assertLine(scheduled and scheduled.ir_timer_runtime_fallback_used ~= true, label .. " planning fallback not used", scheduled and scheduled.ir_timer_runtime_fallback_reason)
+                requestTimerDelayCheck(scheduled and scheduled.timer_id, expected_payload_count, function(done)
+                    assertLine(done and done.ok == true, label .. " callback launches payloads", done and done.error)
+                    assertLine(done and done.ir_timer_runtime == true, label .. " enqueues through IR Timer runtime", done and done.ir_timer_runtime_fallback_reason)
+                    assertLine(done and done.ir_timer_runtime_fallback_used ~= true, label .. " callback fallback not used", done and done.ir_timer_runtime_fallback_reason)
+                    yieldSmoke(SMOKE_STAGE_YIELD_SECONDS, next_step)
+                end, {
+                    observe_matured = true,
+                })
+            end, launchAimPayload())
+        end)
+    end
+    local function addChainStep(chain_case, label, expected_hops, expected_job_count)
+        addProbeStep("chain_runtime", label, function(result)
+            assertLine(result and result.live_mode == "chain", label .. " reports Chain runtime")
+            assertIrChainRuntimeUsed(result, expected_hops, expected_job_count, label)
+        end, function()
+            local start_pos, direction, hit_object = currentLaunchAim()
+            return {
+                chain_case = chain_case,
+                start_pos = start_pos,
+                direction = direction,
+                hit_object = hit_object,
+            }
+        end)
+    end
+
+    addProbeStep("trigger_post_hit", "IR adapter Trigger simple payload", function(result)
+        assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger simple payload runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
+        assertLine(result and result.trigger_duplicate_suppressed == true, "IR Trigger duplicate suppression remains intact")
+    end, launchAimPayload)
+    addProbeStep("trigger_payload_multicast_post_hit", "IR adapter Trigger payload Multicast", function(result)
+        assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Multicast runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
+        assertLine(result and tonumber(result.trigger_payload_count) == 3, "IR Trigger payload Multicast routes three payloads")
+    end, launchAimPayload)
+    addProbeStep("trigger_payload_burst_post_hit", "IR adapter Trigger payload Pattern", function(result)
+        assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Pattern runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
+        assertLine(result and result.payload_pattern == true and result.payload_pattern_kind == "Burst", "IR Trigger payload Pattern preserves Burst metadata")
+    end, launchAimPayload)
+
+    addTimerStep("timer_real_delay_sequence", "IR adapter Timer simple payload", 1)
+    addTimerStep("timer_payload_multicast_sequence", "IR adapter Timer payload Multicast", 3)
+    addTimerStep("timer_payload_burst_sequence", "IR adapter Timer payload Pattern", 5)
+
+    addProbeStep("bounce_source_only_dry_run", "IR adapter Bounce source-only dry-run", function(result)
+        assertLine(result and result.live_mode == "bounce" and result.bounce_mode == "source", "IR adapter Bounce source-only reports source mode")
+        assertLine(result and tonumber(result.payload_count) == 0, "IR adapter Bounce source-only is payload-free")
+    end)
+    addProbeStep("bounce_trigger_simple_post_bounce", "IR adapter Bounce Trigger simple payload", function(result)
+        assertLine(result and result.ir_bounce_runtime == true, "IR Bounce simple payload runtime plans", result and result.ir_bounce_runtime_fallback_reason)
+        assertLine(result and result.bounce_duplicate_suppressed == true, "IR Bounce simple payload duplicate suppression remains intact")
+    end, launchAimPayload)
+    addProbeStep("bounce_trigger_multicast_post_bounce", "IR adapter Bounce Trigger payload Multicast", function(result)
+        assertLine(result and result.ir_bounce_runtime == true, "IR Bounce payload Multicast runtime enqueues", result and result.ir_bounce_runtime_fallback_reason)
+        assertLine(result and tonumber(result.bounce_trigger_payload_count) == 3, "IR Bounce payload Multicast routes three payloads")
+    end, launchAimPayload)
+    addProbeStep("bounce_trigger_burst_post_bounce", "IR adapter Bounce Trigger payload Pattern", function(result)
+        assertLine(result and result.ir_bounce_runtime == true, "IR Bounce payload Pattern runtime enqueues", result and result.ir_bounce_runtime_fallback_reason)
+        assertLine(result and result.payload_pattern == true and result.payload_pattern_kind == "Burst", "IR Bounce payload Pattern preserves Burst metadata")
+    end, launchAimPayload)
+    addProbeStep("bounce_chain_payload_mock_handoff", "IR adapter Bounce Trigger Chain", function(result)
+        assertLine(result and result.bounce_chain_provider == "mock", "IR Bounce Trigger Chain uses deterministic provider")
+        assertLine(result and tonumber(result.bounce_trigger_payload_launch_count) == 1, "IR Bounce Trigger Chain enqueues one Chain handoff")
+    end, deterministicBounceChainPayload)
+
+    addChainStep("direct_chain_3", "IR adapter Chain simple payload", 3, 3)
+    addChainStep("direct_chain_multicast_8", "IR adapter Chain payload Multicast", 3, 24)
+    addChainStep("trigger_chain_3", "IR adapter Trigger Chain", 3, 3)
+    addChainStep("trigger_chain_multicast_8", "IR adapter Trigger Chain Multicast", 3, 24)
+    addChainStep("direct_chain_speed_plus_3", "IR adapter Chain Speed+", 3, 3)
+    addChainStep("direct_chain_size_plus_3", "IR adapter Chain Size+", 3, 3)
+
+    addProbeStep("trigger_payload_multicast_disabled", "IR adapter deferred Trigger payload Multicast", function(result)
+        assertLine(result and result.used_live_2_2c == false, "IR adapter deferred Trigger payload Multicast does not enqueue")
+    end)
+    addProbeStep("timer_payload_pattern_disabled", "IR adapter deferred Timer payload Pattern", function(result)
+        assertLine(result and result.used_live_2_2c == false, "IR adapter deferred Timer payload Pattern does not enqueue")
+    end)
+    addProbeStep("bounce_timer_deferred", "IR adapter deferred Bounce Timer", nil)
+    addProbeStep("bounce_chain_deferred", "IR adapter deferred direct Bounce Chain", nil)
+    addProbeStep("bounce_homing_deferred", "IR adapter deferred Bounce Homing", nil)
+    addProbeStep("bounce_fanout_deferred", "IR adapter deferred Bounce source fanout", nil)
+    addProbeStep("bounce_speed_plus_deferred", "IR adapter deferred Bounce source Speed+", nil)
+    addProbeStep("bounce_size_plus_deferred", "IR adapter deferred Bounce source Size+", nil)
+    addProbeStep("chain_runtime", "IR adapter deferred Chain Pattern", function(result)
+        assertLine(result and type(result.fallback_reason) == "string", "IR adapter deferred Chain Pattern has reason", result and result.fallback_reason)
+    end, function()
+        return { chain_case = "pattern" }
+    end)
+    addProbeStep("chain_runtime", "IR adapter deferred Chain Trigger/Timer payload", function(result)
+        assertLine(result and type(result.fallback_reason) == "string", "IR adapter deferred Chain Trigger/Timer has reason", result and result.fallback_reason)
+    end, function()
+        return { chain_case = "trigger_timer" }
+    end)
+    addProbeStep("chain_runtime", "IR adapter deferred Chain recursion", function(result)
+        assertLine(result and type(result.fallback_reason) == "string", "IR adapter deferred Chain recursion has reason", result and result.fallback_reason)
+    end, function()
+        return { chain_case = "recursion" }
+    end)
+
+    local function finish()
+        requestRuntimeStats(false, function(stats_result)
+            local snapshot = stats_result and stats_result.snapshot or {}
+            assertLine(stats_result and stats_result.ok == true, "runtime stats snapshot returned", stats_result and stats_result.error)
+            assertLine(
+                dev.irTriggerRuntimeEnabled()
+                    and dev.irTimerRuntimeEnabled()
+                    and dev.irBounceRuntimeEnabled()
+                    and dev.irChainRuntimeEnabled(),
+                "IR runtime adapters all migrated smoke gates enabled",
+                string.format(
+                    "trigger=%s timer=%s bounce=%s chain=%s",
+                    tostring(dev.irTriggerRuntimeEnabled()),
+                    tostring(dev.irTimerRuntimeEnabled()),
+                    tostring(dev.irBounceRuntimeEnabled()),
+                    tostring(dev.irChainRuntimeEnabled())
+                )
+            )
+            assertIrRuntimeAdapterClean(snapshot, "all_ir_adapter_smoke")
+            assertLine(
+                counter(snapshot, "payload_multicast_disabled_reject")
+                    + counter(snapshot, "payload_pattern_disabled_reject")
+                    + counter(snapshot, "live_bounce_fanout_reject")
+                    + counter(snapshot, "live_bounce_modifier_reject")
+                    + counter(snapshot, "live_bounce_homing_reject")
+                    + counter(snapshot, "live_bounce_chain_reject")
+                    + counter(snapshot, "chain_runtime_pattern_reject")
+                    + counter(snapshot, "chain_runtime_trigger_timer_reject")
+                    + counter(snapshot, "chain_runtime_recursion_reject") >= 10,
+                "IR runtime adapters deferred shapes do not enqueue"
+            )
+            assertLine(
+                counter(snapshot, "payload_pattern_trigger_jobs")
+                    + counter(snapshot, "payload_pattern_timer_jobs")
+                    + counter(snapshot, "live_bounce_trigger_payload_smoke_observed")
+                    + counter(snapshot, "branch_observability_events") >= 4,
+                "IR runtime adapters branch metadata stable"
+            )
+            assertLine(
+                counter(snapshot, "live_trigger_duplicate_hits_suppressed")
+                    + counter(snapshot, "live_timer_duplicate_schedules_suppressed")
+                    + counter(snapshot, "live_timer_async_duplicate_suppressed")
+                    + counter(snapshot, "live_bounce_duplicate_suppressed")
+                    + counter(snapshot, "chain_runtime_duplicate_suppressed") >= 4,
+                "IR runtime adapters duplicate suppression stable"
+            )
+            log.info("smoke IR runtime adapter run complete")
+            state.running = false
+        end)
+    end
+
+    local function runStep(index)
+        local step = steps[index]
+        if not step then
+            finish()
+            return
+        end
+        step(function()
+            runStep(index + 1)
+        end)
+    end
+
+    requestRuntimeStats(true, function(reset_result)
+        assertLine(reset_result and reset_result.ok == true, "runtime stats reset accepted", reset_result and reset_result.error)
+        runStep(1)
+    end)
 end
 
 local function runBounceSmoke()
@@ -1926,7 +2270,29 @@ local function runBounceSmoke()
             if result and result.ok == true then
                 log.info("Bounce live: watch for exactly three SPELLFORGE_BOUNCE_EVENT_SEEN markers, source and Trigger payload detonations at each bounce, and one final cancel")
             end
-            state.running = false
+            requestRuntimeStats(false, function(stats_result)
+                local snapshot = stats_result and stats_result.snapshot or {}
+                assertLine(stats_result and stats_result.ok == true, "runtime stats snapshot returned", stats_result and stats_result.error)
+                assertCounterAtLeast(snapshot, "ir_bounce_runtime_attempts", 3, "runtime stats counted IR Bounce runtime attempts")
+                assertCounterAtLeast(snapshot, "ir_bounce_runtime_detonation_planned", 1, "runtime stats counted IR Bounce simple detonation planning")
+                assertCounterAtLeast(snapshot, "ir_bounce_runtime_enqueued", 2, "runtime stats counted IR Bounce runtime enqueue events")
+                assertCounterAtLeast(snapshot, "ir_bounce_runtime_jobs_enqueued", 8, "runtime stats counted IR Bounce runtime enqueue jobs")
+                assertLine(counter(snapshot, "ir_bounce_runtime_fallback") == 0, "IR Bounce runtime fallback was not used for supported smoke shapes")
+                assertLine(counter(snapshot, "ir_bounce_runtime_mismatch") == 0, "IR Bounce runtime had no planner mismatches")
+                assertIrRuntimeAdapterClean(snapshot, "bounce")
+                assertLine(
+                    counter(snapshot, "live_bounce_cap_reject")
+                        + counter(snapshot, "live_bounce_fanout_reject")
+                        + counter(snapshot, "live_bounce_modifier_reject")
+                        + counter(snapshot, "live_bounce_homing_reject")
+                        + counter(snapshot, "live_bounce_nested_payload_reject")
+                        + counter(snapshot, "live_bounce_chain_reject") >= 6,
+                    "IR runtime adapters deferred shapes do not enqueue"
+                )
+                assertLine(counter(snapshot, "live_bounce_trigger_payload_smoke_observed") >= 1, "IR runtime adapters branch metadata stable")
+                assertLine(counter(snapshot, "live_bounce_duplicate_suppressed") >= 1, "IR runtime adapters duplicate suppression stable")
+                state.running = false
+            end)
         end, launchAimPayload())
     end
 
@@ -1956,34 +2322,37 @@ local function runBounceSmoke()
         end)
     end
 
-    requestProbe("bounce_disabled", function(disabled)
-        assertLine(disabled and disabled.ok == true, "Bounce disabled probe rejects cleanly", disabled and disabled.error)
-        assertLine(type(disabled and disabled.fallback_reason) == "string", "Bounce disabled probe has reason")
+    requestRuntimeStats(true, function(reset_result)
+        assertLine(reset_result and reset_result.ok == true, "runtime stats reset accepted", reset_result and reset_result.error)
 
-        requestProbe("bounce_source_only_dry_run", function(source_only)
-            local source_only_detail = bounceSourceOnlyDetail(source_only)
-            assertLine(source_only and source_only.ok == true, "Bounce simple source dry-run qualifies", source_only_detail)
-            assertLine(source_only and source_only.live_mode == "bounce", "Bounce simple source reports bounce mode")
-            assertLine(source_only and source_only.bounce_mode == "source", "Bounce simple source reports source-only bounce mode", source_only_detail)
-            assertLine(source_only and tonumber(source_only.bounce_max) == 3, "Bounce simple source reports three bounces")
-            assertLine(source_only and source_only.dispatch_count == 1 and source_only.source_dispatch_count == 1, "Bounce simple source plans only one source projectile")
-            assertLine(source_only and type(source_only.source_slot_id or source_only.slot_id) == "string", "Bounce simple source exposes source slot id", source_only_detail)
-            assertLine(source_only and type(source_only.source_helper_engine_id or source_only.helper_engine_id) == "string", "Bounce simple source exposes source helper id", source_only_detail)
-            assertLine(source_only and source_only.trigger_payload_slot_id == nil, "Bounce simple source has no Trigger payload")
-            assertLine(source_only and source_only.trigger_payload_helper_engine_id == nil and source_only.payload_helper_engine_id == nil, "Bounce simple source has no payload helper")
-            assertLine(source_only and tonumber(source_only.payload_count) == 0 and source_only.payload_fanout_count == nil, "Bounce simple source has no payload fanout", source_only_detail)
-            assertLine(source_only and source_only.payload_chain_runtime == false and source_only.has_chain_payload == false, "Bounce simple source has no Chain payload")
-            assertLine(source_only and source_only.bounce_probe_binding_registered == false, "Bounce simple source dry-run does not register a post-bounce binding")
+        requestProbe("bounce_disabled", function(disabled)
+            assertLine(disabled and disabled.ok == true, "Bounce disabled probe rejects cleanly", disabled and disabled.error)
+            assertLine(type(disabled and disabled.fallback_reason) == "string", "Bounce disabled probe has reason")
 
-            requestProbe("bounce_dry_run", function(dry)
-                assertLine(dry and dry.ok == true, "Bounce dry-run qualifies", dry and dry.error)
-                assertLine(dry and tonumber(dry.bounce_max) == 3, "Bounce dry-run reports three bounces")
-                assertLine(dry and dry.bounce_detonate_on_actor_hit == false, "Bounce dry-run bounces actors")
-                assertLine(type(dry and dry.trigger_payload_slot_id) == "string", "Bounce dry-run keeps Trigger payload")
-                assertLine(dry and dry.payload_projectile_launches == 0, "Bounce dry-run predicts no Trigger payload projectile")
-                assertLine(dry and dry.payload_detonation_mode == "bounce_detonate_at_pos", "Bounce dry-run predicts at-position Trigger payload detonation")
+            requestProbe("bounce_source_only_dry_run", function(source_only)
+                local source_only_detail = bounceSourceOnlyDetail(source_only)
+                assertLine(source_only and source_only.ok == true, "Bounce simple source dry-run qualifies", source_only_detail)
+                assertLine(source_only and source_only.live_mode == "bounce", "Bounce simple source reports bounce mode")
+                assertLine(source_only and source_only.bounce_mode == "source", "Bounce simple source reports source-only bounce mode", source_only_detail)
+                assertLine(source_only and tonumber(source_only.bounce_max) == 3, "Bounce simple source reports three bounces")
+                assertLine(source_only and source_only.dispatch_count == 1 and source_only.source_dispatch_count == 1, "Bounce simple source plans only one source projectile")
+                assertLine(source_only and type(source_only.source_slot_id or source_only.slot_id) == "string", "Bounce simple source exposes source slot id", source_only_detail)
+                assertLine(source_only and type(source_only.source_helper_engine_id or source_only.helper_engine_id) == "string", "Bounce simple source exposes source helper id", source_only_detail)
+                assertLine(source_only and source_only.trigger_payload_slot_id == nil, "Bounce simple source has no Trigger payload")
+                assertLine(source_only and source_only.trigger_payload_helper_engine_id == nil and source_only.payload_helper_engine_id == nil, "Bounce simple source has no payload helper")
+                assertLine(source_only and tonumber(source_only.payload_count) == 0 and source_only.payload_fanout_count == nil, "Bounce simple source has no payload fanout", source_only_detail)
+                assertLine(source_only and source_only.payload_chain_runtime == false and source_only.has_chain_payload == false, "Bounce simple source has no Chain payload")
+                assertLine(source_only and source_only.bounce_probe_binding_registered == false, "Bounce simple source dry-run does not register a post-bounce binding")
 
-                requestProbe("bounce_trigger_simple_post_bounce", function(simple_post)
+                requestProbe("bounce_dry_run", function(dry)
+                    assertLine(dry and dry.ok == true, "Bounce dry-run qualifies", dry and dry.error)
+                    assertLine(dry and tonumber(dry.bounce_max) == 3, "Bounce dry-run reports three bounces")
+                    assertLine(dry and dry.bounce_detonate_on_actor_hit == false, "Bounce dry-run bounces actors")
+                    assertLine(type(dry and dry.trigger_payload_slot_id) == "string", "Bounce dry-run keeps Trigger payload")
+                    assertLine(dry and dry.payload_projectile_launches == 0, "Bounce dry-run predicts no Trigger payload projectile")
+                    assertLine(dry and dry.payload_detonation_mode == "bounce_detonate_at_pos", "Bounce dry-run predicts at-position Trigger payload detonation")
+
+                    requestProbe("bounce_trigger_simple_post_bounce", function(simple_post)
                     local simple_user_data = simple_post and simple_post.bounce_trigger_payload_launch_user_data or nil
                     assertLine(simple_post and simple_post.ok == true, "Bounce Trigger simple payload post-bounce detonates", simple_post and (simple_post.fallback_reason or simple_post.error))
                     assertLine(simple_post and simple_post.bounce_probe_binding_registered == true, "Bounce Trigger simple payload post-bounce uses synthetic binding")
@@ -1993,6 +2362,8 @@ local function runBounceSmoke()
                     assertLine(simple_post and tonumber(simple_post.bounce_trigger_payload_count) == 1, "Bounce Trigger simple payload routes one payload")
                     assertLine(simple_post and tonumber(simple_post.bounce_trigger_payload_launch_count) == 1, "Bounce Trigger simple payload detonates once")
                     assertLine(type(simple_user_data) == "table" and simple_user_data.branch_kind == "bounce_trigger_payload" and simple_user_data.trigger_route == "bounce", "Bounce Trigger simple payload userData marks bounce route")
+                    assertLine(simple_post and simple_post.ir_bounce_runtime == true, "IR Bounce simple payload runtime plans", simple_post and simple_post.ir_bounce_runtime_fallback_reason)
+                    assertLine(simple_post and simple_post.ir_bounce_runtime_fallback_used ~= true, "IR Bounce simple payload fallback not used", simple_post and simple_post.ir_bounce_runtime_fallback_reason)
 
                     requestProbe("bounce_chain_payload_dry_run", function(chain_dry)
                         assertLine(chain_dry and chain_dry.ok == true, "Bounce Trigger Chain payload dry-run qualifies", chain_dry and chain_dry.error)
@@ -2041,13 +2412,40 @@ local function runBounceSmoke()
                                         assertLine(post_bounce and tonumber(post_bounce.bounce_trigger_payload_launch_count) == 3, "Bounce Trigger payload Multicast post-bounce launches three payload jobs", post_bounce_detail)
                                         assertLine(type(first_payload_job) == "table" and first_payload_job.branch_kind == "bounce_trigger_payload_multicast" and first_payload_job.trigger_route == "bounce", "Bounce Trigger payload Multicast jobs carry bounce route metadata")
                                         assertLine(type(fanout_user_data) == "table" and fanout_user_data.branch_kind == "bounce_trigger_payload_multicast" and fanout_user_data.trigger_route == "bounce", "Bounce Trigger payload Multicast userData marks bounce route")
-                                        runBounceGateRejectionChecks()
+                                        assertLine(post_bounce and post_bounce.ir_bounce_runtime == true, "IR Bounce payload Multicast runtime enqueues", post_bounce and post_bounce.ir_bounce_runtime_fallback_reason)
+                                        assertLine(post_bounce and post_bounce.ir_bounce_runtime_fallback_used ~= true, "IR Bounce payload Multicast fallback not used", post_bounce and post_bounce.ir_bounce_runtime_fallback_reason)
+
+                                        requestProbe("bounce_trigger_burst_post_bounce", function(pattern_post)
+                                            local pattern_detail = pattern_post and string.format(
+                                                "count=%s launch_count=%s pattern=%s error=%s",
+                                                tostring(pattern_post.bounce_trigger_payload_count),
+                                                tostring(pattern_post.bounce_trigger_payload_launch_count),
+                                                tostring(pattern_post.payload_pattern_kind),
+                                                tostring(pattern_post.error or pattern_post.fallback_reason)
+                                            ) or nil
+                                            local first_pattern_job = pattern_post and pattern_post.bounce_trigger_payload_jobs and pattern_post.bounce_trigger_payload_jobs[1] or nil
+                                            local pattern_user_data = pattern_post and pattern_post.bounce_trigger_payload_launch_user_data or nil
+                                            assertLine(pattern_post and pattern_post.ok == true, "Bounce Trigger payload Burst post-bounce launches payloads", pattern_post and (pattern_post.fallback_reason or pattern_post.error))
+                                            assertLine(pattern_post and pattern_post.bounce_probe_binding_registered == true, "Bounce Trigger payload Burst post-bounce uses synthetic binding")
+                                            assertLine(pattern_post and pattern_post.post_bounce_result and pattern_post.post_bounce_result.ok == true, "Bounce Trigger payload Burst post-bounce route succeeds")
+                                            assertLine(pattern_post and pattern_post.bounce_duplicate_suppressed == true, "Bounce Trigger payload Burst duplicate bounce suppresses")
+                                            assertLine(pattern_post and pattern_post.bounce_trigger_route == "bounce", "Bounce Trigger payload Burst uses bounce event route")
+                                            assertLine(pattern_post and pattern_post.payload_pattern == true and pattern_post.payload_pattern_kind == "Burst", "Bounce Trigger payload Burst keeps pattern kind", pattern_detail)
+                                            assertLine(pattern_post and tonumber(pattern_post.bounce_trigger_payload_count) == 5, "Bounce Trigger payload Burst post-bounce routes five payloads", pattern_detail)
+                                            assertLine(pattern_post and tonumber(pattern_post.bounce_trigger_payload_launch_count) == 5, "Bounce Trigger payload Burst post-bounce launches five payload jobs", pattern_detail)
+                                            assertLine(type(first_pattern_job) == "table" and first_pattern_job.branch_kind == "bounce_trigger_payload_pattern" and first_pattern_job.trigger_route == "bounce", "Bounce Trigger payload Burst jobs carry bounce route metadata")
+                                            assertLine(type(pattern_user_data) == "table" and pattern_user_data.branch_kind == "bounce_trigger_payload_pattern" and pattern_user_data.trigger_route == "bounce", "Bounce Trigger payload Burst userData marks bounce route")
+                                            assertLine(pattern_post and pattern_post.ir_bounce_runtime == true, "IR Bounce payload Pattern runtime enqueues", pattern_post and pattern_post.ir_bounce_runtime_fallback_reason)
+                                            assertLine(pattern_post and pattern_post.ir_bounce_runtime_fallback_used ~= true, "IR Bounce payload Pattern fallback not used", pattern_post and pattern_post.ir_bounce_runtime_fallback_reason)
+                                            runBounceGateRejectionChecks()
+                                        end, launchAimPayload())
                                     end, launchAimPayload())
                                 end)
                             end)
                         end)
                     end)
                 end, launchAimPayload())
+            end)
             end)
         end)
     end)
@@ -2284,6 +2682,152 @@ local function runBounceChainSmoke()
             end, launchAimPayload())
         end, deterministicBounceChainPayload())
     end, launchAimPayload())
+end
+
+local function runPierceSmoke()
+    if not dev.smokeTestsEnabled() then
+        return
+    end
+    if not dev.liveSimpleDispatchEnabled() then
+        log.info(string.format("SKIP Pierce smoke: enable %s", dev.liveSimpleDispatchSettingKey()))
+        return
+    end
+    if not dev.livePierceEnabled() then
+        log.info(string.format("SKIP Pierce smoke: enable %s", dev.livePierceSettingKey()))
+        return
+    end
+    if state.running then
+        log.warn("Pierce smoke skipped: smoke live simple dispatch already in progress")
+        return
+    end
+    if state.backend ~= "READY" then
+        log.warn("Pierce smoke skipped: backend is not READY")
+        return
+    end
+
+    state.running = true
+    log.info("Pierce smoke accepted: testing Pierce source, Trigger payload fanout, Chain handoff, duplicate suppression, and deferred shapes")
+
+    local function assertPierceRejected(mode, label, expected_reason, next_step)
+        requestProbe(mode, function(result)
+            assertLine(result and result.ok == true, "Pierce " .. label .. " rejects cleanly", result and (result.fallback_reason or result.error))
+            assertLine(result and result.fallback_reason == expected_reason, "Pierce " .. label .. " has stable reason", result and tostring(result.fallback_reason))
+            if next_step then
+                next_step()
+            end
+        end)
+    end
+
+    local function finish()
+        requestRuntimeStats(false, function(stats_result)
+            local snapshot = stats_result and stats_result.snapshot or {}
+            assertLine(stats_result and stats_result.ok == true, "runtime stats snapshot returned", stats_result and stats_result.error)
+            assertLine(counter(snapshot, "ir_pierce_runtime_mismatch") == 0, "IR Pierce runtime had no planner mismatches")
+            assertLine(counter(snapshot, "ir_pierce_runtime_fallback") == 0, "IR Pierce runtime fallback was not used for supported smoke shapes")
+            assertCounterAtLeast(snapshot, "live_pierce_duplicate_suppressed", 3, "Pierce duplicate suppression remains intact")
+            assertCounterAtLeast(snapshot, "live_pierce_deferred_reject", 9, "Pierce deferred shapes reject before enqueue")
+            log.info("smoke live Pierce run complete")
+            state.running = false
+        end)
+    end
+
+    local function runDeferredChecks()
+        assertPierceRejected("pierce_trigger_multicast_disabled", "Trigger Multicast payload gate", "payload_multicast_disabled", function()
+            assertPierceRejected("pierce_trigger_pattern_disabled", "Trigger pattern payload gate", "payload_pattern_disabled", function()
+                assertPierceRejected("pierce_chain_payload_disabled", "Trigger Chain payload gate", "pierce_chain_payload_disabled", function()
+                    assertPierceRejected("pierce_timer_deferred", "Timer", "pierce_timer_deferred", function()
+                        assertPierceRejected("pierce_bounce_deferred", "Bounce", "pierce_bounce_deferred", function()
+                            assertPierceRejected("pierce_homing_deferred", "Homing", "pierce_homing_deferred", function()
+                                assertPierceRejected("pierce_speed_plus_deferred", "Speed+", "pierce_modifier_deferred", function()
+                                    assertPierceRejected("pierce_size_plus_deferred", "Size+", "pierce_modifier_deferred", function()
+                                        assertPierceRejected("pierce_chain_deferred", "direct Chain", "pierce_chain_deferred", function()
+                                            assertPierceRejected("pierce_fanout_deferred", "source fanout", "pierce_fanout_deferred", function()
+                                                assertPierceRejected("pierce_nested_payload_deferred", "nested payload", "pierce_nested_payload_deferred", function()
+                                                    assertPierceRejected("pierce_recursion_deferred", "recursion", "pierce_recursion_deferred", finish)
+                                                end)
+                                            end)
+                                        end)
+                                    end)
+                                end)
+                            end)
+                        end)
+                    end)
+                end)
+            end)
+        end)
+    end
+
+    requestRuntimeStats(true, function(reset_result)
+        assertLine(reset_result and reset_result.ok == true, "runtime stats reset accepted", reset_result and reset_result.error)
+        requestProbe("pierce_disabled", function(disabled)
+            assertLine(disabled and disabled.ok == true, "Pierce disabled probe rejects cleanly", disabled and disabled.error)
+            assertLine(disabled and disabled.fallback_reason == "live_pierce_disabled", "Pierce disabled probe has stable reason", disabled and tostring(disabled.fallback_reason))
+
+            requestProbe("pierce_source_only_dry_run", function(source_only)
+                assertLine(source_only and source_only.ok == true, "Pierce source dry-run qualifies", source_only and (source_only.fallback_reason or source_only.error))
+                assertLine(source_only and source_only.live_mode == "pierce", "Pierce source reports pierce mode")
+                assertLine(source_only and source_only.pierce_mode == "source", "Pierce source dry-run is payload-free")
+                assertLine(source_only and tonumber(source_only.pierce_limit) == 3, "Pierce source reports three pierces")
+                assertLine(source_only and source_only.dispatch_count == 1 and source_only.source_dispatch_count == 1, "Pierce source plans only one source projectile")
+                assertLine(source_only and source_only.has_trigger_payload == false and tonumber(source_only.payload_count) == 0, "Pierce source has no Trigger payload")
+
+                requestProbe("pierce_source_only_launch", function(source_launch)
+                    local source_job = source_launch and source_launch.jobs and source_launch.jobs[1] or nil
+                    local source_user_data = source_job and source_job.launch_user_data or nil
+                    assertLine(source_launch and source_launch.ok == true, "Pierce source launches", source_launch and (source_launch.fallback_reason or source_launch.error))
+                    assertLine(source_launch and source_launch.post_launch_pierce_ok == true, "Pierce launch forwards SFP piercing fields", source_launch and tostring(source_launch.post_launch_pierce_error))
+                    assertLine(source_job and source_job.piercing == true and tonumber(source_job.pierceLimit) == 3, "Pierce source job carries SFP Pierce launch fields")
+                    assertLine(type(source_user_data) == "table" and source_user_data.pierce_runtime == true and source_user_data.source_prefix_opcode == "Pierce", "Pierce source userData carries Pierce identity")
+
+                    requestProbe("pierce_trigger_simple_event", function(simple)
+                        local simple_user_data = simple and simple.pierce_trigger_payload_launch_user_data or nil
+                        assertLine(simple and simple.ok == true, "SFP Pierce contract observable", simple and (simple.fallback_reason or simple.error))
+                        assertLine(simple and simple.post_pierce_result and simple.post_pierce_result.ok == true, "Pierce Trigger simple payload enqueues")
+                        assertLine(simple and simple.pierce_duplicate_suppressed == true, "Pierce duplicate suppression remains intact")
+                        assertLine(simple and simple.pierce_trigger_route == "pierce", "Pierce Trigger simple payload uses Pierce event route")
+                        assertLine(simple and tonumber(simple.pierce_trigger_payload_launch_count) == 1, "Pierce Trigger simple payload launches once")
+                        assertLine(simple and simple.pierce_payload_origin_safe == true, "Pierce payload origin avoids raw inside-actor spawn")
+                        assertLine(simple and simple.pierce_exclude_target_carried == true and simple.pierce_current_hit_target_id == "A", "Pierce payload carries pierced actor exclusion")
+                        assertLine(type(simple_user_data) == "table" and simple_user_data.trigger_route == "pierce" and simple_user_data.pierce_role == "trigger_payload_launch", "Pierce Trigger simple payload userData marks Pierce route")
+
+                        requestProbe("pierce_trigger_multicast_event", function(multicast)
+                            assertLine(multicast and multicast.ok == true, "Pierce Trigger payload Multicast enqueues", multicast and (multicast.fallback_reason or multicast.error))
+                            assertLine(multicast and multicast.payload_multicast == true and multicast.payload_pattern == false, "Pierce Trigger payload Multicast reports payload fanout")
+                            assertLine(multicast and tonumber(multicast.pierce_trigger_payload_launch_count) == 3, "Pierce Trigger payload Multicast launches three payloads")
+                            assertLine(multicast and multicast.pierce_duplicate_suppressed == true, "Pierce Trigger payload Multicast duplicate suppresses")
+
+                            requestProbe("pierce_trigger_pattern_event", function(pattern)
+                                assertLine(pattern and pattern.ok == true, "Pierce Trigger payload Pattern enqueues", pattern and (pattern.fallback_reason or pattern.error))
+                                assertLine(pattern and pattern.payload_multicast == true and pattern.payload_pattern == true and pattern.payload_pattern_kind == "Burst", "Pierce Trigger payload Pattern reports Burst fanout")
+                                assertLine(pattern and tonumber(pattern.pierce_trigger_payload_launch_count) == 5, "Pierce Trigger payload Pattern launches five payloads")
+                                assertLine(pattern and pattern.pierce_duplicate_suppressed == true, "Pierce Trigger payload Pattern duplicate suppresses")
+
+                                requestProbe("pierce_trigger_spread_event", function(spread)
+                                    assertLine(spread and spread.ok == true, "Pierce Trigger payload Spread enqueues", spread and (spread.fallback_reason or spread.error))
+                                    assertLine(spread and spread.payload_multicast == true and spread.payload_pattern == true and spread.payload_pattern_kind == "Spread", "Pierce Trigger payload Spread reports Spread fanout")
+                                    assertLine(spread and tonumber(spread.pierce_trigger_payload_launch_count) == 3, "Pierce Trigger payload Spread launches three payloads")
+                                    assertLine(spread and spread.pierce_duplicate_suppressed == true, "Pierce Trigger payload Spread duplicate suppresses")
+
+                                    requestProbe("pierce_trigger_chain_event", function(chain)
+                                        local first_job = chain and chain.pierce_trigger_payload_jobs and chain.pierce_trigger_payload_jobs[1] or nil
+                                        assertLine(chain and chain.ok == true, "Pierce Trigger Chain handoff plans", chain and (chain.fallback_reason or chain.error))
+                                        assertLine(chain and chain.payload_chain_runtime == true, "Pierce Trigger Chain uses Chain runtime")
+                                        assertLine(chain and chain.pierce_trigger_route == "pierce_chain", "Pierce Trigger Chain uses Pierce Chain route")
+                                        assertLine(chain and chain.pierce_chain_provider == "mock", "Pierce Trigger Chain provider returns candidates")
+                                        assertLine(chain and chain.pierce_chain_current_hit_target_id == "A", "Pierce Trigger Chain treats pierced actor as current target")
+                                        assertLine(chain and chain.pierce_chain_selected_target_id == "B", "Pierce Trigger Chain selects another target")
+                                        assertLine(chain and tonumber(chain.pierce_chain_hop_index) == 1, "Pierce Trigger Chain enqueues first Chain hop")
+                                        assertLine(type(first_job) == "table" and first_job.chain_runtime == true and first_job.chain_role == "payload", "Pierce Trigger Chain payload job carries Chain identity")
+                                        runDeferredChecks()
+                                    end, launchAimPayload())
+                                end, launchAimPayload())
+                            end, launchAimPayload())
+                        end, launchAimPayload())
+                    end, launchAimPayload())
+                end, launchAimPayload())
+            end)
+        end)
+    end)
 end
 
 local function runMulticastSmoke()
@@ -2532,16 +3076,21 @@ local function runTriggerSmoke()
                         assertLine(post_hit and post_hit.post_hit_result and post_hit.post_hit_result.trigger_route == "userData", "live Trigger post-hit uses userData route")
                         assertLine(post_hit and post_hit.trigger_duplicate_suppressed == true, "live Trigger duplicate source hit is suppressed")
                         assertLine(payloadUserDataCarriesTrigger(post_hit), "live Trigger payload userData carries source and payload identity")
+                        assertLine(post_hit and post_hit.post_hit_result and post_hit.post_hit_result.ir_trigger_runtime == true, "IR Trigger simple payload runtime enqueues", post_hit and post_hit.post_hit_result and post_hit.post_hit_result.ir_trigger_runtime_fallback_reason)
+                        assertLine(post_hit and post_hit.duplicate_hit_result and post_hit.duplicate_hit_result.duplicate_suppressed == true, "IR Trigger duplicate suppression remains intact")
+                        assertLine(post_hit and post_hit.post_hit_result and post_hit.post_hit_result.ir_trigger_runtime_fallback_used ~= true, "IR Trigger fallback not used for supported shapes", post_hit and post_hit.post_hit_result and post_hit.post_hit_result.ir_trigger_runtime_fallback_reason)
 
                         local fallback_start_pos, fallback_direction, fallback_hit_object = currentLaunchAim()
                         requestProbe("trigger_post_hit_fallback", function(fallback_hit)
                             assertLine(fallback_hit and fallback_hit.ok == true, "live Trigger spellId fallback post-hit probe ok", fallback_hit and fallback_hit.error)
                             assertLine(fallback_hit and fallback_hit.post_hit_result and fallback_hit.post_hit_result.trigger_route == "spellId", "live Trigger fallback post-hit uses helper spellId route")
                             assertLine(fallback_hit and fallback_hit.post_hit_result and fallback_hit.post_hit_result.ok == true, "live Trigger fallback route enqueues and launches payload")
+                            assertLine(fallback_hit and fallback_hit.post_hit_result and fallback_hit.post_hit_result.ir_trigger_runtime == true, "IR Trigger spellId fallback route runtime enqueues", fallback_hit and fallback_hit.post_hit_result and fallback_hit.post_hit_result.ir_trigger_runtime_fallback_reason)
 
                             requestProbe("trigger_payload_multicast_disabled", function(multicast_disabled)
                                 assertLine(multicast_disabled and multicast_disabled.ok == true, "payload Multicast disabled Trigger probe rejects", multicast_disabled and multicast_disabled.error)
                                 assertLine(multicast_disabled and multicast_disabled.used_live_2_2c == false, "disabled Trigger payload Multicast does not enqueue partial payload")
+                                assertLine(multicast_disabled and multicast_disabled.fallback_reason == "payload_multicast_disabled", "IR Trigger deferred payload Multicast reason remains stable", multicast_disabled and multicast_disabled.fallback_reason)
 
                                 local multicast_start_pos, multicast_direction, multicast_hit_object = currentLaunchAim()
                                 requestProbe("trigger_payload_multicast_post_hit", function(multicast_hit)
@@ -2552,10 +3101,13 @@ local function runTriggerSmoke()
                                     assertLine(uniqueCount(multicast_hit and multicast_hit.trigger_payload_slot_ids) == 3, "Trigger payload Multicast payload slots are distinct")
                                     assertLine(payloadJobsCarryPostfixFanout(multicast_hit and multicast_hit.trigger_payload_jobs, 3, multicast_hit and multicast_hit.cast_id, "Trigger", multicast_hit and multicast_hit.slot_id), "Trigger payload Multicast payload userData carries fanout identity")
                                     assertLine(multicast_hit and multicast_hit.trigger_duplicate_suppressed == true, "Trigger payload Multicast duplicate source hit is suppressed as a group")
+                                    assertLine(multicast_hit and multicast_hit.post_hit_result and multicast_hit.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Multicast runtime enqueues", multicast_hit and multicast_hit.post_hit_result and multicast_hit.post_hit_result.ir_trigger_runtime_fallback_reason)
+                                    assertLine(multicast_hit and multicast_hit.post_hit_result and multicast_hit.post_hit_result.ir_trigger_runtime_fallback_used ~= true, "IR Trigger Multicast fallback not used", multicast_hit and multicast_hit.post_hit_result and multicast_hit.post_hit_result.ir_trigger_runtime_fallback_reason)
 
                                     requestProbe("trigger_payload_pattern_disabled", function(pattern_disabled)
                                         assertLine(pattern_disabled and pattern_disabled.ok == true, "payload pattern disabled Trigger probe rejects", pattern_disabled and pattern_disabled.error)
                                         assertLine(pattern_disabled and pattern_disabled.used_live_2_2c == false, "disabled Trigger payload pattern does not enqueue patterned payload")
+                                        assertLine(pattern_disabled and pattern_disabled.fallback_reason == "payload_pattern_disabled", "IR Trigger deferred payload Pattern reason remains stable", pattern_disabled and pattern_disabled.fallback_reason)
 
                                         local burst_start_pos, burst_direction, burst_hit_object = currentLaunchAim()
                                         requestProbe("trigger_payload_burst_post_hit", function(burst_hit)
@@ -2565,6 +3117,8 @@ local function runTriggerSmoke()
                                             assertLine(jobsAllComplete(burst_hit and burst_hit.trigger_payload_jobs, 5), "Trigger payload Burst payload jobs complete")
                                             assertLine(payloadJobsCarryPostfixPattern(burst_hit and burst_hit.trigger_payload_jobs, 5, burst_hit and burst_hit.cast_id, "Trigger", burst_hit and burst_hit.slot_id, "Burst"), "Trigger payload Burst userData carries pattern identity and distinct directions")
                                             assertLine(burst_hit and burst_hit.trigger_duplicate_suppressed == true, "Trigger payload Burst duplicate source hit is suppressed as a group")
+                                            assertLine(burst_hit and burst_hit.post_hit_result and burst_hit.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Pattern runtime enqueues", burst_hit and burst_hit.post_hit_result and burst_hit.post_hit_result.ir_trigger_runtime_fallback_reason)
+                                            assertLine(burst_hit and burst_hit.post_hit_result and burst_hit.post_hit_result.ir_trigger_runtime_fallback_used ~= true, "IR Trigger Burst fallback not used", burst_hit and burst_hit.post_hit_result and burst_hit.post_hit_result.ir_trigger_runtime_fallback_reason)
 
                                             local spread_start_pos, spread_direction, spread_hit_object = currentLaunchAim()
                                             requestProbe("trigger_payload_spread_post_hit", function(spread_hit)
@@ -2574,6 +3128,7 @@ local function runTriggerSmoke()
                                                 assertLine(jobsAllComplete(spread_hit and spread_hit.trigger_payload_jobs, 3), "Trigger payload Spread payload jobs complete")
                                                 assertLine(payloadJobsCarryPostfixPattern(spread_hit and spread_hit.trigger_payload_jobs, 3, spread_hit and spread_hit.cast_id, "Trigger", spread_hit and spread_hit.slot_id, "Spread"), "Trigger payload Spread userData carries pattern identity and distinct directions")
                                                 assertLine(spread_hit and spread_hit.trigger_duplicate_suppressed == true, "Trigger payload Spread duplicate source hit is suppressed as a group")
+                                                assertLine(spread_hit and spread_hit.post_hit_result and spread_hit.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Spread runtime enqueues", spread_hit and spread_hit.post_hit_result and spread_hit.post_hit_result.ir_trigger_runtime_fallback_reason)
 
                                                 requestProbe("nested_trigger_timer_disabled", function(nested_disabled)
                                                     assertLine(nested_disabled and nested_disabled.ok == true, "nested Trigger/Timer disabled probe rejects", nested_disabled and nested_disabled.error)
@@ -2653,6 +3208,19 @@ local function runTriggerSmoke()
                                                         assertCounterAtLeast(snapshot, "live_trigger_payload_launch_ok", 6, "runtime stats counted Trigger payload launch ok")
                                                         assertCounterAtLeast(snapshot, "live_trigger_duplicate_hits_suppressed", 4, "runtime stats counted Trigger duplicate suppression")
                                                         assertCounterAtLeast(snapshot, "live_trigger_post_hit_smoke_observed", 3, "runtime stats counted post-hit smoke checkpoint")
+                                                        assertCounterAtLeast(snapshot, "ir_trigger_runtime_attempts", 5, "runtime stats counted IR Trigger runtime attempts")
+                                                        assertCounterAtLeast(snapshot, "ir_trigger_runtime_enqueued", 5, "runtime stats counted IR Trigger runtime enqueue events")
+                                                        assertCounterAtLeast(snapshot, "ir_trigger_runtime_jobs_enqueued", 13, "runtime stats counted IR Trigger runtime enqueue jobs")
+                                                        assertLine(counter(snapshot, "ir_trigger_runtime_fallback") == 0, "IR Trigger runtime fallback was not used for supported smoke shapes")
+                                                        assertLine(counter(snapshot, "ir_trigger_runtime_mismatch") == 0, "IR Trigger runtime had no planner mismatches")
+                                                        assertIrRuntimeAdapterClean(snapshot, "trigger")
+                                                        assertLine(
+                                                            counter(snapshot, "payload_multicast_disabled_reject")
+                                                                + counter(snapshot, "payload_pattern_disabled_reject") >= 2,
+                                                            "IR runtime adapters deferred shapes do not enqueue"
+                                                        )
+                                                        assertLine(counter(snapshot, "payload_pattern_trigger_jobs") >= 1, "IR runtime adapters branch metadata stable")
+                                                        assertLine(counter(snapshot, "live_trigger_duplicate_hits_suppressed") >= 1, "IR runtime adapters duplicate suppression stable")
                                                         assertCounterAtLeast(snapshot, "payload_multicast_attempts", 2, "runtime stats counted payload Multicast attempts")
                                                         assertCounterAtLeast(snapshot, "payload_multicast_qualified", 1, "runtime stats counted payload Multicast qualification")
                                                         assertCounterAtLeast(snapshot, "payload_multicast_rejected", 1, "runtime stats counted disabled payload Multicast rejection")
@@ -2826,6 +3394,8 @@ local function runTimerSmoke()
                     assertLine(scheduled and scheduled.timer_immediate_payload_count == 0, "live Timer async immediate payload count is zero")
                     assertLine(scheduled and scheduled.timer_before_delay_payload_count == 0, "live Timer async before-delay payload count is zero")
                     assertLine(scheduled and scheduled.timer_duplicate_suppressed == true, "live Timer async duplicate schedule is suppressed")
+                    assertLine(scheduled and scheduled.ir_timer_runtime_planned == true, "IR Timer simple payload runtime plans", scheduled and scheduled.ir_timer_runtime_fallback_reason)
+                    assertLine(scheduled and scheduled.ir_timer_runtime_fallback_used ~= true, "IR Timer simple payload planning fallback not used", scheduled and scheduled.ir_timer_runtime_fallback_reason)
                     assertLine(jobsAllComplete(scheduled and scheduled.source_jobs, 1), "live Timer source job completes with SFP accepted")
                     assertLine(sourceJobCarriesTimerUserData(scheduled), "live Timer source userData carries async Timer metadata")
 
@@ -2846,6 +3416,8 @@ local function runTimerSmoke()
                                     assertLine(done and done.pending_count == 0, "live Timer async pending count clears after callback")
                                     assertLine(payloadUserDataCarriesTimer(done), "live Timer async payload userData carries source and Timer identity")
                                     assertLine(type(done and done.timer_source_detonation_status) == "string", "live Timer async checks source detonation or safe skip")
+                                    assertLine(done and done.ir_timer_runtime == true, "IR Timer simple payload runtime enqueues", done and done.ir_timer_runtime_fallback_reason)
+                                    assertLine(done and done.ir_timer_runtime_fallback_used ~= true, "IR Timer simple payload runtime fallback not used", done and done.ir_timer_runtime_fallback_reason)
 
                                     requestProbe("timer_payload_multicast_disabled", function(multicast_disabled)
                                         assertLine(multicast_disabled and multicast_disabled.ok == true, "payload Multicast disabled Timer probe rejects", multicast_disabled and multicast_disabled.error)
@@ -2872,6 +3444,8 @@ local function runTimerSmoke()
                                                     assertLine(jobsAllComplete(multicast_done and multicast_done.timer_payload_jobs, 3), "Timer payload Multicast payload jobs complete")
                                                     assertLine(uniqueCount(multicast_done and multicast_done.timer_payload_slot_ids) == 3, "Timer payload Multicast payload slots are distinct")
                                                     assertLine(payloadJobsCarryPostfixFanout(multicast_done and multicast_done.timer_payload_jobs, 3, multicast_done and multicast_done.cast_id, "Timer", multicast_done and multicast_done.slot_id), "Timer payload Multicast payload userData carries fanout identity")
+                                                    assertLine(multicast_done and multicast_done.ir_timer_runtime == true, "IR Timer payload Multicast runtime enqueues", multicast_done and multicast_done.ir_timer_runtime_fallback_reason)
+                                                    assertLine(multicast_done and multicast_done.ir_timer_runtime_fallback_used ~= true, "IR Timer payload Multicast fallback not used", multicast_done and multicast_done.ir_timer_runtime_fallback_reason)
 
                                                     requestProbe("timer_payload_pattern_disabled", function(pattern_disabled)
                                                         assertLine(pattern_disabled and pattern_disabled.ok == true, "payload pattern disabled Timer probe rejects", pattern_disabled and pattern_disabled.error)
@@ -2893,6 +3467,8 @@ local function runTimerSmoke()
                                                                     assertLine(burst_done and burst_done.callback_payload_count == 5, "Timer payload Burst callback payload count is five")
                                                                     assertLine(jobsAllComplete(burst_done and burst_done.timer_payload_jobs, 5), "Timer payload Burst payload jobs complete")
                                                                     assertLine(payloadJobsCarryPostfixPattern(burst_done and burst_done.timer_payload_jobs, 5, burst_done and burst_done.cast_id, "Timer", burst_done and burst_done.slot_id, "Burst"), "Timer payload Burst userData carries pattern identity and distinct directions")
+                                                                    assertLine(burst_done and burst_done.ir_timer_runtime == true, "IR Timer payload Pattern runtime enqueues", burst_done and burst_done.ir_timer_runtime_fallback_reason)
+                                                                    assertLine(burst_done and burst_done.ir_timer_runtime_fallback_used ~= true, "IR Timer Burst fallback not used", burst_done and burst_done.ir_timer_runtime_fallback_reason)
 
                                                                     local spread_start_pos, spread_direction, spread_hit_object = currentLaunchAim()
                                                                     requestProbe("timer_payload_spread_sequence", function(spread_scheduled)
@@ -2910,6 +3486,8 @@ local function runTimerSmoke()
                                                                                 assertLine(spread_done and spread_done.callback_payload_count == 3, "Timer payload Spread callback payload count is three")
                                                                                 assertLine(jobsAllComplete(spread_done and spread_done.timer_payload_jobs, 3), "Timer payload Spread payload jobs complete")
                                                                                 assertLine(payloadJobsCarryPostfixPattern(spread_done and spread_done.timer_payload_jobs, 3, spread_done and spread_done.cast_id, "Timer", spread_done and spread_done.slot_id, "Spread"), "Timer payload Spread userData carries pattern identity and distinct directions")
+                                                                                assertLine(spread_done and spread_done.ir_timer_runtime == true, "IR Timer payload Spread runtime enqueues", spread_done and spread_done.ir_timer_runtime_fallback_reason)
+                                                                                assertLine(spread_done and spread_done.ir_timer_runtime_fallback_used ~= true, "IR Timer Spread fallback not used", spread_done and spread_done.ir_timer_runtime_fallback_reason)
 
                                                                                 requestProbe("nested_tt_depth_reject", function(depth_reject)
                                                                                     assertLine(depth_reject and depth_reject.ok == true, "nested Trigger/Timer depth > 2 probe rejects", depth_reject and depth_reject.error)
@@ -3020,6 +3598,25 @@ local function runTimerSmoke()
                                                                                     assertCounterAtLeast(snapshot, "live_timer_real_delay_smoke_pending", 1, "runtime stats counted async Timer smoke pending")
                                                                                     assertCounterAtLeast(snapshot, "live_timer_real_delay_smoke_callback_ok", 2, "runtime stats counted async Timer smoke callback ok")
                                                                                     assertCounterAtLeast(snapshot, "live_timer_immediate_payload_blocked", 2, "runtime stats counted Timer immediate payload blocking")
+                                                                                    assertCounterAtLeast(snapshot, "ir_timer_runtime_attempts", 4, "runtime stats counted IR Timer runtime attempts")
+                                                                                    assertCounterAtLeast(snapshot, "ir_timer_runtime_enqueued", 4, "runtime stats counted IR Timer runtime enqueue events")
+                                                                                    assertCounterAtLeast(snapshot, "ir_timer_runtime_jobs_enqueued", 12, "runtime stats counted IR Timer runtime enqueue jobs")
+                                                                                    assertLine(counter(snapshot, "ir_timer_runtime_fallback") == 0, "IR Timer runtime fallback was not used for supported smoke shapes")
+                                                                                    assertLine(counter(snapshot, "ir_timer_runtime_mismatch") == 0, "IR Timer runtime had no planner mismatches")
+                                                                                    assertIrRuntimeAdapterClean(snapshot, "timer")
+                                                                                    assertLine(
+                                                                                        counter(snapshot, "payload_multicast_disabled_reject")
+                                                                                            + counter(snapshot, "payload_pattern_disabled_reject")
+                                                                                            + counter(snapshot, "nested_tt_depth_reject")
+                                                                                            + counter(snapshot, "nested_tt_multicast_reject") >= 4,
+                                                                                        "IR runtime adapters deferred shapes do not enqueue"
+                                                                                    )
+                                                                                    assertLine(counter(snapshot, "payload_pattern_timer_jobs") >= 1, "IR runtime adapters branch metadata stable")
+                                                                                    assertLine(
+                                                                                        counter(snapshot, "live_timer_duplicate_schedules_suppressed")
+                                                                                            + counter(snapshot, "live_timer_async_duplicate_suppressed") >= 1,
+                                                                                        "IR runtime adapters duplicate suppression stable"
+                                                                                    )
                                                                                     assertCounterAtLeast(snapshot, "timer_source_detonation_checked", 1, "runtime stats counted Timer source detonation checks")
                                                                                     assertCounterAtLeast(snapshot, "payload_multicast_attempts", 2, "runtime stats counted payload Multicast attempts")
                                                                                     assertCounterAtLeast(snapshot, "payload_multicast_qualified", 1, "runtime stats counted payload Multicast qualification")
@@ -3736,6 +4333,10 @@ local function onKeyPress(key)
         runSizePlusSmoke()
         return false
     end
+    if symbol == "i" or key.code == input.KEY.I then
+        runIrRuntimeAdapterStatusSmoke()
+        return false
+    end
     if symbol == "k" or key.code == input.KEY.K then
         runHomingSmoke()
         return false
@@ -3760,6 +4361,10 @@ local function onKeyPress(key)
         runBounceSurfaceSmoke()
         return false
     end
+    if symbol == "p" or key.code == input.KEY.P then
+        runPierceSmoke()
+        return false
+    end
     return true
 end
 
@@ -3780,7 +4385,7 @@ return {
                 requestBackend()
             elseif state.backend == "READY" and not state.ready_logged then
                 state.ready_logged = true
-                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ and Chain+Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0 hardening plus Trigger payload fanout post-bounce probes, H for Bounce Trigger Chain no-target/mock/live probes, or J for manual Bounce surface diagnostics")
+                log.info("smoke live dispatch ready: press Numpad 5 for simple+nested+Chain audit/runtime plus Chain Speed+/Size+ and Chain+Multicast payload probes, 6 for Multicast x3, 7 for Spread x3, 8 for Burst x3, 9 for Trigger v0 plus payload Multicast/Spread/Burst v0, / for Timer v0 plus payload Multicast/Spread/Burst v0, * for Speed+ v1, - for Size+ v0, I for all-IR adapter migration smoke, K for Homing v0 plus soft redirect runtime/probe, Numpad . for chaos high-fanout budget stress plus Chain+Multicast, L for manual Chain real-provider probe, G for Bounce v0 hardening plus Trigger payload fanout post-bounce probes, H for Bounce Trigger Chain no-target/mock/live probes, J for manual Bounce surface diagnostics, or P for Pierce v0 source/event/runtime smoke")
             end
         end,
         onKeyPress = onKeyPress,

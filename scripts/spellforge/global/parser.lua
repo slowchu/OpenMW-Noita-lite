@@ -13,6 +13,7 @@ local DEFAULT_OPERATOR_ID_TO_OPCODE = {
     spellforge_size_plus = "Size+",
     spellforge_chain = "Chain",
     spellforge_bounce = "Bounce",
+    spellforge_pierce = "Pierce",
     spellforge_homing = "Homing",
     spellforge_trigger = "Trigger",
     spellforge_timer = "Timer",
@@ -26,6 +27,7 @@ local PREFIX_OPS = {
     ["Size+"] = true,
     Chain = true,
     Bounce = true,
+    Pierce = true,
     Homing = true,
 }
 

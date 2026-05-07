@@ -1,4 +1,15 @@
 local plan_cache = require("scripts.spellforge.global.plan_cache")
+local continuation_planner = require("scripts.spellforge.global.continuation_planner")
+local feature_matrix = require("scripts.spellforge.global.feature_matrix")
+local feature_matrix_ir = require("scripts.spellforge.global.feature_matrix_ir")
+local live_bounce = require("scripts.spellforge.global.live_bounce")
+local live_chain = require("scripts.spellforge.global.live_chain")
+local live_pierce = require("scripts.spellforge.global.live_pierce")
+local live_timer = require("scripts.spellforge.global.live_timer")
+local live_trigger = require("scripts.spellforge.global.live_trigger")
+local nested_trigger_timer = require("scripts.spellforge.global.nested_trigger_timer")
+local runtime_ir = require("scripts.spellforge.global.runtime_ir")
+local runtime_job_planner = require("scripts.spellforge.global.runtime_job_planner")
 local generated_lifecycle = require("scripts.spellforge.shared.generated_spell_lifecycle")
 local operator_params = require("scripts.spellforge.shared.operator_params")
 local recipe_model = require("scripts.spellforge.shared.recipe_model")
@@ -40,6 +51,862 @@ local function findOp(ops, opcode)
         end
     end
     return nil
+end
+
+local function targetEffect(id, magnitude)
+    return {
+        id = id,
+        range = 2,
+        magnitudeMin = magnitude,
+        magnitudeMax = magnitude,
+        area = 0,
+        duration = 1,
+    }
+end
+
+local function issueDetail(result)
+    local issue = result and result.errors and result.errors[1]
+    if issue then
+        return string.format("%s:%s", tostring(issue.code), tostring(issue.message))
+    end
+    return result and tostring(result.error) or nil
+end
+
+local function irKindCount(ir, kind)
+    return (ir
+        and ir.counts
+        and ir.counts.continuations_by_kind
+        and ir.counts.continuations_by_kind[kind])
+        or 0
+end
+
+local function sortedListText(values)
+    local copy = {}
+    for i, value in ipairs(values or {}) do
+        copy[i] = tostring(value)
+    end
+    table.sort(copy)
+    if #copy == 0 then
+        return "none"
+    end
+    return table.concat(copy, ",")
+end
+
+local function matrixFieldText(matrix, field)
+    if field == "contexts.primary" then
+        return sortedListText(matrix and matrix.contexts and matrix.contexts.primary)
+    elseif field == "contexts.payload" then
+        return sortedListText(matrix and matrix.contexts and matrix.contexts.payload)
+    elseif field == "contexts.nested_payload" then
+        return sortedListText(matrix and matrix.contexts and matrix.contexts.nested_payload)
+    elseif field == "active_feature_ids" then
+        return sortedListText(matrix and matrix.active_feature_ids)
+    elseif field == "combos" then
+        return sortedListText(matrix and matrix.combos)
+    elseif field == "deferred_reasons" then
+        return sortedListText(matrix and matrix.deferred_reasons)
+    elseif field == "required_flags" then
+        return sortedListText(matrix and matrix.required_flags)
+    end
+    local value = matrix and matrix[field] or nil
+    if value == nil then
+        return "nil"
+    end
+    return tostring(value)
+end
+
+local function compareFeatureMatrix(label, current_matrix, ir_matrix)
+    local fields = {
+        "live_runtime_status",
+        "active_feature_ids",
+        "combos",
+        "deferred_reasons",
+        "required_flags",
+        "contexts.primary",
+        "contexts.payload",
+        "contexts.nested_payload",
+    }
+    local ok = true
+    for _, field in ipairs(fields) do
+        local current_value = matrixFieldText(current_matrix, field)
+        local ir_value = matrixFieldText(ir_matrix, field)
+        if current_value ~= ir_value then
+            ok = false
+            log.error(string.format(
+                "SPELLFORGE_IR_FEATURE_MATRIX_COMPARE_DIFF label=%s field=%s old=%s ir=%s",
+                tostring(label),
+                tostring(field),
+                current_value,
+                ir_value
+            ))
+        end
+    end
+    if ok then
+        log.info("SPELLFORGE_IR_FEATURE_MATRIX_COMPARE_OK label=" .. tostring(label))
+    end
+    assertLine(ok, "22 IR feature matrix shadow " .. label .. " matches current analyzer")
+end
+
+local PLANNER_COMPARE_OPTS = {
+    allow_payload_multicast = true,
+    allow_payload_pattern = true,
+    force_payload_multicast_enabled = true,
+    force_payload_pattern_enabled = true,
+    allow_nested_trigger_timer = true,
+    allow_nested_final_fanout = true,
+    enabled = true,
+    enable_final_fanout = true,
+    allow_chain_multicast = true,
+    force_chain_multicast_enabled = true,
+    force_chain_runtime_enabled = true,
+    max_jobs = 32,
+    max_projectiles = 32,
+    max_pierce_count = 3,
+}
+
+local function cloneOps(ops)
+    local out = {}
+    for i, op in ipairs(ops or {}) do
+        local params = {}
+        for key, value in pairs(op.params or {}) do
+            params[key] = value
+        end
+        out[i] = {
+            opcode = op.opcode,
+            effect_id = op.effect_id,
+            params = params,
+            index = op.index,
+            payload_scope = op.payload_scope,
+        }
+    end
+    return out
+end
+
+local function syntheticHelperRecords(plan)
+    local records = {}
+    for i, spec in ipairs(plan.helper_specs or {}) do
+        local routing = spec.routing or {}
+        records[i] = {
+            recipe_id = spec.recipe_id,
+            slot_id = spec.slot_id,
+            logical_id = spec.logical_id,
+            engine_id = spec.engine_record_id or spec.logical_id,
+            range = spec.range,
+            effects = spec.effects,
+            kind = routing.kind,
+            group_index = routing.group_index,
+            emission_index = routing.emission_index,
+            parent_slot_id = routing.parent_slot_id,
+            trigger_source_slot_id = routing.trigger_source_slot_id,
+            timer_source_slot_id = routing.timer_source_slot_id,
+            source_postfix_opcode = routing.source_postfix_opcode,
+            payload_bindings = routing.payload_bindings,
+            prefix_ops = cloneOps(routing.prefix_ops),
+            postfix_ops = cloneOps(routing.postfix_ops),
+        }
+    end
+    return records
+end
+
+local function selectorPlan(plan)
+    local copy = {}
+    for key, value in pairs(plan or {}) do
+        copy[key] = value
+    end
+    copy.helper_records = syntheticHelperRecords(plan or {})
+    copy.helper_record_count = #copy.helper_records
+    return copy
+end
+
+local function helperBySlot(plan)
+    local by_slot = {}
+    for _, helper in ipairs(plan.helper_records or {}) do
+        by_slot[helper.slot_id] = helper
+    end
+    return by_slot
+end
+
+local function firstIrContinuation(ir, kind)
+    for _, continuation in ipairs(ir.continuations or {}) do
+        if continuation.kind == kind then
+            return continuation
+        end
+    end
+    return nil
+end
+
+local function rootPostfixContinuation(ir)
+    for _, continuation in ipairs(ir.continuations or {}) do
+        if continuation.kind == "Trigger" or continuation.kind == "Timer" then
+            local source = ir.entries_by_slot_id and ir.entries_by_slot_id[continuation.source_slot_id] or nil
+            if source and (source.payload_depth or 0) == 0 then
+                return continuation
+            end
+        end
+    end
+    return nil
+end
+
+local function plannerEventForCase(label, ir)
+    if string.find(label, "Pierce", 1, true) then
+        local continuation = firstIrContinuation(ir, "Pierce")
+        if continuation then
+            return {
+                event_kind = "pierce",
+                source_slot_id = continuation.source_slot_id,
+                source_prefix_opcode = "Pierce",
+                source_postfix_opcode = firstIrContinuation(ir, "Trigger") and "Trigger" or nil,
+                pierce_count = 1,
+                pierce_limit = 3,
+                current_hit_target_id = "smoke_pierced_actor",
+                actor_id = "smoke_pierced_actor",
+                projectile_id = "smoke_pierce_projectile",
+            }
+        end
+    end
+    if string.find(label, "Bounce", 1, true) then
+        local continuation = firstIrContinuation(ir, "Bounce")
+        if continuation then
+            return {
+                event_kind = "bounce",
+                source_slot_id = continuation.source_slot_id,
+                source_prefix_opcode = "Bounce",
+                source_postfix_opcode = firstIrContinuation(ir, "Trigger") and "Trigger" or nil,
+                bounce_index = 1,
+            }
+        end
+    end
+    if string.find(label, "Chain", 1, true) then
+        if firstIrContinuation(ir, "Chain") then
+            return {
+                event_kind = "chain",
+                source_prefix_opcode = "Chain",
+            }
+        end
+    end
+    local root = rootPostfixContinuation(ir)
+    if root and root.kind == "Trigger" then
+        return {
+            event_kind = "trigger_hit",
+            source_slot_id = root.source_slot_id,
+            source_postfix_opcode = "Trigger",
+        }
+    elseif root and root.kind == "Timer" then
+        return {
+            event_kind = "timer_matured",
+            source_slot_id = root.source_slot_id,
+            source_postfix_opcode = "Timer",
+        }
+    end
+    return nil
+end
+
+local function arrayText(values)
+    local copy = {}
+    for i, value in ipairs(values or {}) do
+        copy[i] = tostring(value)
+    end
+    return #copy == 0 and "none" or table.concat(copy, ",")
+end
+
+local function normalizedFieldText(result, field)
+    if field == "payload_slot_ids" or field == "payload_helper_engine_ids" then
+        return arrayText(result and result[field])
+    end
+    if not result then
+        return "nil"
+    end
+    local value = result[field]
+    if value == nil then
+        return "nil"
+    end
+    return tostring(value)
+end
+
+local function normalizePlannerResult(result)
+    return {
+        ok = result and result.ok == true,
+        rejection_reason = result and result.rejection_reason or nil,
+        source_slot_id = result and result.source_slot_id or nil,
+        source_helper_engine_id = result and result.source_helper_engine_id or nil,
+        payload_count = tonumber(result and result.payload_count) or 0,
+        payload_slot_ids = result and result.payload_slot_ids or {},
+        payload_helper_engine_ids = result and result.payload_helper_engine_ids or {},
+        payload_multicast = result and result.payload_multicast == true or false,
+        payload_pattern = result and result.payload_pattern == true or false,
+        payload_pattern_kind = result and result.payload_pattern_kind or nil,
+        has_chain_payload = result and result.has_chain_payload == true or false,
+        chain_shape = result and result.chain_shape or nil,
+    }
+end
+
+local function normalizeLegacyTriggerTimer(result, reason)
+    return {
+        ok = result ~= nil,
+        rejection_reason = result and nil or reason,
+        source_slot_id = result and result.source_slot_id or nil,
+        source_helper_engine_id = result and result.source_helper_engine_id or nil,
+        payload_count = tonumber(result and result.payload_count) or 0,
+        payload_slot_ids = result and result.payload_slot_ids or {},
+        payload_helper_engine_ids = result and result.payload_helper_engine_ids or {},
+        payload_multicast = result and result.payload_multicast == true or false,
+        payload_pattern = result and result.payload_pattern == true or false,
+        payload_pattern_kind = result and result.payload_pattern_kind or nil,
+        has_chain_payload = false,
+        chain_shape = nil,
+    }
+end
+
+local function normalizeLegacyBounce(result, reason)
+    return {
+        ok = result ~= nil and result.ok == true,
+        rejection_reason = result and nil or reason,
+        source_slot_id = result and result.source_slot_id or nil,
+        source_helper_engine_id = result and result.source_helper_engine_id or nil,
+        payload_count = tonumber(result and result.payload_count) or 0,
+        payload_slot_ids = result and result.payload_slot_ids or {},
+        payload_helper_engine_ids = result and result.payload_helper_engine_ids or {},
+        payload_multicast = result and result.payload_multicast == true or false,
+        payload_pattern = result and result.payload_pattern == true or false,
+        payload_pattern_kind = result and result.payload_pattern_kind or nil,
+        has_chain_payload = result and result.has_chain_payload == true or false,
+        chain_shape = result and result.chain_shape or nil,
+    }
+end
+
+local function normalizeLegacyPierce(result, reason)
+    return {
+        ok = result ~= nil and result.ok == true,
+        rejection_reason = result and nil or reason,
+        source_slot_id = result and result.source_slot_id or nil,
+        source_helper_engine_id = result and result.source_helper_engine_id or nil,
+        payload_count = tonumber(result and result.payload_count) or 0,
+        payload_slot_ids = result and result.payload_slot_ids or {},
+        payload_helper_engine_ids = result and result.payload_helper_engine_ids or {},
+        payload_multicast = result and result.payload_multicast == true or false,
+        payload_pattern = result and result.payload_pattern == true or false,
+        payload_pattern_kind = result and result.payload_pattern_kind or nil,
+        has_chain_payload = result and result.has_chain_payload == true or false,
+        chain_shape = result and result.chain_shape or nil,
+    }
+end
+
+local function normalizeLegacyChain(plan, result, reason)
+    if not result then
+        return {
+            ok = false,
+            rejection_reason = reason,
+            payload_count = 0,
+            payload_slot_ids = {},
+            payload_helper_engine_ids = {},
+            payload_multicast = false,
+            payload_pattern = false,
+            has_chain_payload = false,
+        }
+    end
+    local helpers = helperBySlot(plan)
+    local payload_slot_ids = result.audit and result.audit.payload_slot_ids or nil
+    if type(payload_slot_ids) ~= "table" or #payload_slot_ids == 0 then
+        payload_slot_ids = { result.payload_slot_id }
+    end
+    local payload_helper_ids = {}
+    for i, slot_id in ipairs(payload_slot_ids) do
+        payload_helper_ids[i] = helpers[slot_id] and helpers[slot_id].engine_id or nil
+    end
+    return {
+        ok = result.ok == true,
+        rejection_reason = nil,
+        source_slot_id = result.source_slot_id,
+        source_helper_engine_id = result.source_helper_engine_id,
+        payload_count = #payload_slot_ids,
+        payload_slot_ids = payload_slot_ids,
+        payload_helper_engine_ids = payload_helper_ids,
+        payload_multicast = result.has_multicast_payload == true,
+        payload_pattern = false,
+        payload_pattern_kind = nil,
+        has_chain_payload = true,
+        chain_shape = result.chain_shape,
+    }
+end
+
+local function normalizeLegacyNested(result, reason)
+    if not result then
+        return {
+            ok = false,
+            rejection_reason = reason,
+            payload_count = 0,
+            payload_slot_ids = {},
+            payload_helper_engine_ids = {},
+            payload_multicast = false,
+            payload_pattern = false,
+            has_chain_payload = false,
+        }
+    end
+    return {
+        ok = result.ok == true,
+        rejection_reason = nil,
+        source_slot_id = result.root_source_slot_id,
+        source_helper_engine_id = result.root_source_helper_engine_id,
+        payload_count = 1,
+        payload_slot_ids = { result.intermediate_slot_id },
+        payload_helper_engine_ids = { result.intermediate_helper_engine_id },
+        payload_multicast = false,
+        payload_pattern = false,
+        payload_pattern_kind = nil,
+        has_chain_payload = false,
+        chain_shape = nil,
+    }
+end
+
+local function legacyContinuationForCase(label, plan, event)
+    local prepared = selectorPlan(plan)
+    local result, reason = nil, nil
+    if string.find(label, "nested Trigger Timer", 1, true)
+        or string.find(label, "nested Timer Trigger", 1, true) then
+        result, reason = nested_trigger_timer.selectV1Plan(prepared, PLANNER_COMPARE_OPTS)
+        return normalizeLegacyNested(result, reason), "nested_trigger_timer.selectV1Plan"
+    elseif event and event.event_kind == "bounce" then
+        result, reason = live_bounce.selectV0Plan(prepared, PLANNER_COMPARE_OPTS)
+        return normalizeLegacyBounce(result, reason), "live_bounce.selectV0Plan"
+    elseif event and event.event_kind == "pierce" then
+        result, reason = live_pierce.selectV0Plan(prepared, PLANNER_COMPARE_OPTS)
+        return normalizeLegacyPierce(result, reason), "live_pierce.selectV0Plan"
+    elseif event and event.event_kind == "chain" then
+        result, reason = live_chain.selectV0Plan(prepared, PLANNER_COMPARE_OPTS)
+        return normalizeLegacyChain(prepared, result, reason), "live_chain.selectV0Plan"
+    elseif event and event.event_kind == "trigger_hit" then
+        if string.find(label, "Homing", 1, true) then
+            return nil, nil
+        end
+        result, reason = live_trigger.selectV0Plan(prepared, PLANNER_COMPARE_OPTS)
+        return normalizeLegacyTriggerTimer(result, reason), "live_trigger.selectV0Plan"
+    elseif event and event.event_kind == "timer_matured" then
+        result, reason = live_timer.selectV0Plan(prepared, PLANNER_COMPARE_OPTS)
+        return normalizeLegacyTriggerTimer(result, reason), "live_timer.selectV0Plan"
+    end
+    return nil, nil
+end
+
+local EXPECTED_PLANNER_DEFERRED = {
+    ["deferred Homing composition"] = "homing_composition_deferred",
+}
+
+local function compareContinuationPlan(label, plan, ir)
+    local event = plannerEventForCase(label, ir)
+    if not event then
+        return
+    end
+
+    local planner = continuation_planner.planFromEvent(plan, ir, event, PLANNER_COMPARE_OPTS)
+    local normalized_planner = normalizePlannerResult(planner)
+    local expected_deferred = EXPECTED_PLANNER_DEFERRED[label]
+    if expected_deferred then
+        local ok = normalized_planner.ok == false and normalized_planner.rejection_reason == expected_deferred
+        if ok then
+            log.info(string.format(
+                "SPELLFORGE_IR_CONTINUATION_PLAN_DEFERRED label=%s reason=%s",
+                tostring(label),
+                tostring(expected_deferred)
+            ))
+        end
+        assertLine(ok, "23 IR continuation planner " .. label .. " defers with stable reason", normalized_planner.rejection_reason)
+        return
+    end
+
+    local legacy, selector_name = legacyContinuationForCase(label, plan, event)
+    if not legacy then
+        return
+    end
+
+    local fields = {
+        "ok",
+        "rejection_reason",
+        "source_slot_id",
+        "source_helper_engine_id",
+        "payload_count",
+        "payload_slot_ids",
+        "payload_helper_engine_ids",
+        "payload_multicast",
+        "payload_pattern",
+        "payload_pattern_kind",
+        "has_chain_payload",
+        "chain_shape",
+    }
+    if legacy.ok == false and normalized_planner.ok == false then
+        fields = {
+            "ok",
+            "rejection_reason",
+        }
+    end
+    local ok = true
+    for _, field in ipairs(fields) do
+        local legacy_value = normalizedFieldText(legacy, field)
+        local planner_value = normalizedFieldText(normalized_planner, field)
+        if legacy_value ~= planner_value then
+            ok = false
+            log.error(string.format(
+                "SPELLFORGE_IR_CONTINUATION_PLAN_DIFF label=%s field=%s legacy=%s ir=%s selector=%s",
+                tostring(label),
+                tostring(field),
+                legacy_value,
+                planner_value,
+                tostring(selector_name)
+            ))
+        end
+    end
+    if ok and normalized_planner.ok == false then
+        log.info(string.format(
+            "SPELLFORGE_IR_CONTINUATION_PLAN_DEFERRED label=%s reason=%s selector=%s event=%s",
+            tostring(label),
+            tostring(normalized_planner.rejection_reason),
+            tostring(selector_name),
+            tostring(event.event_kind)
+        ))
+    elseif ok then
+        log.info(string.format(
+            "SPELLFORGE_IR_CONTINUATION_PLAN_OK label=%s selector=%s event=%s payload_count=%s reason=%s",
+            tostring(label),
+            tostring(selector_name),
+            tostring(event.event_kind),
+            tostring(normalized_planner.payload_count),
+            tostring(normalized_planner.rejection_reason)
+        ))
+    end
+    assertLine(ok, "23 IR continuation planner " .. label .. " matches " .. tostring(selector_name))
+end
+
+local function runtimeKindForSmoke(semantic_kind, event_kind)
+    if semantic_kind == "trigger_payload_launch"
+        or semantic_kind == "bounce_trigger_payload_launch"
+        or semantic_kind == "pierce_trigger_payload_launch"
+        or semantic_kind == "trigger_nested_continuation" then
+        return "live_trigger_payload_launch"
+    elseif semantic_kind == "timer_payload_launch"
+        or semantic_kind == "timer_nested_continuation" then
+        return "live_timer_payload_launch"
+    elseif semantic_kind == "chain_payload_hop" then
+        return "live_chain_payload_launch"
+    elseif semantic_kind == "chain_handoff" then
+        return "live_chain_handoff"
+    elseif event_kind == "timer_matured" then
+        return "live_timer_payload_launch"
+    elseif event_kind == "chain" or event_kind == "chain_hit" or event_kind == "chain_hop" then
+        return "live_chain_payload_launch"
+    end
+    return semantic_kind or "dry_run_runtime_job"
+end
+
+local function valueText(value)
+    if value == nil then
+        return "nil"
+    end
+    return tostring(value)
+end
+
+local function sequenceText(values)
+    if type(values) ~= "table" or #values == 0 then
+        return "none"
+    end
+    local parts = {}
+    for i, value in ipairs(values) do
+        parts[i] = valueText(value)
+    end
+    return table.concat(parts, ",")
+end
+
+local function sequenceFromJobs(jobs, field)
+    local out = {}
+    for i, job in ipairs(jobs or {}) do
+        out[i] = valueText(job and job[field])
+    end
+    return out
+end
+
+local function expectedBounceMax(ir, continuation, event)
+    if not event or event.event_kind ~= "bounce" then
+        return nil
+    end
+    if continuation and continuation.bounce_max ~= nil then
+        return continuation.bounce_max
+    end
+    local source = ir and ir.entries_by_slot_id and continuation and ir.entries_by_slot_id[continuation.source_slot_id] or nil
+    local bounce_op = source and findOp(source.prefix_ops, "Bounce") or nil
+    local bounces = bounce_op and bounce_op.params and tonumber(bounce_op.params.bounces) or nil
+    return bounces or 1
+end
+
+local function expectedJobPlanFromContinuation(continuation, event, ir)
+    local jobs = continuation and continuation.planned_jobs or {}
+    local count = #jobs
+    local pattern_kind = continuation and continuation.payload_pattern == true and continuation.payload_pattern_kind or nil
+    local expected = {
+        ok = continuation and continuation.ok == true,
+        rejection_reason = continuation and continuation.rejection_reason or nil,
+        source_slot_id = continuation and continuation.source_slot_id or nil,
+        source_helper_engine_id = continuation and continuation.source_helper_engine_id or nil,
+        planned_job_count = count,
+        kind_sequence = {},
+        slot_id_sequence = {},
+        helper_engine_id_sequence = {},
+        payload_slot_id_sequence = {},
+        depth_sequence = {},
+        fanout_count_sequence = {},
+        branch_kind_sequence = {},
+        branch_count_sequence = {},
+        pattern_kind_sequence = {},
+        pattern_count_sequence = {},
+        pattern_index_sequence = {},
+        trigger_source_slot_id_sequence = {},
+        timer_source_slot_id_sequence = {},
+        bounce_role_sequence = {},
+        chain_role_sequence = {},
+        source_event_bounce_role = event and event.event_kind == "bounce" and "source" or nil,
+        source_event_bounce_max = expectedBounceMax(ir, continuation, event),
+    }
+
+    for index, job in ipairs(jobs) do
+        local job_kind = job and job.job_kind or nil
+        expected.kind_sequence[index] = runtimeKindForSmoke(job_kind, event and event.event_kind)
+        expected.slot_id_sequence[index] = valueText(job and job.slot_id)
+        expected.helper_engine_id_sequence[index] = valueText(job and job.helper_engine_id)
+        expected.payload_slot_id_sequence[index] = valueText(job and job.payload_slot_id)
+        expected.depth_sequence[index] = valueText(job and job.depth)
+        expected.fanout_count_sequence[index] = valueText(count)
+        expected.branch_kind_sequence[index] = valueText(job and job.branch_kind)
+        expected.branch_count_sequence[index] = valueText(job and job.branch_count)
+        expected.pattern_kind_sequence[index] = valueText(pattern_kind)
+        expected.pattern_count_sequence[index] = valueText(pattern_kind and count or nil)
+        expected.pattern_index_sequence[index] = valueText(pattern_kind and index or nil)
+        if (event and event.source_postfix_opcode == "Trigger")
+            or (continuation and continuation.continuation_kind == "Trigger") then
+            expected.trigger_source_slot_id_sequence[index] = valueText(continuation and continuation.source_slot_id)
+        else
+            expected.trigger_source_slot_id_sequence[index] = "nil"
+        end
+        if (event and event.event_kind == "timer_matured")
+            or (continuation and continuation.continuation_kind == "Timer") then
+            expected.timer_source_slot_id_sequence[index] = valueText(continuation and continuation.source_slot_id)
+        else
+            expected.timer_source_slot_id_sequence[index] = "nil"
+        end
+        expected.bounce_role_sequence[index] = valueText(
+            event and event.event_kind == "bounce"
+                and (job_kind == "chain_handoff" and "trigger_chain_payload" or "trigger_payload_launch")
+                or nil
+        )
+        expected.chain_role_sequence[index] = valueText(
+            job_kind == "chain_handoff" and "source"
+                or job_kind == "chain_payload_hop" and "payload"
+                or nil
+        )
+    end
+    return expected
+end
+
+local function normalizeRuntimeJobPlan(result)
+    local jobs = result and result.planned_jobs or {}
+    local source_event = result and result.source_event or nil
+    return {
+        ok = result and result.ok == true,
+        rejection_reason = result and result.rejection_reason or nil,
+        source_slot_id = result and result.source_slot_id or nil,
+        source_helper_engine_id = result and result.source_helper_engine_id or nil,
+        planned_job_count = tonumber(result and result.planned_job_count) or 0,
+        kind_sequence = sequenceFromJobs(jobs, "kind"),
+        slot_id_sequence = sequenceFromJobs(jobs, "slot_id"),
+        helper_engine_id_sequence = sequenceFromJobs(jobs, "helper_engine_id"),
+        payload_slot_id_sequence = sequenceFromJobs(jobs, "payload_slot_id"),
+        depth_sequence = sequenceFromJobs(jobs, "depth"),
+        fanout_count_sequence = sequenceFromJobs(jobs, "fanout_count"),
+        branch_kind_sequence = sequenceFromJobs(jobs, "branch_kind"),
+        branch_count_sequence = sequenceFromJobs(jobs, "branch_count"),
+        pattern_kind_sequence = sequenceFromJobs(jobs, "pattern_kind"),
+        pattern_count_sequence = sequenceFromJobs(jobs, "pattern_count"),
+        pattern_index_sequence = sequenceFromJobs(jobs, "pattern_index"),
+        trigger_source_slot_id_sequence = sequenceFromJobs(jobs, "trigger_source_slot_id"),
+        timer_source_slot_id_sequence = sequenceFromJobs(jobs, "timer_source_slot_id"),
+        bounce_role_sequence = sequenceFromJobs(jobs, "bounce_role"),
+        chain_role_sequence = sequenceFromJobs(jobs, "chain_role"),
+        source_event_bounce_role = source_event and source_event.bounce_role or nil,
+        source_event_bounce_max = source_event and source_event.bounce_max or nil,
+    }
+end
+
+local function runtimeJobFieldText(result, field)
+    if string.sub(field, -9) == "_sequence" then
+        return sequenceText(result and result[field])
+    end
+    return valueText(result and result[field])
+end
+
+local function compareRuntimeJobPlan(label, plan, ir)
+    local event = plannerEventForCase(label, ir)
+    if not event then
+        return
+    end
+
+    local continuation = continuation_planner.planFromEvent(plan, ir, event, PLANNER_COMPARE_OPTS)
+    local job_plan = runtime_job_planner.planJobs(plan, ir, continuation, event, PLANNER_COMPARE_OPTS)
+    local expected = expectedJobPlanFromContinuation(continuation, event, ir)
+    local actual = normalizeRuntimeJobPlan(job_plan)
+
+    local fields = {
+        "ok",
+        "rejection_reason",
+        "source_slot_id",
+        "source_helper_engine_id",
+        "planned_job_count",
+        "kind_sequence",
+        "slot_id_sequence",
+        "helper_engine_id_sequence",
+        "payload_slot_id_sequence",
+        "depth_sequence",
+        "fanout_count_sequence",
+        "branch_kind_sequence",
+        "branch_count_sequence",
+        "pattern_kind_sequence",
+        "pattern_count_sequence",
+        "pattern_index_sequence",
+        "trigger_source_slot_id_sequence",
+        "timer_source_slot_id_sequence",
+        "bounce_role_sequence",
+        "chain_role_sequence",
+        "source_event_bounce_role",
+        "source_event_bounce_max",
+    }
+    if expected.ok == false and actual.ok == false then
+        fields = {
+            "ok",
+            "rejection_reason",
+        }
+    end
+
+    local ok = true
+    for _, field in ipairs(fields) do
+        local expected_value = runtimeJobFieldText(expected, field)
+        local actual_value = runtimeJobFieldText(actual, field)
+        if expected_value ~= actual_value then
+            ok = false
+            log.error(string.format(
+                "SPELLFORGE_IR_RUNTIME_JOB_PLAN_DIFF label=%s field=%s legacy=%s ir=%s",
+                tostring(label),
+                tostring(field),
+                expected_value,
+                actual_value
+            ))
+        end
+    end
+
+    if ok and actual.ok == false then
+        log.info(string.format(
+            "SPELLFORGE_IR_RUNTIME_JOB_PLAN_DEFERRED label=%s reason=%s",
+            tostring(label),
+            tostring(actual.rejection_reason)
+        ))
+    elseif ok then
+        log.info(string.format(
+            "SPELLFORGE_IR_RUNTIME_JOB_PLAN_OK label=%s event=%s job_count=%s",
+            tostring(label),
+            tostring(event.event_kind),
+            tostring(actual.planned_job_count)
+        ))
+    end
+    assertLine(ok, "24 IR runtime job planner " .. label .. " matches continuation job expectations")
+end
+
+local function runtimeIrCase(label, effects, expected)
+    local compiled = plan_cache.compileOrGet(effects)
+    assertLine(compiled.ok == true, "21 runtime IR " .. label .. " compiles", issueDetail(compiled))
+    if compiled.ok ~= true then
+        return nil
+    end
+
+    local slots = plan_cache.attachEmissionSlots(compiled.recipe_id)
+    assertLine(slots.ok == true, "21 runtime IR " .. label .. " attaches slots", issueDetail(slots))
+    if slots.ok ~= true then
+        return nil
+    end
+
+    local specs = plan_cache.attachHelperSpecs(compiled.recipe_id)
+    assertLine(specs.ok == true, "21 runtime IR " .. label .. " attaches helper specs", issueDetail(specs))
+    if specs.ok ~= true then
+        return nil
+    end
+
+    local plan = specs.plan or slots.plan or compiled.plan
+    local ir = runtime_ir.build(plan)
+    assertLine(ir.ok == true, "21 runtime IR " .. label .. " builds", issueDetail(ir))
+    if ir.ok ~= true then
+        return nil
+    end
+
+    local invariants = runtime_ir.validateInvariants(ir, { require_helper_specs = true })
+    assertLine(
+        invariants.ok == true,
+        "21 runtime IR " .. label .. " invariants pass",
+        issueDetail(invariants)
+    )
+
+    local slot_count = #(plan.emission_slots or {})
+    local helper_spec_count = #(plan.helper_specs or {})
+    local counts = ir.counts or {}
+    log.info(string.format(
+        "SPELLFORGE_RUNTIME_IR_SUMMARY label=%s recipe_id=%s slots=%s entries=%s helper_specs=%s emit_groups=%s continuations=%s kinds=%s primary=%s payload=%s fanout=%s max_depth=%s",
+        tostring(label),
+        tostring(ir.recipe_id),
+        tostring(counts.slot_count or 0),
+        tostring(counts.entry_count or 0),
+        tostring(counts.helper_spec_count or 0),
+        tostring(counts.emit_group_count or 0),
+        tostring(counts.continuation_count or 0),
+        runtime_ir.kindSummary(counts),
+        tostring(counts.primary_emit_count or 0),
+        tostring(counts.payload_emit_count or 0),
+        tostring(counts.fanout_entry_count or 0),
+        tostring(counts.max_payload_depth or 0)
+    ))
+
+    local legacy_matrix = feature_matrix.legacyAnalyze(plan)
+    local public_matrix = feature_matrix.analyze(plan)
+    local ir_matrix = feature_matrix_ir.analyzeFromIr(ir)
+    compareFeatureMatrix("legacy " .. label, legacy_matrix, ir_matrix)
+    compareFeatureMatrix("public " .. label, public_matrix, ir_matrix)
+    compareContinuationPlan(label, plan, ir)
+    compareRuntimeJobPlan(label, plan, ir)
+
+    assertLine(
+        counts.slot_count == slot_count and counts.entry_count == slot_count,
+        "21 runtime IR " .. label .. " mirrors slot count",
+        string.format("ir_slots=%s entries=%s plan_slots=%s", tostring(counts.slot_count), tostring(counts.entry_count), tostring(slot_count))
+    )
+    assertLine(
+        counts.helper_spec_count == helper_spec_count,
+        "21 runtime IR " .. label .. " mirrors helper specs",
+        string.format("ir_specs=%s plan_specs=%s", tostring(counts.helper_spec_count), tostring(helper_spec_count))
+    )
+
+    local want = expected or {}
+    if want.no_continuations == true then
+        assertLine((counts.continuation_count or 0) == 0, "21 runtime IR " .. label .. " has no continuations", "continuations=" .. tostring(counts.continuation_count))
+    end
+    for kind, min_count in pairs(want.continuations or {}) do
+        assertLine(
+            irKindCount(ir, kind) >= min_count,
+            "21 runtime IR " .. label .. " has " .. kind .. " continuation",
+            string.format("kind_count=%s min=%s", tostring(irKindCount(ir, kind)), tostring(min_count))
+        )
+    end
+    if want.min_payload_depth then
+        assertLine((counts.max_payload_depth or 0) >= want.min_payload_depth, "21 runtime IR " .. label .. " keeps payload depth", "depth=" .. tostring(counts.max_payload_depth))
+    end
+    if want.min_payload_entries then
+        assertLine((counts.payload_emit_count or 0) >= want.min_payload_entries, "21 runtime IR " .. label .. " keeps payload entries", "payload=" .. tostring(counts.payload_emit_count))
+    end
+    if want.min_fanout_entries then
+        assertLine((counts.fanout_entry_count or 0) >= want.min_fanout_entries, "21 runtime IR " .. label .. " keeps fanout entries", "fanout=" .. tostring(counts.fanout_entry_count))
+    end
+
+    return ir
 end
 
 local function run()
@@ -327,11 +1194,52 @@ local function run()
     assertLine(bounce_nested_payload_matrix.live_runtime_status == "deferred", "14h ui feature matrix marks Bounce nested payload deferred")
     assertLine(containsValue(bounce_nested_payload_matrix.deferred_reasons, "nested_payload_runtime_deferred"), "14h ui feature matrix gives Bounce nested payload reason")
 
+    local pierce_timer = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        { id = "firedamage", range = 2, magnitudeMin = 10, magnitudeMax = 10, area = 0, duration = 1 },
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local pierce_timer_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-pierce-timer-deferred",
+        recipe = {
+            title = "Smoke Pierce Timer Preview",
+            effects = pierce_timer,
+        },
+    })
+    local pierce_timer_matrix = pierce_timer_preview.preview and pierce_timer_preview.preview.feature_matrix or {}
+    assertLine(pierce_timer_preview.ok == true, "14i ui feature matrix preview accepts Pierce Timer")
+    assertLine(pierce_timer_matrix.live_runtime_status == "deferred", "14i ui feature matrix marks Pierce Timer deferred")
+    assertLine(containsValue(pierce_timer_matrix.deferred_reasons, "pierce_timer_deferred"), "14i ui feature matrix gives Pierce Timer reason")
+
+    local pierce_trigger_chain = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
+        { id = "spellforge_trigger" },
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
+    }
+    local pierce_trigger_chain_preview = ui_contract.previewRecipe({
+        request_id = "smoke-ui-pierce-trigger-chain-supported",
+        recipe = {
+            title = "Smoke Pierce Trigger Chain Preview",
+            effects = pierce_trigger_chain,
+        },
+    })
+    local pierce_trigger_chain_matrix = pierce_trigger_chain_preview.preview and pierce_trigger_chain_preview.preview.feature_matrix or {}
+    assertLine(pierce_trigger_chain_preview.ok == true, "14j ui feature matrix preview accepts Pierce Trigger Chain")
+    assertLine(pierce_trigger_chain_matrix.live_runtime_status == "feature_gated", "14j ui feature matrix marks Pierce Trigger Chain feature-gated")
+    assertLine(containsValue(pierce_trigger_chain_matrix.active_feature_ids, "pierce"), "14j ui feature matrix detects Pierce")
+    assertLine(containsValue(pierce_trigger_chain_matrix.combos, "pierce_trigger_chain"), "14j ui feature matrix reports Pierce Trigger Chain combo")
+    assertLine(containsValue(pierce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_pierce_v0"), "14j ui feature matrix lists Pierce gate")
+    assertLine(containsValue(pierce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_trigger"), "14j ui feature matrix lists Trigger gate")
+    assertLine(containsValue(pierce_trigger_chain_matrix.required_flags, "SpellforgeDev.enable_live_chain_runtime_v0"), "14j ui feature matrix lists Chain runtime gate")
+
     local catalog = ui_catalog.build({ request_id = "smoke-ui-catalog" })
     assertLine(catalog.ok == true, "15 ui catalog succeeds")
     assertLine(catalog.catalog_version == "spellforge-ui-catalog-v1", "15 ui catalog version set")
     assertLine(catalog.schema_version == recipe_model.SCHEMA_VERSION, "15 ui catalog schema_version set")
-    assertLine(catalog.operator_count == 10, "15 ui catalog operator_count=10")
+    assertLine(catalog.operator_count == 11, "15 ui catalog operator_count=11")
     assertLine(catalog.operators_by_opcode and catalog.operators_by_opcode.Multicast and catalog.operators_by_opcode.Multicast.parameters.count.max ~= nil, "15 ui catalog exposes Multicast parameters")
     assertLine(catalog.operator_opcode_by_effect_id and catalog.operator_opcode_by_effect_id.spellforge_trigger == "Trigger", "15 ui catalog maps Trigger effect id")
     assertLine(catalog.feature_matrix and catalog.feature_matrix.version == "spellforge-feature-matrix-v1", "15 ui catalog includes feature matrix catalog")
@@ -471,6 +1379,238 @@ local function run()
     assertLine(cleanup.needed == true and cleanup.spell_id == "spellforge_smoke_frontend" and cleanup.delete_compiled_record == true, "20 lifecycle cleanup plan targets compiled spell")
     assertLine(lifecycle_deleted.status == generated_lifecycle.STATUS_DELETED and lifecycle_deleted.cleanup_required == false, "20 lifecycle marks deleted")
     assertLine(unsupported_lifecycle.ok == false and unsupported_lifecycle_issue and unsupported_lifecycle_issue.code == "unsupported_lifecycle_version", "20 lifecycle unsupported version fails")
+
+    local timer_simple = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_payload_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_payload_pattern = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_burst", params = { count = 5 } },
+        { id = "spellforge_multicast", params = { count = 5 } },
+        targetEffect("frostdamage", 8),
+    }
+    local primary_spread_multicast = {
+        { id = "spellforge_spread", params = { preset = 2 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("firedamage", 10),
+    }
+    local trigger_payload_spread = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_spread", params = { preset = 2 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local timer_payload_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local timer_payload_spread = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        { id = "spellforge_spread", params = { preset = 2 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local trigger_timer_nested = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        targetEffect("frostdamage", 8),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        targetEffect("shockdamage", 6),
+    }
+    local timer_trigger_nested = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        targetEffect("frostdamage", 8),
+        { id = "spellforge_trigger" },
+        targetEffect("shockdamage", 6),
+    }
+    local trigger_timer_final_fanout = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        targetEffect("frostdamage", 8),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        { id = "spellforge_burst", params = { count = 5 } },
+        { id = "spellforge_multicast", params = { count = 5 } },
+        targetEffect("shockdamage", 6),
+    }
+    local timer_trigger_final_fanout = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_timer", params = { seconds = 1.0 } },
+        targetEffect("frostdamage", 8),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_spread", params = { preset = 2 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("shockdamage", 6),
+    }
+    local chain_simple = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_chain", params = { hops = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local chain_payload_multicast = {
+        targetEffect("firedamage", 1),
+        { id = "spellforge_chain", params = { hops = 3 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local bounce_source = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        targetEffect("firedamage", 1),
+    }
+    local bounce_trigger_simple = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        targetEffect("frostdamage", 8),
+    }
+    local bounce_size_plus = {
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        { id = "spellforge_size_plus", params = { percent = 125 } },
+        targetEffect("firedamage", 1),
+    }
+    local pierce_source = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        targetEffect("firedamage", 1),
+    }
+    local pierce_trigger_simple = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        targetEffect("frostdamage", 8),
+    }
+    local pierce_trigger_multicast = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local pierce_trigger_burst = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_burst", params = { count = 5 } },
+        { id = "spellforge_multicast", params = { count = 5 } },
+        targetEffect("frostdamage", 8),
+    }
+    local pierce_trigger_spread = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_spread", params = { preset = 2 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local pierce_direct_chain = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_chain", params = { hops = 3 } },
+        targetEffect("frostdamage", 8),
+    }
+    local pierce_bounce = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        { id = "spellforge_bounce", params = { bounces = 3 } },
+        targetEffect("firedamage", 1),
+    }
+    local pierce_homing = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        { id = "spellforge_homing" },
+        targetEffect("firedamage", 1),
+    }
+    local pierce_speed_plus = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        { id = "spellforge_speed_plus", params = { percent = 50 } },
+        targetEffect("firedamage", 1),
+    }
+    local pierce_source_multicast = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        { id = "spellforge_multicast", params = { count = 3 } },
+        targetEffect("firedamage", 1),
+    }
+    local pierce_nested_payload = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        targetEffect("frostdamage", 8),
+        { id = "spellforge_trigger" },
+        targetEffect("shockdamage", 8),
+    }
+    local pierce_recursion = {
+        { id = "spellforge_pierce", params = { pierces = 3 } },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        { id = "spellforge_pierce", params = { pierces = 2 } },
+        targetEffect("frostdamage", 8),
+    }
+    local homing_simple = {
+        { id = "spellforge_homing" },
+        targetEffect("firedamage", 8),
+    }
+    local homing_composition = {
+        { id = "spellforge_homing" },
+        targetEffect("firedamage", 1),
+        { id = "spellforge_trigger" },
+        targetEffect("frostdamage", 8),
+    }
+
+    runtimeIrCase("simple projectile", fire_target, { no_continuations = true })
+    runtimeIrCase("primary Multicast", multicast, { no_continuations = true, min_fanout_entries = 3 })
+    runtimeIrCase("primary Burst Multicast", pattern, { no_continuations = true, min_fanout_entries = 5 })
+    runtimeIrCase("primary Spread Multicast", primary_spread_multicast, { no_continuations = true, min_fanout_entries = 3 })
+    runtimeIrCase("Trigger simple payload", trigger, { continuations = { Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Timer simple payload", timer_simple, { continuations = { Timer = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Trigger payload Multicast", trigger_payload_multicast, { continuations = { Trigger = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Trigger payload Burst", trigger_payload_pattern, { continuations = { Trigger = 1 }, min_payload_entries = 5, min_payload_depth = 1, min_fanout_entries = 5 })
+    runtimeIrCase("Trigger payload Spread", trigger_payload_spread, { continuations = { Trigger = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Timer payload Multicast", timer_payload_multicast, { continuations = { Timer = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Timer payload Burst", timer_burst_payload, { continuations = { Timer = 1 }, min_payload_entries = 8, min_payload_depth = 1, min_fanout_entries = 8 })
+    runtimeIrCase("Timer payload Spread", timer_payload_spread, { continuations = { Timer = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("nested Trigger Timer", trigger_timer_nested, { continuations = { Trigger = 1, Timer = 1 }, min_payload_entries = 2, min_payload_depth = 2 })
+    runtimeIrCase("nested Timer Trigger", timer_trigger_nested, { continuations = { Timer = 1, Trigger = 1 }, min_payload_entries = 2, min_payload_depth = 2 })
+    runtimeIrCase("nested Trigger Timer final fanout", trigger_timer_final_fanout, { continuations = { Trigger = 1, Timer = 1 }, min_payload_entries = 6, min_payload_depth = 2, min_fanout_entries = 5 })
+    runtimeIrCase("nested Timer Trigger final fanout", timer_trigger_final_fanout, { continuations = { Timer = 1, Trigger = 1 }, min_payload_entries = 4, min_payload_depth = 2, min_fanout_entries = 3 })
+    runtimeIrCase("Chain simple payload", chain_simple, { continuations = { Chain = 1 } })
+    runtimeIrCase("Chain payload Multicast", chain_payload_multicast, { continuations = { Chain = 1 }, min_fanout_entries = 3 })
+    runtimeIrCase("Bounce source", bounce_source, { continuations = { Bounce = 1 } })
+    runtimeIrCase("Bounce Trigger simple payload", bounce_trigger_simple, { continuations = { Bounce = 1, Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Bounce Trigger payload Multicast", bounce_trigger_multicast, { continuations = { Bounce = 1, Trigger = 1 }, min_payload_entries = 8, min_payload_depth = 1, min_fanout_entries = 8 })
+    runtimeIrCase("Bounce Trigger payload Pattern", bounce_trigger_burst, { continuations = { Bounce = 1, Trigger = 1 }, min_payload_entries = 5, min_payload_depth = 1, min_fanout_entries = 5 })
+    runtimeIrCase("Bounce Trigger Chain", bounce_trigger_chain, { continuations = { Bounce = 1, Trigger = 1, Chain = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("deferred Bounce Timer", bounce_timer, { continuations = { Bounce = 1, Timer = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("deferred direct Bounce Chain", bounce_direct_chain, { continuations = { Bounce = 1, Chain = 1 } })
+    runtimeIrCase("deferred Bounce Homing", bounce_homing, { continuations = { Bounce = 1 } })
+    runtimeIrCase("deferred Bounce Speed Plus", bounce_speed_plus, { continuations = { Bounce = 1 } })
+    runtimeIrCase("deferred Bounce Size Plus", bounce_size_plus, { continuations = { Bounce = 1 } })
+    runtimeIrCase("deferred Bounce nested payload", bounce_nested_payload, { continuations = { Bounce = 1, Trigger = 2 }, min_payload_entries = 2, min_payload_depth = 2 })
+    runtimeIrCase("Pierce source", pierce_source, { continuations = { Pierce = 1 } })
+    runtimeIrCase("Pierce Trigger simple payload", pierce_trigger_simple, { continuations = { Pierce = 1, Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Pierce Trigger payload Multicast", pierce_trigger_multicast, { continuations = { Pierce = 1, Trigger = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Pierce Trigger payload Pattern", pierce_trigger_burst, { continuations = { Pierce = 1, Trigger = 1 }, min_payload_entries = 5, min_payload_depth = 1, min_fanout_entries = 5 })
+    runtimeIrCase("Pierce Trigger payload Spread", pierce_trigger_spread, { continuations = { Pierce = 1, Trigger = 1 }, min_payload_entries = 3, min_payload_depth = 1, min_fanout_entries = 3 })
+    runtimeIrCase("Pierce Trigger Chain", pierce_trigger_chain, { continuations = { Pierce = 1, Trigger = 1, Chain = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("deferred Pierce Timer", pierce_timer, { continuations = { Pierce = 1, Timer = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("deferred direct Pierce Chain", pierce_direct_chain, { continuations = { Pierce = 1, Chain = 1 } })
+    runtimeIrCase("deferred Pierce Bounce", pierce_bounce, { continuations = { Pierce = 1, Bounce = 1 } })
+    runtimeIrCase("deferred Pierce Homing", pierce_homing, { continuations = { Pierce = 1 } })
+    runtimeIrCase("deferred Pierce Speed Plus", pierce_speed_plus, { continuations = { Pierce = 1 } })
+    runtimeIrCase("deferred source Pierce Multicast", pierce_source_multicast, { continuations = { Pierce = 1 }, min_fanout_entries = 3 })
+    runtimeIrCase("deferred Pierce nested payload", pierce_nested_payload, { continuations = { Pierce = 1, Trigger = 2 }, min_payload_entries = 2, min_payload_depth = 2 })
+    runtimeIrCase("deferred Pierce recursion", pierce_recursion, { continuations = { Pierce = 2, Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
+    runtimeIrCase("Homing simple", homing_simple, { no_continuations = true })
+    runtimeIrCase("deferred Homing composition", homing_composition, { continuations = { Trigger = 1 }, min_payload_entries = 1, min_payload_depth = 1 })
 
     log.info("smoke plan cache run complete")
 end

@@ -1,0 +1,527 @@
+local defs = require("scripts.spellforge.global.feature_matrix_defs")
+local limits = require("scripts.spellforge.shared.limits")
+
+local feature_matrix_ir = {}
+
+local FLAG_LIVE_2_2C = defs.FLAGS.LIVE_2_2C
+local FLAG_SOFT_HOMING = defs.FLAGS.SOFT_HOMING
+local OPCODE_TO_FEATURE = defs.OPCODE_TO_FEATURE
+local FEATURE_BY_ID = defs.FEATURE_BY_ID
+
+local function cloneArray(values)
+    local out = {}
+    for i, value in ipairs(values or {}) do
+        out[i] = value
+    end
+    return out
+end
+
+local function sortedKeys(set)
+    local keys = {}
+    for key in pairs(set or {}) do
+        keys[#keys + 1] = key
+    end
+    table.sort(keys)
+    return keys
+end
+
+local function addSet(set, key)
+    if key ~= nil and key ~= "" then
+        set[key] = true
+    end
+end
+
+local function hasSet(set, key)
+    return set and set[key] == true
+end
+
+local function copySet(set)
+    local out = {}
+    for key, value in pairs(set or {}) do
+        out[key] = value
+    end
+    return out
+end
+
+local function addAll(set, values)
+    for _, value in ipairs(values or {}) do
+        addSet(set, value)
+    end
+end
+
+local function contextName(depth)
+    if depth <= 0 then
+        return "primary"
+    elseif depth == 1 then
+        return "payload"
+    end
+    return "nested_payload"
+end
+
+local function addFeature(summary, feature_id, depth)
+    if not feature_id then
+        return
+    end
+    addSet(summary.active, feature_id)
+    addSet(summary.contexts[contextName(depth)], feature_id)
+    summary.counts[feature_id] = (summary.counts[feature_id] or 0) + 1
+    local previous_depth = summary.min_depth[feature_id]
+    if previous_depth == nil or depth < previous_depth then
+        summary.min_depth[feature_id] = depth
+    end
+end
+
+local function hasOpcode(ops, opcode)
+    for _, op in ipairs(ops or {}) do
+        if op.opcode == opcode then
+            return true
+        end
+    end
+    return false
+end
+
+local function prefixFeatureForOpcode(opcode, depth)
+    if depth > 0 and (opcode == "Multicast" or opcode == "Spread" or opcode == "Burst") then
+        return nil
+    end
+    return OPCODE_TO_FEATURE[opcode]
+end
+
+local function firstPostfixOpcode(group)
+    for _, op in ipairs(group.postfix_ops or {}) do
+        if op.opcode == "Trigger" or op.opcode == "Timer" then
+            return op.opcode
+        end
+    end
+    return nil
+end
+
+local function groupsHavePrefixOpcode(groups, opcode)
+    for _, group in ipairs(groups or {}) do
+        if hasOpcode(group.prefix_ops, opcode) then
+            return true
+        end
+    end
+    return false
+end
+
+local function groupsHavePostfixOpcode(groups, opcode)
+    for _, group in ipairs(groups or {}) do
+        if hasOpcode(group.postfix_ops, opcode) then
+            return true
+        end
+    end
+    return false
+end
+
+local function logicalGroupKey(entry)
+    return table.concat({
+        tostring(entry.parent_slot_id or "root"),
+        tostring(entry.source_postfix_opcode or "primary"),
+        tostring(entry.group_index or "0"),
+    }, "|")
+end
+
+local function sortGroups(groups)
+    table.sort(groups, function(a, b)
+        if (a.min_slot_order or 0) ~= (b.min_slot_order or 0) then
+            return (a.min_slot_order or 0) < (b.min_slot_order or 0)
+        end
+        return tostring(a.group_id) < tostring(b.group_id)
+    end)
+end
+
+local function buildLogicalGroups(ir)
+    local groups_by_key = {}
+    local groups = {}
+    local parent_slots = {}
+
+    for index, entry in ipairs(ir.entries or {}) do
+        local key = logicalGroupKey(entry)
+        local group = groups_by_key[key]
+        if not group then
+            group = {
+                group_id = "ir_group:" .. tostring(#groups + 1),
+                key = key,
+                parent_slot_id = entry.parent_slot_id,
+                source_postfix_opcode = entry.source_postfix_opcode,
+                group_index = entry.group_index,
+                depth = entry.payload_depth or 0,
+                prefix_ops = entry.prefix_ops or {},
+                postfix_ops = entry.postfix_ops or {},
+                entries = {},
+                slot_ids = {},
+                slot_id_set = {},
+                min_slot_order = index,
+            }
+            groups_by_key[key] = group
+            groups[#groups + 1] = group
+        end
+        group.entries[#group.entries + 1] = entry
+        group.slot_ids[#group.slot_ids + 1] = entry.slot_id
+        group.slot_id_set[entry.slot_id] = true
+        if (entry.payload_depth or 0) < (group.depth or 0) then
+            group.depth = entry.payload_depth or 0
+        end
+        if index < (group.min_slot_order or index) then
+            group.min_slot_order = index
+        end
+        if entry.parent_slot_id then
+            parent_slots[entry.parent_slot_id] = true
+        end
+    end
+
+    local children_by_parent_slot = {}
+    for _, group in ipairs(groups) do
+        if group.parent_slot_id then
+            children_by_parent_slot[group.parent_slot_id] = children_by_parent_slot[group.parent_slot_id] or {}
+            children_by_parent_slot[group.parent_slot_id][#children_by_parent_slot[group.parent_slot_id] + 1] = group
+        end
+    end
+
+    for _, group in ipairs(groups) do
+        local children = {}
+        local seen = {}
+        for _, slot_id in ipairs(group.slot_ids) do
+            for _, child in ipairs(children_by_parent_slot[slot_id] or {}) do
+                if not seen[child.group_id] then
+                    seen[child.group_id] = true
+                    children[#children + 1] = child
+                end
+            end
+        end
+        sortGroups(children)
+        group.payload_groups = children
+        group.has_payload_effects = #children > 0
+    end
+
+    sortGroups(groups)
+    return groups
+end
+
+local function scanGroup(group, summary, depth, payload_stack, visiting)
+    if visiting[group.group_id] then
+        return
+    end
+    visiting[group.group_id] = true
+    summary.max_payload_depth = math.max(summary.max_payload_depth, depth)
+
+    local prefix = group.prefix_ops or {}
+    local postfix = group.postfix_ops or {}
+    local has_chain = hasOpcode(prefix, "Chain")
+    local has_multicast = hasOpcode(prefix, "Multicast")
+    local has_pattern = hasOpcode(prefix, "Spread") or hasOpcode(prefix, "Burst")
+    local has_speed = hasOpcode(prefix, "Speed+")
+    local has_size = hasOpcode(prefix, "Size+")
+    local has_bounce = hasOpcode(prefix, "Bounce")
+    local has_pierce = hasOpcode(prefix, "Pierce")
+    local has_homing = hasOpcode(prefix, "Homing")
+    local has_trigger = hasOpcode(postfix, "Trigger")
+    local has_timer = hasOpcode(postfix, "Timer")
+    local payload_groups = group.payload_groups or {}
+    local has_payload_effects = group.has_payload_effects == true
+
+    for _, op in ipairs(prefix) do
+        addFeature(summary, prefixFeatureForOpcode(op.opcode, depth), depth)
+    end
+    for _, op in ipairs(postfix) do
+        addFeature(summary, OPCODE_TO_FEATURE[op.opcode], depth)
+    end
+
+    if has_chain and has_multicast then
+        addFeature(summary, "chain_multicast", depth)
+        addSet(summary.combos, "chain_multicast")
+    end
+    if has_pattern and depth > 0 then
+        addFeature(summary, "payload_pattern", depth)
+    end
+    if has_multicast and depth > 0 then
+        addFeature(summary, "payload_multicast", depth)
+    end
+    if depth > 0 and (has_trigger or has_timer) then
+        addFeature(summary, "nested_trigger_timer", depth)
+    end
+    if depth >= 2 and (has_multicast or has_pattern) then
+        addFeature(summary, "nested_final_fanout", depth)
+    end
+
+    if has_bounce then
+        addSet(summary.combos, "bounce_source")
+        if has_trigger and has_payload_effects then
+            addSet(summary.combos, "bounce_trigger_payload")
+            if groupsHavePrefixOpcode(payload_groups, "Chain") then
+                addSet(summary.combos, "bounce_trigger_chain")
+                if groupsHavePrefixOpcode(payload_groups, "Multicast")
+                    or groupsHavePrefixOpcode(payload_groups, "Spread")
+                    or groupsHavePrefixOpcode(payload_groups, "Burst") then
+                    addSet(summary.deferred_reasons, "bounce_fanout_deferred")
+                end
+                if groupsHavePrefixOpcode(payload_groups, "Speed+") or groupsHavePrefixOpcode(payload_groups, "Size+") then
+                    addSet(summary.deferred_reasons, "bounce_chain_modifier_deferred")
+                end
+            end
+            if groupsHavePrefixOpcode(payload_groups, "Multicast") then
+                addSet(summary.combos, "bounce_trigger_payload_multicast")
+            end
+            if groupsHavePrefixOpcode(payload_groups, "Spread") or groupsHavePrefixOpcode(payload_groups, "Burst") then
+                addSet(summary.combos, "bounce_trigger_payload_pattern")
+            end
+            if groupsHavePostfixOpcode(payload_groups, "Trigger") or groupsHavePostfixOpcode(payload_groups, "Timer") then
+                addSet(summary.deferred_reasons, "nested_payload_runtime_deferred")
+            end
+        end
+    end
+
+    if has_pierce then
+        addSet(summary.combos, "pierce_source")
+        if has_trigger and has_payload_effects then
+            addSet(summary.combos, "pierce_trigger_payload")
+            if groupsHavePrefixOpcode(payload_groups, "Chain") then
+                addSet(summary.combos, "pierce_trigger_chain")
+                if groupsHavePrefixOpcode(payload_groups, "Multicast")
+                    or groupsHavePrefixOpcode(payload_groups, "Spread")
+                    or groupsHavePrefixOpcode(payload_groups, "Burst") then
+                    addSet(summary.deferred_reasons, "pierce_fanout_deferred")
+                end
+                if groupsHavePrefixOpcode(payload_groups, "Speed+") or groupsHavePrefixOpcode(payload_groups, "Size+") then
+                    addSet(summary.deferred_reasons, "pierce_modifier_deferred")
+                end
+            end
+            if groupsHavePrefixOpcode(payload_groups, "Multicast") then
+                addSet(summary.combos, "pierce_trigger_payload_multicast")
+            end
+            if groupsHavePrefixOpcode(payload_groups, "Spread") or groupsHavePrefixOpcode(payload_groups, "Burst") then
+                addSet(summary.combos, "pierce_trigger_payload_pattern")
+            end
+            if groupsHavePrefixOpcode(payload_groups, "Pierce") then
+                addSet(summary.deferred_reasons, "pierce_recursion_deferred")
+            end
+            if groupsHavePostfixOpcode(payload_groups, "Trigger")
+                or groupsHavePostfixOpcode(payload_groups, "Timer") then
+                addSet(summary.deferred_reasons, "pierce_nested_payload_deferred")
+            end
+        end
+    end
+
+    if has_chain and has_pattern then
+        addSet(summary.deferred_reasons, "chain_pattern_deferred")
+    end
+    if has_chain and (has_trigger or has_timer) then
+        addSet(summary.deferred_reasons, "chain_trigger_timer_deferred")
+    end
+    if has_chain and (has_speed or has_size) and has_multicast then
+        addSet(summary.deferred_reasons, "chain_modifier_multicast_deferred")
+    end
+    if has_chain and has_speed and has_size then
+        addSet(summary.deferred_reasons, "chain_modifier_combo_deferred")
+    end
+    if has_chain and hasSet(payload_stack, "Chain") then
+        addSet(summary.deferred_reasons, "chain_recursion_deferred")
+    end
+    if has_chain and depth >= 2 then
+        addSet(summary.deferred_reasons, "chain_nested_payload_deferred")
+    end
+    if depth > 0 and has_speed and not has_chain then
+        addSet(summary.deferred_reasons, "payload_speed_plus_runtime_deferred")
+    end
+    if depth > 0 and has_size and not has_chain then
+        addSet(summary.deferred_reasons, "payload_size_plus_runtime_deferred")
+    end
+
+    if has_bounce and has_timer then
+        addSet(summary.deferred_reasons, "bounce_timer_deferred")
+    end
+    if has_bounce and (has_multicast or has_pattern) then
+        addSet(summary.deferred_reasons, "bounce_fanout_deferred")
+    end
+    if has_bounce and has_chain then
+        addSet(summary.deferred_reasons, "bounce_chain_deferred")
+    end
+    if has_bounce and (has_speed or has_size) then
+        addSet(summary.deferred_reasons, "bounce_modifier_deferred")
+    end
+    if has_bounce and has_homing then
+        addSet(summary.deferred_reasons, "bounce_homing_deferred")
+    end
+
+    if has_pierce and has_timer then
+        addSet(summary.deferred_reasons, "pierce_timer_deferred")
+    end
+    if has_pierce and has_bounce then
+        addSet(summary.deferred_reasons, "pierce_bounce_deferred")
+    end
+    if has_pierce and (has_multicast or has_pattern) then
+        addSet(summary.deferred_reasons, "pierce_fanout_deferred")
+    end
+    if has_pierce and has_chain then
+        addSet(summary.deferred_reasons, "pierce_chain_deferred")
+    end
+    if has_pierce and (has_speed or has_size) then
+        addSet(summary.deferred_reasons, "pierce_modifier_deferred")
+    end
+    if has_pierce and has_homing then
+        addSet(summary.deferred_reasons, "pierce_homing_deferred")
+    end
+    if has_pierce and (depth > 0 or hasSet(payload_stack, "Pierce")) then
+        addSet(summary.deferred_reasons, "pierce_nested_payload_deferred")
+    end
+
+    if has_homing and (
+        has_chain
+        or has_multicast
+        or has_pattern
+        or has_speed
+        or has_size
+        or has_trigger
+        or has_timer
+        or depth > 0
+    ) then
+        addSet(summary.deferred_reasons, "homing_composition_deferred")
+    end
+
+    local payload_opcode = firstPostfixOpcode(group)
+    if has_payload_effects then
+        summary.has_payload = true
+        local child_stack = copySet(payload_stack)
+        if payload_opcode then
+            if hasSet(payload_stack, payload_opcode) then
+                addSet(summary.deferred_reasons, "same_kind_nested_trigger_timer_deferred")
+            end
+            addSet(child_stack, payload_opcode)
+        end
+        if has_chain then
+            addSet(child_stack, "Chain")
+        end
+        if has_pierce then
+            addSet(child_stack, "Pierce")
+        end
+
+        for _, child in ipairs(payload_groups) do
+            scanGroup(child, summary, depth + 1, child_stack, visiting)
+        end
+    end
+
+    visiting[group.group_id] = nil
+end
+
+local function buildSummary(ir)
+    local summary = {
+        active = { simple_projectile = true },
+        counts = {},
+        min_depth = {},
+        contexts = {
+            primary = {},
+            payload = {},
+            nested_payload = {},
+        },
+        combos = {},
+        deferred_reasons = {},
+        max_payload_depth = 0,
+        has_payload = false,
+    }
+    summary.counts.simple_projectile = 1
+    summary.min_depth.simple_projectile = 0
+    summary.contexts.primary.simple_projectile = true
+
+    local groups = buildLogicalGroups(ir or {})
+    for _, group in ipairs(groups) do
+        if group.parent_slot_id == nil then
+            scanGroup(group, summary, 0, {}, {})
+        end
+    end
+
+    if summary.active.bounce and summary.active.chain and not summary.combos.bounce_trigger_chain then
+        addSet(summary.deferred_reasons, "bounce_chain_deferred")
+    end
+    if summary.active.pierce and summary.active.chain and not summary.combos.pierce_trigger_chain then
+        addSet(summary.deferred_reasons, "pierce_chain_deferred")
+    end
+
+    if summary.max_payload_depth > limits.MAX_NESTED_PAYLOAD_DEPTH then
+        addSet(summary.deferred_reasons, "nested_payload_depth_cap_deferred")
+    end
+
+    return summary
+end
+
+local function buildFeatureEntry(feature_id, summary)
+    local def = FEATURE_BY_ID[feature_id] or {
+        id = feature_id,
+        display_name = feature_id,
+        category = "unknown",
+        status = "unknown",
+        gates = {},
+        optional_gates = {},
+        summary = "",
+    }
+
+    return {
+        id = def.id,
+        display_name = def.display_name,
+        category = def.category,
+        status = def.status,
+        active = summary.active[feature_id] == true,
+        gates = cloneArray(def.gates),
+        optional_gates = cloneArray(def.optional_gates),
+        count = summary.counts[feature_id] or 0,
+        min_payload_depth = summary.min_depth[feature_id],
+        summary = def.summary,
+    }
+end
+
+local function collectRequiredFlags(active_features)
+    local set = {}
+    addSet(set, FLAG_LIVE_2_2C)
+    for _, feature_id in ipairs(active_features or {}) do
+        local def = FEATURE_BY_ID[feature_id]
+        if def then
+            addAll(set, def.gates)
+        end
+    end
+    return sortedKeys(set)
+end
+
+function feature_matrix_ir.analyzeFromIr(ir, opts)
+    local options = opts or {}
+    local summary = buildSummary(ir or {})
+    local active_feature_ids = sortedKeys(summary.active)
+    local deferred_reasons = sortedKeys(summary.deferred_reasons)
+    local active_features = {}
+    for i, feature_id in ipairs(active_feature_ids) do
+        active_features[i] = buildFeatureEntry(feature_id, summary)
+    end
+
+    local support_status = #deferred_reasons > 0 and "deferred" or "feature_gated"
+
+    return {
+        version = defs.VERSION,
+        source_kind = ir and ir.source_kind or nil,
+        recipe_id = ir and ir.recipe_id or nil,
+        preview_status = "supported",
+        live_runtime_status = support_status,
+        default_enabled = false,
+        active_feature_ids = active_feature_ids,
+        active_features = active_features,
+        contexts = {
+            primary = sortedKeys(summary.contexts.primary),
+            payload = sortedKeys(summary.contexts.payload),
+            nested_payload = sortedKeys(summary.contexts.nested_payload),
+        },
+        combos = sortedKeys(summary.combos),
+        deferred_reasons = deferred_reasons,
+        required_flags = collectRequiredFlags(active_feature_ids),
+        optional_flags = { FLAG_SOFT_HOMING },
+        limits = {
+            max_projectiles_per_cast = limits.MAX_PROJECTILES_PER_CAST,
+            max_payload_fanout = limits.MAX_PAYLOAD_FANOUT,
+            max_chain_hops = limits.MAX_CHAIN_HOPS,
+            max_chain_multicast_fanout = limits.MAX_CHAIN_MULTICAST_FANOUT,
+            max_bounce_count = limits.MAX_BOUNCE_COUNT,
+            max_pierce_count = limits.MAX_PIERCE_COUNT,
+            max_nested_payload_depth = limits.MAX_NESTED_PAYLOAD_DEPTH,
+        },
+        notes = options.notes,
+    }
+end
+
+return feature_matrix_ir

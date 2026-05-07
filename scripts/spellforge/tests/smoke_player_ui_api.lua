@@ -193,7 +193,7 @@ end
 local function catalogStep()
     local request = ui.requestCatalog(function(result)
         assertLine(result and result.ok == true, "1 catalog request succeeds")
-        assertLine(result and result.operator_count == 10, "1 catalog operator_count=10")
+        assertLine(result and result.operator_count == 11, "1 catalog operator_count=11")
         assertLine(ui.getCachedCatalog() ~= nil, "1 catalog cached")
 
         local cached_callback_seen = false

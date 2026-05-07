@@ -3,6 +3,7 @@ local limits = require("scripts.spellforge.shared.limits")
 local log = require("scripts.spellforge.shared.log").new("global.live_bounce")
 local chain_target_provider = require("scripts.spellforge.global.chain_target_provider")
 local helper_records = require("scripts.spellforge.global.helper_records")
+local ir_runtime_adapter = require("scripts.spellforge.global.ir_runtime_adapter")
 local live_chain = require("scripts.spellforge.global.live_chain")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
 local payload_multicast = require("scripts.spellforge.global.payload_multicast")
@@ -165,6 +166,70 @@ local function copyBranchFields(target, branch)
     target.chain_continuation_group_id = branch.chain_continuation_group_id
 end
 
+local function shallowCopy(value)
+    local out = {}
+    for key, item in pairs(value or {}) do
+        out[key] = item
+    end
+    return out
+end
+
+local function irBounceRuntimeEnabled(options)
+    if options and options.force_ir_bounce_runtime_disabled == true then
+        return false
+    end
+    return (options and options.force_ir_bounce_runtime_enabled == true)
+        or dev.irBounceRuntimeEnabled()
+end
+
+local function irPlannerOptions(binding, options)
+    return {
+        allow_payload_multicast = binding.payload_multicast == true
+            or (options and options.allow_payload_multicast == true)
+            or (options and options.force_payload_multicast_enabled == true)
+            or binding.force_payload_multicast_enabled == true,
+        allow_payload_pattern = binding.payload_pattern == true
+            or (options and options.allow_payload_pattern == true)
+            or (options and options.force_payload_pattern_enabled == true)
+            or binding.force_payload_pattern_enabled == true,
+        allow_chain_runtime = binding.has_chain_payload == true
+            or (options and options.force_chain_runtime_enabled == true),
+        max_depth = options and options.max_depth or limits.MAX_RECURSION_DEPTH,
+        max_jobs = binding.max_payload_fanout or (options and options.max_jobs),
+        max_fanout = binding.max_payload_fanout or (options and options.max_fanout),
+        max_projectiles = binding.max_projectiles or (options and options.max_projectiles),
+        max_bounce_count = binding.bounce_max or (options and options.max_bounce_count),
+        max_chain_hops = binding.chain_max_hops or (options and options.max_chain_hops),
+        max_chain_jobs = options and options.max_chain_jobs,
+        max_live_launches_per_tick = binding.max_live_launches_per_tick
+            or (options and options.max_live_launches_per_tick),
+        chaos_budget_profile = binding.chaos_budget_profile or (options and options.chaos_budget_profile),
+    }
+end
+
+local function irBounceFallback(binding, reason, marker)
+    runtime_stats.inc("ir_bounce_runtime_fallback")
+    log.info(string.format(
+        "%s recipe_id=%s cast_id=%s bounce_id=%s source_slot_id=%s reason=%s",
+        marker or "SPELLFORGE_IR_BOUNCE_RUNTIME_FALLBACK",
+        tostring(binding and binding.recipe_id),
+        tostring(binding and binding.cast_id),
+        tostring(binding and binding.bounce_id),
+        tostring(binding and binding.source_slot_id),
+        tostring(reason)
+    ))
+    return {
+        fallback = true,
+        reason = reason,
+        mismatch = marker == "SPELLFORGE_IR_BOUNCE_RUNTIME_MISMATCH",
+    }
+end
+
+local function irBounceMismatch(binding, reason)
+    runtime_stats.inc("ir_bounce_runtime_mismatch")
+    return irBounceFallback(binding, reason, "SPELLFORGE_IR_BOUNCE_RUNTIME_MISMATCH")
+end
+
 local function hasOps(ops)
     return type(ops) == "table" and #ops > 0
 end
@@ -259,6 +324,21 @@ local function selectBounceTriggerChainPayload(plan, options)
         return nil, "bounce_chain_modifier_deferred", audit
     end
     return chain_plan, nil, audit
+end
+
+local function compactChainPayload(chain_payload_plan, source_slot)
+    if type(chain_payload_plan) ~= "table" then
+        return nil
+    end
+    return {
+        slot_id = chain_payload_plan.payload_slot_id,
+        helper_engine_id = chain_payload_plan.payload_helper_engine_id,
+        effect_id = chain_payload_plan.payload_effect_id,
+        parent_slot_id = source_slot and source_slot.slot_id or chain_payload_plan.source_slot_id,
+        root_source_slot_id = chain_payload_plan.source_slot_id,
+        current_source_slot_id = chain_payload_plan.payload_slot_id,
+        payload_depth = 1,
+    }
 end
 
 local function triggerPayloadHasChain(plan, source_slot_id)
@@ -391,7 +471,7 @@ function live_bounce.selectV0Plan(plan, opts)
                 ok = true,
                 payload_slot_id = chain_payload_plan.payload_slot_id,
                 payload_helper_engine_id = chain_payload_plan.payload_helper_engine_id,
-                payload_slots = { chain_payload_plan.payload },
+                payload_slots = { compactChainPayload(chain_payload_plan, source_slot) },
                 payload_slot_ids = { chain_payload_plan.payload_slot_id },
                 payload_helper_engine_ids = { chain_payload_plan.payload_helper_engine_id },
                 payload_count = 1,
@@ -647,9 +727,13 @@ compactPayloadsFromBinding = function(binding)
     local payloads = {}
     if type(binding and binding.payloads) == "table" and #binding.payloads > 0 then
         for index, payload in ipairs(binding.payloads) do
+            local payload_slot = type(payload.slot) == "table" and payload.slot or nil
+            local payload_helper = type(payload.helper) == "table" and payload.helper or nil
             payloads[index] = {
-                slot_id = payload.slot_id,
-                helper_engine_id = payload.helper_engine_id,
+                slot_id = payload.slot_id or (payload_slot and payload_slot.slot_id),
+                helper_engine_id = payload.helper_engine_id
+                    or payload.engine_id
+                    or (payload_helper and (payload_helper.engine_id or payload_helper.helper_engine_id)),
                 effect_id = payload.effect_id,
                 emission_index = payload.emission_index,
                 group_index = payload.group_index,
@@ -658,10 +742,10 @@ compactPayloadsFromBinding = function(binding)
                 pattern_index = payload.pattern_index,
                 pattern_count = payload.pattern_count,
                 pattern_direction_key = payload.pattern_direction_key,
-                parent_slot_id = payload.parent_slot_id,
-                root_source_slot_id = payload.root_source_slot_id,
-                current_source_slot_id = payload.current_source_slot_id,
-                payload_depth = payload.payload_depth,
+                parent_slot_id = payload.parent_slot_id or (payload_slot and payload_slot.parent_slot_id),
+                root_source_slot_id = payload.root_source_slot_id or (payload_slot and payload_slot.root_source_slot_id),
+                current_source_slot_id = payload.current_source_slot_id or (payload_slot and payload_slot.current_source_slot_id),
+                payload_depth = payload.payload_depth or (payload_slot and payload_slot.payload_depth),
                 nested_stage_kind = payload.nested_stage_kind,
                 nested_stage_index = payload.nested_stage_index,
                 has_trigger_payload = payload.has_trigger_payload,
@@ -719,6 +803,280 @@ local function fanoutBranchInfo(binding, route, payload, index, count)
         branch_kind = kind,
         branch_index = index,
         branch_count = count,
+    }
+end
+
+local function validateIrBounceJobPlan(binding, payloads, continuation_plan, job_plan, expected_kind)
+    if type(continuation_plan) ~= "table" or continuation_plan.ok ~= true then
+        return false, continuation_plan and continuation_plan.rejection_reason or "continuation_plan_failed"
+    end
+    if continuation_plan.source_slot_id ~= binding.source_slot_id then
+        return false, "source_slot_mismatch"
+    end
+    if continuation_plan.source_helper_engine_id ~= binding.source_helper_engine_id then
+        return false, "source_helper_mismatch"
+    end
+    if type(job_plan) ~= "table" or job_plan.ok ~= true then
+        return false, job_plan and job_plan.rejection_reason or "runtime_job_plan_failed"
+    end
+    if tonumber(job_plan.planned_job_count) ~= #payloads then
+        return false, "payload_count_mismatch"
+    end
+    for index, payload in ipairs(payloads or {}) do
+        local job = job_plan.planned_jobs and job_plan.planned_jobs[index] or nil
+        if type(job) ~= "table" then
+            return false, "planned_job_missing"
+        end
+        if job.slot_id ~= payload.slot_id or job.payload_slot_id ~= payload.slot_id then
+            return false, "payload_slot_mismatch"
+        end
+        if job.helper_engine_id ~= payload.helper_engine_id then
+            return false, "payload_helper_mismatch"
+        end
+        if expected_kind ~= nil and job.kind ~= expected_kind then
+            return false, "job_kind_mismatch"
+        end
+    end
+    return true, nil
+end
+
+local function buildIrBounceRuntimePlan(route, binding, options, payloads, is_final, expected_kind)
+    if not irBounceRuntimeEnabled(options) then
+        return nil
+    end
+
+    runtime_stats.inc("ir_bounce_runtime_attempts")
+    local plan = binding.plan or binding.compiled_plan or binding.attached_plan
+    local planner_options = irPlannerOptions(binding, options)
+    local source_job_id = binding.source_job_id or (route.user_data and route.user_data.job_id)
+    local event = {
+        event_kind = "bounce",
+        source_slot_id = binding.source_slot_id,
+        source_prefix_opcode = "Bounce",
+        source_postfix_opcode = binding.has_trigger_payload == true and "Trigger" or nil,
+        cast_id = binding.cast_id,
+        source_job_id = source_job_id,
+        parent_job_id = source_job_id,
+        bounce_id = binding.bounce_id,
+        bounce_index = route.bounce_index,
+        bounce_max = binding.bounce_max,
+        bounce_power = binding.bounce_power,
+        bounce_final = is_final == true,
+        chain_id = binding.chain_id,
+        chain_hop_index = 0,
+        chain_max_hops = binding.chain_max_hops,
+        chain_targeting_mode = binding.chain_targeting_mode,
+        branch_scope = bounceBranchScope(binding),
+        branch_parent_id = bounceBranchParentId(binding),
+    }
+    local planned = ir_runtime_adapter.planEvent(binding, plan, event, planner_options)
+    if planned.ok ~= true then
+        if planned.stage == "ir" then
+            return irBounceFallback(binding, planned.rejection_reason)
+        end
+        return irBounceMismatch(binding, planned.rejection_reason or "continuation_plan_failed")
+    end
+    local continuation_plan = planned.continuation_plan
+    local job_plan = planned.job_plan
+    local valid, reason = validateIrBounceJobPlan(binding, payloads or {}, continuation_plan, job_plan, expected_kind)
+    if not valid then
+        return irBounceMismatch(binding, reason)
+    end
+
+    return {
+        ok = true,
+        continuation_plan = continuation_plan,
+        job_plan = job_plan,
+        event = event,
+    }
+end
+
+local function noteIrBounceRuntimePlanned(route, binding, options, payloads, is_final, expected_kind, role)
+    local ir_runtime = buildIrBounceRuntimePlan(route, binding, options, payloads, is_final, expected_kind)
+    if ir_runtime == nil then
+        return nil
+    end
+    if ir_runtime.ok ~= true then
+        return ir_runtime
+    end
+    local counter = role == "chain_handoff" and "ir_bounce_runtime_chain_handoff_planned"
+        or role == "trigger_payload_detonation" and "ir_bounce_runtime_detonation_planned"
+        or "ir_bounce_runtime_planned"
+    runtime_stats.inc(counter)
+    log.info(string.format(
+        "SPELLFORGE_IR_BOUNCE_RUNTIME_PLANNED role=%s recipe_id=%s cast_id=%s bounce_id=%s bounce_index=%s source_slot_id=%s payload_count=%s job_count=%s branch_kind=%s",
+        tostring(role),
+        tostring(binding.recipe_id),
+        tostring(binding.cast_id),
+        tostring(binding.bounce_id),
+        tostring(route.bounce_index),
+        tostring(binding.source_slot_id),
+        tostring(#(payloads or {})),
+        tostring(ir_runtime.job_plan and ir_runtime.job_plan.planned_job_count or nil),
+        tostring(ir_runtime.job_plan and ir_runtime.job_plan.planned_jobs and ir_runtime.job_plan.planned_jobs[1] and ir_runtime.job_plan.planned_jobs[1].branch_kind or nil)
+    ))
+    return ir_runtime
+end
+
+local function enrichIrBounceTriggerPayload(planned_job, binding, route, payload, index, count, duplicate_key, is_final, actor, start_pos, direction)
+    local branch = fanoutBranchInfo(binding, route, payload, index, count)
+    local payload_launch = shallowCopy(planned_job.payload or {})
+    payload_launch.actor = actor
+    payload_launch.start_pos = start_pos
+    payload_launch.direction = payload.direction or direction
+    payload_launch.hit_object = route.target
+    payload_launch.cast_id = binding.cast_id
+    payload_launch.source_slot_id = binding.source_slot_id
+    payload_launch.source_prefix_opcode = "Bounce"
+    payload_launch.source_helper_engine_id = binding.source_helper_engine_id
+    payload_launch.source_postfix_opcode = "Trigger"
+    payload_launch.root_source_slot_id = payload.root_source_slot_id or binding.root_source_slot_id or binding.source_slot_id
+    payload_launch.current_source_slot_id = payload.current_source_slot_id or payload.slot_id
+    payload_launch.parent_slot_id = payload.parent_slot_id or binding.source_slot_id
+    payload_launch.payload_depth = payload.payload_depth or 1
+    payload_launch.nested_stage_kind = payload.nested_stage_kind
+    payload_launch.nested_stage_index = payload.nested_stage_index
+    payload_launch.has_trigger_payload = payload.has_trigger_payload
+    payload_launch.has_timer_payload = payload.has_timer_payload
+    payload_launch.payload_slot_id = payload.slot_id
+    payload_launch.trigger_source_slot_id = binding.source_slot_id
+    payload_launch.trigger_payload_slot_id = payload.slot_id
+    payload_launch.trigger_route = "bounce"
+    payload_launch.trigger_duplicate_key = shortKey(duplicate_key)
+    payload_launch.payload_multicast = binding.payload_multicast == true
+    payload_launch.payload_pattern = binding.payload_pattern == true
+    payload_launch.payload_count = count
+    payload_launch.fanout_count = count
+    payload_launch.emission_index = payload.emission_index
+    payload_launch.group_index = payload.group_index
+    payload_launch.pattern_kind = payload.pattern_kind
+    payload_launch.pattern_index = payload.pattern_index
+    payload_launch.pattern_count = payload.pattern_count
+    payload_launch.pattern_direction_key = payload.pattern_direction_key
+    payload_launch.bounce_runtime = true
+    payload_launch.bounce_role = "trigger_payload_launch"
+    payload_launch.bounce_id = binding.bounce_id
+    payload_launch.bounce_index = route.bounce_index
+    payload_launch.bounce_max = binding.bounce_max
+    payload_launch.bounce_power = binding.bounce_power
+    payload_launch.bounce_detonate_on_actor_hit = false
+    payload_launch.bounce_trigger_payload_slot_id = payload.slot_id
+    payload_launch.bounce_final = is_final == true
+    payload_launch.mute_audio = binding.mute_audio
+    payload_launch.mute_light = binding.mute_light
+    copyBranchFields(payload_launch, branch)
+
+    local job = shallowCopy(planned_job)
+    job.kind = orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND
+    job.recipe_id = binding.recipe_id
+    job.slot_id = payload.slot_id
+    job.helper_engine_id = payload.helper_engine_id
+    job.idempotency_key = string.format("%s:%s", tostring(duplicate_key), tostring(payload.slot_id))
+    job.source_job_id = binding.source_job_id or (route.user_data and route.user_data.job_id)
+    job.parent_job_id = job.source_job_id
+    job.depth = 1
+    job.cast_id = binding.cast_id
+    job.emission_index = payload.emission_index
+    job.group_index = payload.group_index
+    job.fanout_count = count
+    job.max_live_launches_per_tick = binding.max_live_launches_per_tick
+    job.chaos_budget_profile = binding.chaos_budget_profile
+    job.root_source_slot_id = payload.root_source_slot_id or binding.root_source_slot_id or binding.source_slot_id
+    job.current_source_slot_id = payload.current_source_slot_id or payload.slot_id
+    job.parent_slot_id = payload.parent_slot_id or binding.source_slot_id
+    job.payload_depth = payload.payload_depth or 1
+    job.nested_stage_kind = payload.nested_stage_kind
+    job.nested_stage_index = payload.nested_stage_index
+    job.has_trigger_payload = payload.has_trigger_payload
+    job.has_timer_payload = payload.has_timer_payload
+    job.pattern_kind = payload.pattern_kind
+    job.pattern_index = payload.pattern_index
+    job.pattern_count = payload.pattern_count
+    job.pattern_direction_key = payload.pattern_direction_key
+    job.source_slot_id = binding.source_slot_id
+    job.source_prefix_opcode = "Bounce"
+    job.source_helper_engine_id = binding.source_helper_engine_id
+    job.source_postfix_opcode = "Trigger"
+    job.payload_slot_id = payload.slot_id
+    job.trigger_route = "bounce"
+    job.trigger_duplicate_key = shortKey(duplicate_key)
+    job.bounce_runtime = true
+    job.bounce_role = "trigger_payload_launch"
+    job.bounce_id = binding.bounce_id
+    job.bounce_index = route.bounce_index
+    job.bounce_max = binding.bounce_max
+    job.bounce_power = binding.bounce_power
+    job.bounce_detonate_on_actor_hit = false
+    job.bounce_trigger_payload_slot_id = payload.slot_id
+    job.bounce_final = is_final == true
+    copyBranchFields(job, branch)
+    job.payload = payload_launch
+    return job
+end
+
+local function enqueueIrBounceRuntime(route, binding, duplicate_key, is_final, options, payloads, actor, start_pos, direction)
+    local ir_runtime = buildIrBounceRuntimePlan(
+        route,
+        binding,
+        options,
+        payloads,
+        is_final,
+        orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND
+    )
+    if ir_runtime == nil then
+        return nil
+    end
+    if ir_runtime.ok ~= true then
+        return ir_runtime
+    end
+
+    local job_ids = {}
+    for index, payload in ipairs(payloads or {}) do
+        local planned_job = ir_runtime.job_plan.planned_jobs[index]
+        local job = enrichIrBounceTriggerPayload(
+            planned_job,
+            binding,
+            route,
+            payload,
+            index,
+            #payloads,
+            duplicate_key,
+            is_final,
+            actor,
+            start_pos,
+            direction
+        )
+        local enqueue = orchestrator.enqueue(job)
+        if not enqueue.ok then
+            runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+            return {
+                ok = false,
+                error = enqueue.error or "IR bounce trigger payload enqueue failed",
+                job_ids = job_ids,
+                ir_bounce_runtime = true,
+            }
+        end
+        job_ids[#job_ids + 1] = enqueue.job_id
+    end
+
+    runtime_stats.inc("ir_bounce_runtime_enqueued")
+    runtime_stats.inc("ir_bounce_runtime_jobs_enqueued", #job_ids)
+    local first_job = orchestrator.getJob(job_ids[1])
+    log.info(string.format(
+        "SPELLFORGE_IR_BOUNCE_RUNTIME_ENQUEUED recipe_id=%s cast_id=%s bounce_id=%s bounce_index=%s source_slot_id=%s payload_count=%s first_job_id=%s branch_kind=%s",
+        tostring(binding.recipe_id),
+        tostring(binding.cast_id),
+        tostring(binding.bounce_id),
+        tostring(route.bounce_index),
+        tostring(binding.source_slot_id),
+        tostring(#job_ids),
+        tostring(job_ids[1]),
+        tostring(first_job and first_job.branch_kind or nil)
+    ))
+    return {
+        ok = true,
+        job_ids = job_ids,
+        ir_bounce_runtime = true,
     }
 end
 
@@ -1016,7 +1374,7 @@ local function detonateBounceSource(route, binding, is_final)
     return result
 end
 
-local function detonateBounceTriggerPayload(route, binding, duplicate_key, is_final)
+local function detonateBounceTriggerPayload(route, binding, duplicate_key, is_final, options)
     local payload_mapping = helper_records.getByRecipeSlot(binding.recipe_id, binding.payload_slot_id)
         or helper_records.getByEngineId(binding.payload_helper_engine_id)
     if not payload_mapping or payload_mapping.engine_id ~= binding.payload_helper_engine_id then
@@ -1027,6 +1385,15 @@ local function detonateBounceTriggerPayload(route, binding, duplicate_key, is_fi
         }
     end
 
+    local ir_runtime = noteIrBounceRuntimePlanned(
+        route,
+        binding,
+        options or {},
+        compactPayloadsFromBinding(binding),
+        is_final,
+        orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND,
+        "trigger_payload_detonation"
+    )
     local presentation = payload_mapping.presentation or nil
     local branch = eventBranchInfo(binding, route, "trigger_payload")
     runtime_stats.inc("live_bounce_trigger_payload_detonation_attempts")
@@ -1109,6 +1476,14 @@ local function detonateBounceTriggerPayload(route, binding, duplicate_key, is_fi
         launch_count = result.ok == true and 1 or 0,
         detonation_result = result,
         launch_user_data = detonate_user_data,
+        ir_bounce_runtime = ir_runtime and ir_runtime.ok == true or false,
+        ir_bounce_runtime_job_count = ir_runtime and ir_runtime.ok == true
+            and ir_runtime.job_plan
+            and ir_runtime.job_plan.planned_job_count
+            or nil,
+        ir_bounce_runtime_fallback_used = ir_runtime and ir_runtime.fallback == true or false,
+        ir_bounce_runtime_fallback_reason = ir_runtime and ir_runtime.fallback and ir_runtime.reason or nil,
+        ir_bounce_runtime_mismatch = ir_runtime and ir_runtime.mismatch == true or false,
     }
 end
 
@@ -1183,116 +1558,136 @@ local function routeBounceTriggerFanoutPayload(route, binding, duplicate_key, is
     end
 
     local source_job_id = binding.source_job_id or (route.user_data and route.user_data.job_id)
-    local job_ids = {}
-    for index, payload in ipairs(payloads) do
-        local payload_key = string.format("%s:%s", tostring(duplicate_key), tostring(payload.slot_id))
-        local branch = fanoutBranchInfo(binding, route, payload, index, #payloads)
-        local payload_launch = {
-            actor = actor,
-            start_pos = start_pos,
-            direction = payload.direction or direction,
-            hit_object = route.target,
-            cast_id = binding.cast_id,
-            source_slot_id = binding.source_slot_id,
-            source_prefix_opcode = "Bounce",
-            source_helper_engine_id = binding.source_helper_engine_id,
-            source_postfix_opcode = "Trigger",
-            root_source_slot_id = payload.root_source_slot_id or binding.root_source_slot_id or binding.source_slot_id,
-            current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
-            parent_slot_id = payload.parent_slot_id or binding.source_slot_id,
-            payload_depth = payload.payload_depth or 1,
-            nested_stage_kind = payload.nested_stage_kind,
-            nested_stage_index = payload.nested_stage_index,
-            has_trigger_payload = payload.has_trigger_payload,
-            has_timer_payload = payload.has_timer_payload,
-            payload_slot_id = payload.slot_id,
-            trigger_source_slot_id = binding.source_slot_id,
-            trigger_payload_slot_id = payload.slot_id,
-            trigger_route = "bounce",
-            trigger_duplicate_key = shortKey(duplicate_key),
-            payload_multicast = binding.payload_multicast == true,
-            payload_pattern = binding.payload_pattern == true,
-            payload_count = #payloads,
-            fanout_count = #payloads,
-            emission_index = payload.emission_index,
-            group_index = payload.group_index,
-            pattern_kind = payload.pattern_kind,
-            pattern_index = payload.pattern_index,
-            pattern_count = payload.pattern_count,
-            pattern_direction_key = payload.pattern_direction_key,
-            bounce_runtime = true,
-            bounce_role = "trigger_payload_launch",
-            bounce_id = binding.bounce_id,
-            bounce_index = route.bounce_index,
-            bounce_max = binding.bounce_max,
-            bounce_power = binding.bounce_power,
-            bounce_detonate_on_actor_hit = false,
-            bounce_trigger_payload_slot_id = payload.slot_id,
-            bounce_final = is_final == true,
-            mute_audio = binding.mute_audio,
-            mute_light = binding.mute_light,
-        }
-        copyBranchFields(payload_launch, branch)
-        local enqueue = orchestrator.enqueue({
-            kind = orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND,
-            recipe_id = binding.recipe_id,
-            slot_id = payload.slot_id,
-            helper_engine_id = payload.helper_engine_id,
-            idempotency_key = payload_key,
-            source_job_id = source_job_id,
-            parent_job_id = source_job_id,
-            depth = 1,
-            cast_id = binding.cast_id,
-            emission_index = payload.emission_index,
-            group_index = payload.group_index,
-            fanout_count = #payloads,
-            max_live_launches_per_tick = binding.max_live_launches_per_tick,
-            chaos_budget_profile = binding.chaos_budget_profile,
-            root_source_slot_id = payload.root_source_slot_id or binding.root_source_slot_id or binding.source_slot_id,
-            current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
-            parent_slot_id = payload.parent_slot_id or binding.source_slot_id,
-            payload_depth = payload.payload_depth or 1,
-            nested_stage_kind = payload.nested_stage_kind,
-            nested_stage_index = payload.nested_stage_index,
-            has_trigger_payload = payload.has_trigger_payload,
-            has_timer_payload = payload.has_timer_payload,
-            pattern_kind = payload.pattern_kind,
-            pattern_index = payload.pattern_index,
-            pattern_count = payload.pattern_count,
-            pattern_direction_key = payload.pattern_direction_key,
-            source_slot_id = binding.source_slot_id,
-            source_prefix_opcode = "Bounce",
-            source_helper_engine_id = binding.source_helper_engine_id,
-            source_postfix_opcode = "Trigger",
-            payload_slot_id = payload.slot_id,
-            trigger_route = "bounce",
-            trigger_duplicate_key = shortKey(duplicate_key),
-            bounce_runtime = true,
-            bounce_role = "trigger_payload_launch",
-            bounce_id = binding.bounce_id,
-            bounce_index = route.bounce_index,
-            bounce_max = binding.bounce_max,
-            bounce_power = binding.bounce_power,
-            bounce_detonate_on_actor_hit = false,
-            bounce_trigger_payload_slot_id = payload.slot_id,
-            bounce_final = is_final == true,
-            branch_scope = branch.branch_scope,
-            branch_id = branch.branch_id,
-            branch_parent_id = branch.branch_parent_id,
-            branch_kind = branch.branch_kind,
-            branch_index = branch.branch_index,
-            branch_count = branch.branch_count,
-            payload = payload_launch,
-        })
-        if not enqueue.ok then
-            runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
-            return {
-                ok = false,
-                error = enqueue.error or "bounce trigger payload enqueue failed",
-                job_ids = job_ids,
+    local ir_enqueue = enqueueIrBounceRuntime(
+        route,
+        binding,
+        duplicate_key,
+        is_final,
+        route_options,
+        payloads,
+        actor,
+        start_pos,
+        direction
+    )
+    if ir_enqueue and ir_enqueue.ok == false then
+        return ir_enqueue
+    end
+
+    local ir_bounce_runtime_used = ir_enqueue and ir_enqueue.ir_bounce_runtime == true
+    local ir_bounce_runtime_fallback_reason = ir_enqueue and ir_enqueue.fallback and ir_enqueue.reason or nil
+    local ir_bounce_runtime_mismatch = ir_enqueue and ir_enqueue.mismatch == true or false
+    local job_ids = ir_bounce_runtime_used and ir_enqueue.job_ids or {}
+    if not ir_bounce_runtime_used then
+        for index, payload in ipairs(payloads) do
+            local payload_key = string.format("%s:%s", tostring(duplicate_key), tostring(payload.slot_id))
+            local branch = fanoutBranchInfo(binding, route, payload, index, #payloads)
+            local payload_launch = {
+                actor = actor,
+                start_pos = start_pos,
+                direction = payload.direction or direction,
+                hit_object = route.target,
+                cast_id = binding.cast_id,
+                source_slot_id = binding.source_slot_id,
+                source_prefix_opcode = "Bounce",
+                source_helper_engine_id = binding.source_helper_engine_id,
+                source_postfix_opcode = "Trigger",
+                root_source_slot_id = payload.root_source_slot_id or binding.root_source_slot_id or binding.source_slot_id,
+                current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
+                parent_slot_id = payload.parent_slot_id or binding.source_slot_id,
+                payload_depth = payload.payload_depth or 1,
+                nested_stage_kind = payload.nested_stage_kind,
+                nested_stage_index = payload.nested_stage_index,
+                has_trigger_payload = payload.has_trigger_payload,
+                has_timer_payload = payload.has_timer_payload,
+                payload_slot_id = payload.slot_id,
+                trigger_source_slot_id = binding.source_slot_id,
+                trigger_payload_slot_id = payload.slot_id,
+                trigger_route = "bounce",
+                trigger_duplicate_key = shortKey(duplicate_key),
+                payload_multicast = binding.payload_multicast == true,
+                payload_pattern = binding.payload_pattern == true,
+                payload_count = #payloads,
+                fanout_count = #payloads,
+                emission_index = payload.emission_index,
+                group_index = payload.group_index,
+                pattern_kind = payload.pattern_kind,
+                pattern_index = payload.pattern_index,
+                pattern_count = payload.pattern_count,
+                pattern_direction_key = payload.pattern_direction_key,
+                bounce_runtime = true,
+                bounce_role = "trigger_payload_launch",
+                bounce_id = binding.bounce_id,
+                bounce_index = route.bounce_index,
+                bounce_max = binding.bounce_max,
+                bounce_power = binding.bounce_power,
+                bounce_detonate_on_actor_hit = false,
+                bounce_trigger_payload_slot_id = payload.slot_id,
+                bounce_final = is_final == true,
+                mute_audio = binding.mute_audio,
+                mute_light = binding.mute_light,
             }
+            copyBranchFields(payload_launch, branch)
+            local enqueue = orchestrator.enqueue({
+                kind = orchestrator.LIVE_TRIGGER_PAYLOAD_JOB_KIND,
+                recipe_id = binding.recipe_id,
+                slot_id = payload.slot_id,
+                helper_engine_id = payload.helper_engine_id,
+                idempotency_key = payload_key,
+                source_job_id = source_job_id,
+                parent_job_id = source_job_id,
+                depth = 1,
+                cast_id = binding.cast_id,
+                emission_index = payload.emission_index,
+                group_index = payload.group_index,
+                fanout_count = #payloads,
+                max_live_launches_per_tick = binding.max_live_launches_per_tick,
+                chaos_budget_profile = binding.chaos_budget_profile,
+                root_source_slot_id = payload.root_source_slot_id or binding.root_source_slot_id or binding.source_slot_id,
+                current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
+                parent_slot_id = payload.parent_slot_id or binding.source_slot_id,
+                payload_depth = payload.payload_depth or 1,
+                nested_stage_kind = payload.nested_stage_kind,
+                nested_stage_index = payload.nested_stage_index,
+                has_trigger_payload = payload.has_trigger_payload,
+                has_timer_payload = payload.has_timer_payload,
+                pattern_kind = payload.pattern_kind,
+                pattern_index = payload.pattern_index,
+                pattern_count = payload.pattern_count,
+                pattern_direction_key = payload.pattern_direction_key,
+                source_slot_id = binding.source_slot_id,
+                source_prefix_opcode = "Bounce",
+                source_helper_engine_id = binding.source_helper_engine_id,
+                source_postfix_opcode = "Trigger",
+                payload_slot_id = payload.slot_id,
+                trigger_route = "bounce",
+                trigger_duplicate_key = shortKey(duplicate_key),
+                bounce_runtime = true,
+                bounce_role = "trigger_payload_launch",
+                bounce_id = binding.bounce_id,
+                bounce_index = route.bounce_index,
+                bounce_max = binding.bounce_max,
+                bounce_power = binding.bounce_power,
+                bounce_detonate_on_actor_hit = false,
+                bounce_trigger_payload_slot_id = payload.slot_id,
+                bounce_final = is_final == true,
+                branch_scope = branch.branch_scope,
+                branch_id = branch.branch_id,
+                branch_parent_id = branch.branch_parent_id,
+                branch_kind = branch.branch_kind,
+                branch_index = branch.branch_index,
+                branch_count = branch.branch_count,
+                payload = payload_launch,
+            })
+            if not enqueue.ok then
+                runtime_stats.inc("live_bounce_trigger_payload_launch_failed")
+                return {
+                    ok = false,
+                    error = enqueue.error or "bounce trigger payload enqueue failed",
+                    job_ids = job_ids,
+                }
+            end
+            job_ids[#job_ids + 1] = enqueue.job_id
         end
-        job_ids[#job_ids + 1] = enqueue.job_id
     end
 
     runtime_stats.inc("live_bounce_trigger_payload_jobs_enqueued", #job_ids)
@@ -1461,6 +1856,11 @@ local function routeBounceTriggerFanoutPayload(route, binding, duplicate_key, is
         duplicate_key = duplicate_key,
         job_id = job_ids[1],
         job_ids = job_ids,
+        ir_bounce_runtime = ir_bounce_runtime_used == true,
+        ir_bounce_runtime_job_count = ir_bounce_runtime_used and #job_ids or nil,
+        ir_bounce_runtime_fallback_used = ir_bounce_runtime_fallback_reason ~= nil,
+        ir_bounce_runtime_fallback_reason = ir_bounce_runtime_fallback_reason,
+        ir_bounce_runtime_mismatch = ir_bounce_runtime_mismatch == true,
         jobs = jobs,
         job_status = jobs[1] and jobs[1].job_status or nil,
         launch_accepted = launch_ok == true,
@@ -1475,7 +1875,7 @@ local function routeBounceTriggerFanoutPayload(route, binding, duplicate_key, is
     }
 end
 
-local function routeBounceTriggerChainPayload(route, binding, duplicate_key, is_final)
+local function routeBounceTriggerChainPayload(route, binding, duplicate_key, is_final, options)
     runtime_stats.inc("live_bounce_chain_payload_attempts")
     local chain_source_target, precollected_candidates, precollected_provider_result =
         inferBounceChainSourceTarget(route, binding)
@@ -1510,6 +1910,15 @@ local function routeBounceTriggerChainPayload(route, binding, duplicate_key, is_
         }
     end
     local branch = eventBranchInfo(binding, route, "trigger_chain_payload")
+    local ir_runtime = noteIrBounceRuntimePlanned(
+        route,
+        binding,
+        options or {},
+        compactPayloadsFromBinding(binding),
+        is_final,
+        "live_chain_handoff",
+        "chain_handoff"
+    )
     local handoff_provider = binding.chain_candidate_provider ~= nil and "mock"
         or (precollected_provider_result and precollected_provider_result.provider)
         or "real"
@@ -1720,6 +2129,14 @@ local function routeBounceTriggerChainPayload(route, binding, duplicate_key, is_
         projectile_id = result and result.projectile_id or nil,
         projectile_ids = result and result.projectile_ids or nil,
         launch_user_data = chain_route.user_data,
+        ir_bounce_runtime = ir_runtime and ir_runtime.ok == true or false,
+        ir_bounce_runtime_job_count = ir_runtime and ir_runtime.ok == true
+            and ir_runtime.job_plan
+            and ir_runtime.job_plan.planned_job_count
+            or nil,
+        ir_bounce_runtime_fallback_used = ir_runtime and ir_runtime.fallback == true or false,
+        ir_bounce_runtime_fallback_reason = ir_runtime and ir_runtime.fallback and ir_runtime.reason or nil,
+        ir_bounce_runtime_mismatch = ir_runtime and ir_runtime.mismatch == true or false,
     }
 end
 
@@ -1792,7 +2209,7 @@ function live_bounce.handleBouncePayload(payload, opts)
             runtime_stats.inc("live_bounce_trigger_payload_detonation_failed")
             trigger_result = { ok = false, disabled = true, error = "live trigger disabled" }
         elseif binding.has_chain_payload == true then
-            trigger_result = routeBounceTriggerChainPayload(route, binding, key, is_final)
+            trigger_result = routeBounceTriggerChainPayload(route, binding, key, is_final, options)
         elseif binding.payload_multicast == true
             and options.force_payload_multicast_enabled ~= true
             and binding.force_payload_multicast_enabled ~= true
@@ -1810,7 +2227,7 @@ function live_bounce.handleBouncePayload(payload, opts)
         elseif binding.payload_multicast == true or binding.payload_pattern == true then
             trigger_result = routeBounceTriggerFanoutPayload(route, binding, key, is_final, options)
         else
-            trigger_result = detonateBounceTriggerPayload(route, binding, key, is_final)
+            trigger_result = detonateBounceTriggerPayload(route, binding, key, is_final, options)
         end
         if trigger_result and trigger_result.ok == true and trigger_result.ignored ~= true then
             runtime_stats.inc("live_bounce_trigger_payloads")
@@ -1886,6 +2303,11 @@ function live_bounce.handleBouncePayload(payload, opts)
         trigger_payload_projectile_id = trigger_payload_result.projectile_id,
         projectile_ids = trigger_payload_result.projectile_ids,
         launch_user_data = trigger_payload_result.launch_user_data,
+        ir_bounce_runtime = trigger_payload_result.ir_bounce_runtime == true,
+        ir_bounce_runtime_job_count = trigger_payload_result.ir_bounce_runtime_job_count,
+        ir_bounce_runtime_fallback_used = trigger_payload_result.ir_bounce_runtime_fallback_used == true,
+        ir_bounce_runtime_fallback_reason = trigger_payload_result.ir_bounce_runtime_fallback_reason,
+        ir_bounce_runtime_mismatch = trigger_payload_result.ir_bounce_runtime_mismatch == true,
         tick = trigger_payload_result.tick,
         cancel_result = cancel_result,
     }

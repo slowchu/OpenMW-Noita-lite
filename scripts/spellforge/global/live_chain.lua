@@ -10,6 +10,7 @@ local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
 local chain_target_provider = require("scripts.spellforge.global.chain_target_provider")
 local chain_targeting = require("scripts.spellforge.global.chain_targeting")
 local helper_records = require("scripts.spellforge.global.helper_records")
+local ir_runtime_adapter = require("scripts.spellforge.global.ir_runtime_adapter")
 local live_size_plus = require("scripts.spellforge.global.live_size_plus")
 local live_speed_plus = require("scripts.spellforge.global.live_speed_plus")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
@@ -186,6 +187,116 @@ local function cloneJobInput(job)
         end
     end
     return out
+end
+
+local function irChainRuntimeEnabled(options)
+    if options and options.force_ir_chain_runtime_disabled == true then
+        return false
+    end
+    return (options and options.force_ir_chain_runtime_enabled == true)
+        or dev.irChainRuntimeEnabled()
+end
+
+local function irPlannerOptions(binding, options)
+    return {
+        allow_chain_multicast = binding and binding.has_multicast_payload == true
+            or (options and options.allow_chain_multicast == true)
+            or (options and options.force_chain_multicast_enabled == true)
+            or (options and options.chain_multicast_enabled == true),
+        max_hops = binding and binding.max_hops or (options and options.max_chain_hops),
+        max_jobs = binding and binding.max_chain_jobs or (options and options.max_chain_jobs),
+        max_chain_multicast_fanout = binding and binding.chain_multicast_fanout_count
+            or (options and options.max_chain_multicast_fanout),
+        max_live_launches_per_tick = binding and binding.max_live_launches_per_tick
+            or (options and options.max_live_launches_per_tick),
+        chaos_budget_profile = binding and binding.chaos_budget_profile or (options and options.chaos_budget_profile),
+    }
+end
+
+local function irChainFallback(binding, reason, marker)
+    runtime_stats.inc("ir_chain_runtime_fallback")
+    log.info(string.format(
+        "%s recipe_id=%s cast_id=%s chain_id=%s source_slot_id=%s reason=%s",
+        marker or "SPELLFORGE_IR_CHAIN_RUNTIME_FALLBACK",
+        tostring(binding and binding.recipe_id),
+        tostring(binding and binding.cast_id),
+        tostring(binding and binding.chain_id),
+        tostring(binding and binding.source_slot_id),
+        tostring(reason)
+    ))
+    return {
+        fallback = true,
+        reason = reason,
+        mismatch = marker == "SPELLFORGE_IR_CHAIN_RUNTIME_MISMATCH",
+    }
+end
+
+local function irChainMismatch(binding, reason)
+    runtime_stats.inc("ir_chain_runtime_mismatch")
+    return irChainFallback(binding, reason, "SPELLFORGE_IR_CHAIN_RUNTIME_MISMATCH")
+end
+
+local function validateIrChainJobPlan(binding, fanout_count, continuation_plan, job_plan)
+    if type(continuation_plan) ~= "table" or continuation_plan.ok ~= true then
+        return false, continuation_plan and continuation_plan.rejection_reason or "continuation_plan_failed"
+    end
+    if continuation_plan.source_slot_id ~= binding.source_slot_id then
+        return false, "source_slot_mismatch"
+    end
+    if continuation_plan.source_helper_engine_id ~= binding.source_helper_engine_id then
+        return false, "source_helper_mismatch"
+    end
+    if continuation_plan.chain_shape ~= binding.chain_shape then
+        return false, "chain_shape_mismatch"
+    end
+    if type(job_plan) ~= "table" or job_plan.ok ~= true then
+        return false, job_plan and job_plan.rejection_reason or "runtime_job_plan_failed"
+    end
+    if tonumber(job_plan.planned_job_count) ~= fanout_count then
+        return false, "payload_count_mismatch"
+    end
+    for index = 1, fanout_count do
+        local job = job_plan.planned_jobs and job_plan.planned_jobs[index] or nil
+        if type(job) ~= "table" then
+            return false, "planned_job_missing"
+        end
+        if job.kind ~= orchestrator.LIVE_CHAIN_PAYLOAD_JOB_KIND then
+            return false, "job_kind_mismatch"
+        end
+        if fanout_count == 1 then
+            if job.slot_id ~= binding.payload_slot_id or job.payload_slot_id ~= binding.payload_slot_id then
+                return false, "payload_slot_mismatch"
+            end
+            if job.helper_engine_id ~= binding.payload_helper_engine_id then
+                return false, "payload_helper_mismatch"
+            end
+        end
+    end
+    return true, nil
+end
+
+local function mergeIrChainPlannedJob(planned_job, legacy_job)
+    if type(planned_job) ~= "table" then
+        return legacy_job
+    end
+    local job = cloneJobInput(planned_job)
+    local planned_payload = clonePayload(planned_job.payload or {})
+    for key, value in pairs(legacy_job or {}) do
+        if key ~= "payload" then
+            job[key] = value
+        end
+    end
+    job.payload = planned_payload
+    for key, value in pairs((legacy_job and legacy_job.payload) or {}) do
+        job.payload[key] = value
+    end
+    if legacy_job and legacy_job.source_prefix_opcode == nil then
+        job.source_prefix_opcode = nil
+    end
+    if legacy_job and legacy_job.payload and legacy_job.payload.source_prefix_opcode == nil then
+        job.payload.source_prefix_opcode = nil
+    end
+    return job
 end
 
 local function helperBySlotId(helpers)
@@ -916,10 +1027,10 @@ end
 
 local function routeContinuationScope(route)
     local user_data = route and route.user_data or nil
+    if user_data and type(user_data.branch_scope) == "string" and user_data.branch_scope ~= "" then
+        return user_data.branch_scope
+    end
     if user_data and user_data.bounce_runtime == true and user_data.bounce_index ~= nil then
-        if type(user_data.branch_scope) == "string" and user_data.branch_scope ~= "" then
-            return user_data.branch_scope
-        end
         local bounce_id = tostring(user_data.bounce_id or "no-bounce")
         if string.sub(bounce_id, 1, 7) ~= "bounce:" then
             bounce_id = "bounce:" .. bounce_id
@@ -951,6 +1062,20 @@ local function copyBounceContinuationScope(route, target)
     target.bounce_power = user_data.bounce_power
     target.bounce_trigger_payload_slot_id = user_data.bounce_trigger_payload_slot_id
     target.bounce_final = user_data.bounce_final
+end
+
+local function copyPierceContinuationScope(route, target)
+    local user_data = route and route.user_data or nil
+    if type(target) ~= "table" or not user_data or user_data.pierce_runtime ~= true then
+        return
+    end
+
+    target.pierce_runtime = true
+    target.pierce_role = "chain_branch_scope"
+    target.pierce_id = user_data.pierce_id
+    target.pierce_count = user_data.pierce_count
+    target.pierce_limit = user_data.pierce_limit
+    target.pierce_trigger_payload_slot_id = user_data.pierce_trigger_payload_slot_id
 end
 
 local function duplicateKey(route, binding, hop_index)
@@ -1156,6 +1281,8 @@ local function completeLosRequest(request_id, payload)
         max_live_launches_per_tick = pending.options and pending.options.max_live_launches_per_tick or nil,
         simulate_update_ticks = pending.options and pending.options.simulate_update_ticks == true,
         simulated_dt_seconds = pending.options and pending.options.simulated_dt_seconds or nil,
+        force_ir_chain_runtime_enabled = pending.options and pending.options.force_ir_chain_runtime_enabled == true,
+        force_ir_chain_runtime_disabled = pending.options and pending.options.force_ir_chain_runtime_disabled == true,
     })
 end
 
@@ -1253,6 +1380,63 @@ local function requestLosFilter(binding, route, previous_hop, current_target, hi
         max_hops = binding.max_hops,
         los_request_id = request_id,
         branch_scope = routeContinuationScope(route),
+    }
+end
+
+local function buildIrChainRuntimePlan(binding, route, options, previous_hop, next_hop, fanout_count, continuation_group_id, branch_scope)
+    if not irChainRuntimeEnabled(options) then
+        return nil
+    end
+
+    runtime_stats.inc("ir_chain_runtime_attempts")
+    local plan = binding.plan or binding.compiled_plan or binding.attached_plan
+    local source_job_id = binding.source_job_id or (route.user_data and route.user_data.job_id)
+    local event = {
+        event_kind = "chain_hit",
+        source_slot_id = binding.source_slot_id,
+        source_postfix_opcode = "Chain",
+        cast_id = binding.cast_id,
+        source_job_id = source_job_id,
+        parent_job_id = route.user_data and route.user_data.job_id or source_job_id,
+        chain_id = binding.chain_id,
+        chain_hop_index = previous_hop,
+        chain_max_hops = binding.max_hops,
+        chain_targeting_mode = binding.targeting_mode or "no_immediate_repeat",
+        chain_continuation_group_id = continuation_group_id,
+        branch_scope = branch_scope,
+        branch_parent_id = continuation_group_id,
+    }
+    local planner_options = irPlannerOptions(binding, options)
+    local planned = ir_runtime_adapter.planEvent(binding, plan, event, planner_options)
+    if planned.ok ~= true then
+        if planned.stage == "ir" then
+            return irChainFallback(binding, planned.rejection_reason)
+        end
+        return irChainMismatch(binding, planned.rejection_reason or "continuation_plan_failed")
+    end
+    local continuation_plan = planned.continuation_plan
+    local job_plan = planned.job_plan
+    local valid, reason = validateIrChainJobPlan(binding, fanout_count, continuation_plan, job_plan)
+    if not valid then
+        return irChainMismatch(binding, reason)
+    end
+
+    log.info(string.format(
+        "SPELLFORGE_IR_CHAIN_RUNTIME_PLANNED recipe_id=%s cast_id=%s chain_id=%s source_slot_id=%s payload_count=%s hop_index=%s job_count=%s branch_kind=%s",
+        tostring(binding.recipe_id),
+        tostring(binding.cast_id),
+        tostring(binding.chain_id),
+        tostring(binding.source_slot_id),
+        tostring(fanout_count),
+        tostring(next_hop),
+        tostring(job_plan.planned_job_count),
+        tostring(job_plan.planned_jobs and job_plan.planned_jobs[1] and job_plan.planned_jobs[1].branch_kind or nil)
+    ))
+    return {
+        ok = true,
+        continuation_plan = continuation_plan,
+        job_plan = job_plan,
+        event = event,
     }
 end
 
@@ -1534,6 +1718,8 @@ function live_chain.handleResolvedHit(route, opts)
     }
     copyBounceContinuationScope(route, job_input)
     copyBounceContinuationScope(route, job_input.payload)
+    copyPierceContinuationScope(route, job_input)
+    copyPierceContinuationScope(route, job_input.payload)
 
     local modifier_kind = binding.payload_modifier_kind
     if modifier_kind == "speed_plus" then
@@ -1603,6 +1789,21 @@ function live_chain.handleResolvedHit(route, opts)
         probe_virtual_fanout_after = nil
     end
 
+    local ir_runtime = buildIrChainRuntimePlan(
+        binding,
+        route,
+        options,
+        previous_hop,
+        next_hop,
+        fanout_count,
+        continuation_group_id,
+        branch_scope
+    )
+    if ir_runtime and ir_runtime.ok ~= true then
+        ir_runtime = nil
+    end
+    local ir_runtime_used = false
+
     if fanout_count > 1 then
         runtime_stats.inc("chain_multicast_hops")
         runtime_stats.inc("branch_observability_chain_multicast_branches")
@@ -1623,6 +1824,15 @@ function live_chain.handleResolvedHit(route, opts)
 
     for fanout_index = 1, fanout_count do
         local job_to_enqueue = fanout_index == 1 and job_input or cloneJobInput(job_input)
+        local planned_job = ir_runtime
+            and ir_runtime.job_plan
+            and ir_runtime.job_plan.planned_jobs
+            and ir_runtime.job_plan.planned_jobs[fanout_index]
+            or nil
+        if planned_job then
+            job_to_enqueue = mergeIrChainPlannedJob(planned_job, job_to_enqueue)
+            ir_runtime_used = true
+        end
         local branch_id = fanout_count > 1
             and string.format("%s:f%s", tostring(branch_parent_id), tostring(fanout_index))
             or branch_parent_id
@@ -1720,6 +1930,23 @@ function live_chain.handleResolvedHit(route, opts)
                 tostring(enqueued_job_id)
             ))
         end
+    end
+    if ir_runtime_used then
+        runtime_stats.inc("ir_chain_runtime_enqueued")
+        runtime_stats.inc("ir_chain_runtime_jobs_planned", #job_ids)
+        runtime_stats.inc("ir_chain_runtime_jobs_enqueued", #real_job_ids)
+        log.info(string.format(
+            "SPELLFORGE_IR_CHAIN_RUNTIME_ENQUEUED recipe_id=%s cast_id=%s chain_id=%s source_slot_id=%s payload_count=%s hop_index=%s first_job_id=%s branch_kind=%s virtual_job_count=%s",
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(binding.chain_id),
+            tostring(binding.source_slot_id),
+            tostring(#job_ids),
+            tostring(next_hop),
+            tostring(job_ids[1]),
+            tostring(fanout_count > 1 and "chain_multicast" or "chain"),
+            tostring(#job_ids - #real_job_ids)
+        ))
     end
     if virtualized_count > 0 then
         log.info(string.format(
@@ -1900,6 +2127,9 @@ function live_chain.handleResolvedHit(route, opts)
         resolved = resolved,
         tick_result = tick_result,
         tick_results = tick_results,
+        ir_chain_runtime = ir_runtime_used == true,
+        ir_chain_runtime_job_count = ir_runtime_used and #job_ids or 0,
+        ir_chain_runtime_real_job_count = ir_runtime_used and #real_job_ids or 0,
     }
 end
 

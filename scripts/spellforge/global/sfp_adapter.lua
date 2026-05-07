@@ -26,6 +26,8 @@ local BETA3_LAUNCH_FIELDS = {
     "bounceEnabled",
     "bounceMax",
     "bouncePower",
+    "piercing",
+    "pierceLimit",
     "detonateOnActorHit",
     "impactImpulse",
     "areaVfxRecId",
@@ -179,6 +181,12 @@ local function noteBeta3ForwardCounters(forwarded)
     if forwarded.muteCastGlow then
         runtime_stats.inc("sfp_adapter_mute_cast_glow_forwarded")
     end
+    if forwarded.piercing then
+        runtime_stats.inc("sfp_adapter_piercing_forwarded")
+    end
+    if forwarded.pierceLimit then
+        runtime_stats.inc("sfp_adapter_pierce_limit_forwarded")
+    end
 end
 
 local function normalizeId(value)
@@ -288,6 +296,7 @@ function sfp_adapter.capabilities()
         has_setSpellPaused = hasFunction("setSpellPaused"),
         has_cancelSpell = hasFunction("cancelSpell"),
         has_setSpellBounce = hasFunction("setSpellBounce"),
+        has_setSpellPiercing = hasFunction("setSpellPiercing"),
         has_setSpellDetonateOnActor = hasFunction("setSpellDetonateOnActor"),
         has_detonateSpellAtPos = hasFunction("detonateSpellAtPos"),
         has_applySpellToActor = hasFunction("applySpellToActor"),
@@ -397,6 +406,10 @@ end
 
 function sfp_adapter.setSpellBounce(projectile_id, enabled, max, power)
     return callFunction("setSpellBounce", projectile_id, enabled, max, power)
+end
+
+function sfp_adapter.setSpellPiercing(projectile_id, enabled, newLimit)
+    return callFunction("setSpellPiercing", projectile_id, enabled, newLimit)
 end
 
 function sfp_adapter.setSpellDetonateOnActor(projectile_id, enabled)

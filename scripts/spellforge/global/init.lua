@@ -209,6 +209,7 @@ return {
         [events.CHAIN_LOS_RESULT] = live_chain.onLosResult,
         MagExp_OnMagicHit = executor.onMagicHit,
         MagExp_OnProjectileBounce = executor.onProjectileBounce,
+        MagExp_OnProjectilePierce = executor.onProjectilePierce,
         MagExp_SpellState = onSfpSpellState,
     },
     engineHandlers = {

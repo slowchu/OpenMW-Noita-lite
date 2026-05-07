@@ -10,6 +10,7 @@ local dev_runtime = require("scripts.spellforge.global.dev_runtime")
 local limits = require("scripts.spellforge.shared.limits")
 local live_bounce = require("scripts.spellforge.global.live_bounce")
 local live_chain = require("scripts.spellforge.global.live_chain")
+local live_pierce = require("scripts.spellforge.global.live_pierce")
 local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
 local live_soft_homing = require("scripts.spellforge.global.live_soft_homing")
 local live_timer = require("scripts.spellforge.global.live_timer")
@@ -726,6 +727,13 @@ function executor.onProjectileBounce(payload)
     live_bounce.handleBouncePayload(payload)
 end
 
+function executor.onProjectilePierce(payload)
+    if not dev.liveSimpleDispatchEnabled() then
+        return
+    end
+    live_pierce.handlePiercePayload(payload)
+end
+
 local function buildActiveSpellIdSet(actor)
     local ids = {}
     for _, active_spell in pairs(types.Actor.activeSpells(actor)) do
@@ -831,6 +839,7 @@ function executor.onRuntimeStatsRequest(payload)
         live_trigger.clearForTests()
         live_chain.clearForTests()
         live_bounce.clearForTests()
+        live_pierce.clearForTests()
         live_soft_homing.clearForTests()
     end
     sender:sendEvent(events.RUNTIME_STATS_RESULT, {

@@ -62,20 +62,24 @@ local function applyPostLaunchPhysics(launch_data, launch_result, capabilities)
     local has_bounce = launch_data.bounceEnabled ~= nil
         or launch_data.bounceMax ~= nil
         or launch_data.bouncePower ~= nil
+    local has_pierce = launch_data.piercing ~= nil
+        or launch_data.pierceLimit ~= nil
     local has_actor_toggle = launch_data.detonateOnActorHit ~= nil
     if projectile_id == nil then
-        if has_bounce or has_actor_toggle then
+        if has_bounce or has_pierce or has_actor_toggle then
             runtime_stats.inc("sfp_post_launch_physics_projectile_missing")
             out.projectile_missing = true
         end
         return out
     end
 
-    if (has_bounce or has_actor_toggle) and capabilities and capabilities.has_setSpellPhysics then
+    if (has_bounce or has_pierce or has_actor_toggle) and capabilities and capabilities.has_setSpellPhysics then
         local physics = {}
         copyIfPresent(physics, "bounceEnabled", launch_data.bounceEnabled)
         copyIfPresent(physics, "bounceMax", launch_data.bounceMax)
         copyIfPresent(physics, "bouncePower", launch_data.bouncePower)
+        copyIfPresent(physics, "piercing", launch_data.piercing)
+        copyIfPresent(physics, "pierceLimit", launch_data.pierceLimit)
         copyIfPresent(physics, "detonateOnActorHit", launch_data.detonateOnActorHit)
         local result = sfp_adapter.setSpellPhysics(projectile_id, physics)
         if has_bounce then
@@ -98,6 +102,17 @@ local function applyPostLaunchPhysics(launch_data, launch_result, capabilities)
                 runtime_stats.inc("sfp_post_launch_actor_toggle_ok")
             else
                 runtime_stats.inc("sfp_post_launch_actor_toggle_failed")
+            end
+        end
+        if has_pierce then
+            out.pierce_attempted = true
+            runtime_stats.inc("sfp_post_launch_pierce_attempts")
+            out.pierce_ok = result.ok == true
+            out.pierce_error = result.error
+            if out.pierce_ok then
+                runtime_stats.inc("sfp_post_launch_pierce_ok")
+            else
+                runtime_stats.inc("sfp_post_launch_pierce_failed")
             end
         end
         return out
@@ -143,6 +158,29 @@ local function applyPostLaunchPhysics(launch_data, launch_result, capabilities)
             out.detonate_on_actor_ok = false
             out.detonate_on_actor_error = "I.MagExp.setSpellDetonateOnActor missing"
             runtime_stats.inc("sfp_post_launch_actor_toggle_failed")
+        end
+    end
+
+    if has_pierce then
+        out.pierce_attempted = true
+        runtime_stats.inc("sfp_post_launch_pierce_attempts")
+        if capabilities and capabilities.has_setSpellPiercing then
+            local result = sfp_adapter.setSpellPiercing(
+                projectile_id,
+                launch_data.piercing == true,
+                launch_data.pierceLimit
+            )
+            out.pierce_ok = result.ok == true
+            out.pierce_error = result.error
+            if out.pierce_ok then
+                runtime_stats.inc("sfp_post_launch_pierce_ok")
+            else
+                runtime_stats.inc("sfp_post_launch_pierce_failed")
+            end
+        else
+            out.pierce_ok = false
+            out.pierce_error = "I.MagExp.setSpellPiercing missing"
+            runtime_stats.inc("sfp_post_launch_pierce_failed")
         end
     end
 
@@ -254,6 +292,12 @@ function runtime_launch.launchHelper(input)
         bounce_trigger_payload_slot_id = launch.bounce_trigger_payload_slot_id,
         bounce_manual_detonation = launch.bounce_manual_detonation,
         bounce_final = launch.bounce_final,
+        pierce_runtime = launch.pierce_runtime,
+        pierce_role = launch.pierce_role,
+        pierce_id = launch.pierce_id,
+        pierce_count = launch.pierce_count,
+        pierce_limit = launch.pierce_limit,
+        pierce_trigger_payload_slot_id = launch.pierce_trigger_payload_slot_id,
         payload_modifier_kind = launch.payload_modifier_kind,
         speed_plus = launch.speed_plus,
         speed_plus_mode = launch.speed_plus_mode,
@@ -334,6 +378,8 @@ function runtime_launch.launchHelper(input)
     copyIfPresent(launch_data, "bounceEnabled", firstNonNil(launch.bounceEnabled, launch.bounce_enabled))
     copyIfPresent(launch_data, "bounceMax", firstNonNil(launch.bounceMax, launch.bounce_max))
     copyIfPresent(launch_data, "bouncePower", firstNonNil(launch.bouncePower, launch.bounce_power))
+    copyIfPresent(launch_data, "piercing", firstNonNil(launch.piercing, launch.piercing_enabled))
+    copyIfPresent(launch_data, "pierceLimit", firstNonNil(launch.pierceLimit, launch.pierce_limit))
     copyIfPresent(launch_data, "detonateOnActorHit", firstNonNil(launch.detonateOnActorHit, launch.detonate_on_actor_hit))
     copyIfPresent(launch_data, "impactImpulse", firstNonNil(launch.impactImpulse, launch.impact_impulse))
     copyIfPresent(launch_data, "spellType", firstNonNil(launch.spellType, launch.spell_type))
@@ -480,6 +526,9 @@ function runtime_launch.launchHelper(input)
         post_launch_bounce_attempted = post_launch_physics.bounce_attempted == true,
         post_launch_bounce_ok = post_launch_physics.bounce_ok == true,
         post_launch_bounce_error = post_launch_physics.bounce_error,
+        post_launch_pierce_attempted = post_launch_physics.pierce_attempted == true,
+        post_launch_pierce_ok = post_launch_physics.pierce_ok == true,
+        post_launch_pierce_error = post_launch_physics.pierce_error,
         post_launch_detonate_on_actor_attempted = post_launch_physics.detonate_on_actor_attempted == true,
         post_launch_detonate_on_actor_ok = post_launch_physics.detonate_on_actor_ok == true,
         post_launch_detonate_on_actor_error = post_launch_physics.detonate_on_actor_error,
@@ -492,6 +541,8 @@ function runtime_launch.launchHelper(input)
         bounceEnabled = launch_data.bounceEnabled,
         bounceMax = launch_data.bounceMax,
         bouncePower = launch_data.bouncePower,
+        piercing = launch_data.piercing,
+        pierceLimit = launch_data.pierceLimit,
         detonateOnActorHit = launch_data.detonateOnActorHit,
         impactImpulse = launch_data.impactImpulse,
         areaVfxRecId = launch_data.areaVfxRecId,
@@ -642,6 +693,14 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
         bounce_trigger_payload_slot_id = firstNonNil(payload.bounce_trigger_payload_slot_id, job.bounce_trigger_payload_slot_id),
         bounce_manual_detonation = firstNonNil(payload.bounce_manual_detonation, job.bounce_manual_detonation),
         bounce_final = firstNonNil(payload.bounce_final, job.bounce_final),
+        piercing = firstNonNil(job.piercing, job.piercing_enabled, payload.piercing, payload.piercing_enabled),
+        pierceLimit = firstNonNil(job.pierceLimit, job.pierce_limit, payload.pierceLimit, payload.pierce_limit),
+        pierce_runtime = firstNonNil(payload.pierce_runtime, job.pierce_runtime),
+        pierce_role = firstNonNil(payload.pierce_role, job.pierce_role),
+        pierce_id = firstNonNil(payload.pierce_id, job.pierce_id),
+        pierce_count = firstNonNil(payload.pierce_count, job.pierce_count),
+        pierce_limit = firstNonNil(payload.pierce_limit, job.pierce_limit),
+        pierce_trigger_payload_slot_id = firstNonNil(payload.pierce_trigger_payload_slot_id, job.pierce_trigger_payload_slot_id),
         payload_modifier_kind = payload.payload_modifier_kind or job.payload_modifier_kind,
         speed = firstNonNil(payload.speed, job.speed),
         maxSpeed = firstNonNil(payload.maxSpeed, job.maxSpeed),
@@ -737,6 +796,8 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
     job.bounceEnabled = firstNonNil(result.bounceEnabled, payload.bounceEnabled, payload.bounce_enabled, job.bounceEnabled, job.bounce_enabled)
     job.bounceMax = firstNonNil(result.bounceMax, payload.bounceMax, payload.bounce_max, job.bounceMax, job.bounce_max)
     job.bouncePower = firstNonNil(result.bouncePower, payload.bouncePower, payload.bounce_power, job.bouncePower, job.bounce_power)
+    job.piercing = firstNonNil(job.piercing, job.piercing_enabled, payload.piercing, payload.piercing_enabled, result.piercing)
+    job.pierceLimit = firstNonNil(job.pierceLimit, job.pierce_limit, payload.pierceLimit, payload.pierce_limit, result.pierceLimit)
     job.detonateOnActorHit = firstNonNil(result.detonateOnActorHit, payload.detonateOnActorHit, payload.detonate_on_actor_hit, job.detonateOnActorHit, job.detonate_on_actor_hit)
     job.impactImpulse = firstNonNil(result.impactImpulse, payload.impactImpulse, payload.impact_impulse, job.impactImpulse, job.impact_impulse)
     job.areaVfxRecId = firstNonNil(result.areaVfxRecId, payload.areaVfxRecId, payload.area_vfx_rec_id, job.areaVfxRecId, job.area_vfx_rec_id)
@@ -760,6 +821,9 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
     job.post_launch_bounce_attempted = result.post_launch_bounce_attempted == true
     job.post_launch_bounce_ok = result.post_launch_bounce_ok == true
     job.post_launch_bounce_error = result.post_launch_bounce_error
+    job.post_launch_pierce_attempted = result.post_launch_pierce_attempted == true
+    job.post_launch_pierce_ok = result.post_launch_pierce_ok == true
+    job.post_launch_pierce_error = result.post_launch_pierce_error
     job.post_launch_detonate_on_actor_attempted = result.post_launch_detonate_on_actor_attempted == true
     job.post_launch_detonate_on_actor_ok = result.post_launch_detonate_on_actor_ok == true
     job.post_launch_detonate_on_actor_error = result.post_launch_detonate_on_actor_error
@@ -796,6 +860,12 @@ function runtime_launch.runHelperLaunchJob(job, job_kind, opts)
     job.bounce_trigger_payload_slot_id = firstNonNil(payload.bounce_trigger_payload_slot_id, job.bounce_trigger_payload_slot_id)
     job.bounce_manual_detonation = firstNonNil(payload.bounce_manual_detonation, job.bounce_manual_detonation)
     job.bounce_final = firstNonNil(payload.bounce_final, job.bounce_final)
+    job.pierce_runtime = firstNonNil(payload.pierce_runtime, job.pierce_runtime)
+    job.pierce_role = firstNonNil(payload.pierce_role, job.pierce_role)
+    job.pierce_id = firstNonNil(payload.pierce_id, job.pierce_id)
+    job.pierce_count = firstNonNil(payload.pierce_count, job.pierce_count)
+    job.pierce_limit = firstNonNil(payload.pierce_limit, job.pierce_limit)
+    job.pierce_trigger_payload_slot_id = firstNonNil(payload.pierce_trigger_payload_slot_id, job.pierce_trigger_payload_slot_id)
     job.payload_modifier_kind = payload.payload_modifier_kind or job.payload_modifier_kind
     job.speed_plus = payload.speed_plus or job.speed_plus
     job.speed_plus_mode = payload.speed_plus_mode or job.speed_plus_mode

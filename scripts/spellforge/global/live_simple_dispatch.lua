@@ -14,6 +14,7 @@ local chaos_budget = require("scripts.spellforge.global.chaos_budget")
 local live_bounce = require("scripts.spellforge.global.live_bounce")
 local live_chain = require("scripts.spellforge.global.live_chain")
 local live_homing = require("scripts.spellforge.global.live_homing")
+local live_pierce = require("scripts.spellforge.global.live_pierce")
 local live_size_plus = require("scripts.spellforge.global.live_size_plus")
 local live_speed_plus = require("scripts.spellforge.global.live_speed_plus")
 local live_timer = require("scripts.spellforge.global.live_timer")
@@ -25,260 +26,127 @@ local sfp_userdata = require("scripts.spellforge.shared.sfp_userdata")
 local live_simple_dispatch = {}
 local next_live_cast_index = 1
 local seen_cast_ids = {}
-local CHAOS_HIGH_FANOUT_COUNT = limits.MAX_PAYLOAD_FANOUT_CHAOS
-local CHAOS_OVER_CAP_FANOUT_COUNT = limits.MAX_PAYLOAD_FANOUT_CHAOS + 1
-local CHAOS_CHAIN_MULTICAST_FANOUT_COUNT = limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS
-
-local SIMPLE_FIRE_DAMAGE_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local MULTICAST_X3_FIRE_DAMAGE_TARGET = {
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local MULTICAST_X16_FIRE_DAMAGE_TARGET = {
-    { id = "spellforge_multicast", params = { count = CHAOS_HIGH_FANOUT_COUNT } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local MULTICAST_OVER_CHAOS_CAP_TARGET = {
-    { id = "spellforge_multicast", params = { count = CHAOS_OVER_CAP_FANOUT_COUNT } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local SPREAD_MULTICAST_X3_FIRE_DAMAGE_TARGET = {
-    { id = "spellforge_spread", params = { preset = 2 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local BURST_MULTICAST_X3_FIRE_DAMAGE_TARGET = {
-    { id = "spellforge_burst", params = { count = 5 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_FIRE_FROST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local BOUNCE_FIRE_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local BOUNCE_TRIGGER_FIRE_FROST_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_TRIGGER_CHAIN_FROST_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_TRIGGER_NESTED_TRIGGER_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "shockdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_TRIGGER_MULTICAST_FROST_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_burst", params = { count = 5 } },
-    { id = "spellforge_multicast", params = { count = 5 } },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_TRIGGER_SPREAD_MULTICAST_FROST_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_spread", params = { preset = 2 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_OVER_CAP_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = limits.MAX_BOUNCE_COUNT + 1 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_MULTICAST_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local BOUNCE_TIMER_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_CHAIN_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "frostdamage", range = 2, area = 10, duration = 1, magnitudeMin = 20, magnitudeMax = 20 },
-}
-
-local BOUNCE_SPEED_PLUS_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local BOUNCE_SIZE_PLUS_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local BOUNCE_HOMING_TARGET = {
-    { id = "spellforge_bounce", params = { bounces = 3 } },
-    { id = "spellforge_homing" },
-    { id = "firedamage", range = 2, area = 10, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
+local recipes = require("scripts.spellforge.global.live_dispatch_recipes")
 local function applyBounceProbeMode(mode, opts)
     if mode == "bounce_disabled" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_FIRE_FROST_TARGET }
         opts.force_bounce_disabled = true
         opts.force_trigger_enabled = true
     elseif mode == "bounce_source_only_dry_run" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_FIRE_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_FIRE_TARGET }
         opts.force_bounce_enabled = true
     elseif mode == "bounce_source_only_launch" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_FIRE_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_FIRE_TARGET }
         opts.force_bounce_enabled = true
         opts.dry_run = false
     elseif mode == "bounce_dry_run" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_FIRE_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
     elseif mode == "bounce_trigger_simple_post_bounce" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_FIRE_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.register_bounce_probe_binding = true
     elseif mode == "bounce_launch" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_FIRE_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_FIRE_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.dry_run = false
     elseif mode == "bounce_chain_payload_disabled" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_chain_runtime_disabled = true
     elseif mode == "bounce_chain_payload_dry_run" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_chain_runtime_enabled = true
     elseif mode == "bounce_chain_payload_no_target" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_chain_runtime_enabled = true
         opts.register_bounce_probe_binding = true
     elseif mode == "bounce_chain_payload_mock_handoff" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_chain_runtime_enabled = true
         opts.register_bounce_probe_binding = true
     elseif mode == "bounce_chain_payload_launch" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_CHAIN_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_chain_runtime_enabled = true
         opts.dry_run = false
     elseif mode == "bounce_trigger_multicast_disabled" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_disabled = true
     elseif mode == "bounce_trigger_multicast_dry_run" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
     elseif mode == "bounce_trigger_multicast_post_bounce" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_MULTICAST_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.register_bounce_probe_binding = true
+    elseif mode == "bounce_trigger_burst_post_bounce" then
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
+        opts.force_bounce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.force_payload_pattern_enabled = true
+        opts.register_bounce_probe_binding = true
     elseif mode == "bounce_trigger_pattern_disabled" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_disabled = true
     elseif mode == "bounce_trigger_burst_dry_run" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_enabled = true
     elseif mode == "bounce_trigger_spread_dry_run" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_SPREAD_MULTICAST_FROST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_SPREAD_MULTICAST_FROST_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_enabled = true
     elseif mode == "bounce_over_cap" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_OVER_CAP_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_OVER_CAP_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
     elseif mode == "bounce_fanout_deferred" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_MULTICAST_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_MULTICAST_TARGET }
         opts.force_bounce_enabled = true
     elseif mode == "bounce_timer_deferred" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TIMER_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TIMER_TARGET }
         opts.force_bounce_enabled = true
     elseif mode == "bounce_chain_deferred" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_CHAIN_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_CHAIN_TARGET }
         opts.force_bounce_enabled = true
     elseif mode == "bounce_nested_payload_deferred" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_TRIGGER_NESTED_TRIGGER_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_TRIGGER_NESTED_TRIGGER_TARGET }
         opts.force_bounce_enabled = true
         opts.force_trigger_enabled = true
     elseif mode == "bounce_speed_plus_deferred" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_SPEED_PLUS_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_SPEED_PLUS_TARGET }
         opts.force_bounce_enabled = true
     elseif mode == "bounce_size_plus_deferred" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_SIZE_PLUS_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_SIZE_PLUS_TARGET }
         opts.force_bounce_enabled = true
     elseif mode == "bounce_homing_deferred" then
-        opts._spellforge_probe_root = { real_effects = BOUNCE_HOMING_TARGET }
+        opts._spellforge_probe_root = { real_effects = recipes.BOUNCE_HOMING_TARGET }
         opts.force_bounce_enabled = true
         opts.force_homing_enabled = true
     else
@@ -287,510 +155,100 @@ local function applyBounceProbeMode(mode, opts)
     return true
 end
 
-local TIMER_FIRE_FROST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local SPEED_PLUS_FIRE_DAMAGE_TARGET = {
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local SIZE_PLUS_FIRE_DAMAGE_TARGET = {
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local VFX_METADATA_AUDIT_TARGET = {
-    {
-        id = "firedamage",
-        range = 2,
-        area = 5,
-        duration = 1,
-        magnitudeMin = 2,
-        magnitudeMax = 20,
-        areaVfxRecId = "spellforge_test_area_static",
-        areaVfxScale = 1.25,
-        vfxRecId = "spellforge_test_bolt_vfx",
-        boltModel = "meshes/spellforge/test_bolt.nif",
-        hitModel = "meshes/spellforge/test_impact.nif",
-    },
-}
-
-local VFX_METADATA_MISSING_AREA_TARGET = {
-    {
-        id = "firedamage",
-        range = 2,
-        area = 5,
-        duration = 1,
-        magnitudeMin = 2,
-        magnitudeMax = 20,
-        vfxRecId = "spellforge_test_bolt_vfx",
-    },
-}
-
-local NON_QUALIFYING_CHAIN_FIRE_DAMAGE_TARGET = {
-    { id = "spellforge_chain", params = { hops = 1 } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_FIRE_FROST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SPEED_PLUS_FROST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SIZE_PLUS_FROST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_MULTICAST_X8_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_multicast", params = { count = CHAOS_CHAIN_MULTICAST_FANOUT_COUNT } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SPEED_PLUS_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SIZE_PLUS_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_BURST_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_burst", params = { count = 3 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SPEED_PLUS_BURST_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "spellforge_burst", params = { count = 3 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SIZE_PLUS_BURST_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "spellforge_burst", params = { count = 3 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_TRIGGER_PAYLOAD_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SPEED_PLUS_TRIGGER_PAYLOAD_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SIZE_PLUS_TIMER_PAYLOAD_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_CHAIN_FROST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_CHAIN_SPEED_PLUS_FROST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_CHAIN_SIZE_PLUS_FROST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_CHAIN_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_CHAIN_MULTICAST_X8_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_multicast", params = { count = CHAOS_CHAIN_MULTICAST_FANOUT_COUNT } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_CHAIN_PAYLOAD_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_TRIGGER_CHAIN_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_CHAIN_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SPEED_PLUS_CHAIN_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_SIZE_PLUS_CHAIN_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "spellforge_chain", params = { hops = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_ZERO_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = 0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_NEGATIVE_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = -1 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local CHAIN_OVER_CAP_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_chain", params = { hops = limits.MAX_CHAIN_HOPS + 1 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_PAYLOAD_MULTICAST_X3_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_PAYLOAD_MULTICAST_X16_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_multicast", params = { count = CHAOS_HIGH_FANOUT_COUNT } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_PAYLOAD_MULTICAST_X3_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_PAYLOAD_MULTICAST_X16_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_multicast", params = { count = CHAOS_HIGH_FANOUT_COUNT } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_PAYLOAD_BURST_MULTICAST_X5_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_burst", params = { count = 5 } },
-    { id = "spellforge_multicast", params = { count = 5 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_PAYLOAD_SPREAD_MULTICAST_X3_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_spread", params = { preset = 2 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_PAYLOAD_SPREAD_MULTICAST_X16_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_spread", params = { preset = 2 } },
-    { id = "spellforge_multicast", params = { count = CHAOS_HIGH_FANOUT_COUNT } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_PAYLOAD_BURST_MULTICAST_X5_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_burst", params = { count = 5 } },
-    { id = "spellforge_multicast", params = { count = 5 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_PAYLOAD_BURST_MULTICAST_X16_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_burst", params = { count = 8 } },
-    { id = "spellforge_multicast", params = { count = CHAOS_HIGH_FANOUT_COUNT } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_PAYLOAD_SPREAD_MULTICAST_X3_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_spread", params = { preset = 2 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_INSIDE_TIMER_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_INSIDE_TRIGGER_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_INSIDE_TIMER_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_INSIDE_TRIGGER_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_TRIGGER_NESTED_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_TIMER_NESTED_MULTICAST_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_TIMER_NESTED_MULTICAST_X16_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_multicast", params = { count = CHAOS_HIGH_FANOUT_COUNT } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_TIMER_NESTED_BURST_MULTICAST_X5_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_burst", params = { count = 5 } },
-    { id = "spellforge_multicast", params = { count = 5 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_TRIGGER_NESTED_SPREAD_MULTICAST_X3_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_spread", params = { preset = 2 } },
-    { id = "spellforge_multicast", params = { count = 3 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_TRIGGER_NESTED_SPREAD_MULTICAST_X16_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_spread", params = { preset = 2 } },
-    { id = "spellforge_multicast", params = { count = CHAOS_HIGH_FANOUT_COUNT } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TRIGGER_TIMER_NESTED_MULTICAST_OVER_CHAOS_CAP_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_multicast", params = { count = CHAOS_OVER_CAP_FANOUT_COUNT } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_TRIGGER_NESTED_MULTICAST_OVER_CAP_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "spellforge_multicast", params = { count = 9 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_TRIGGER_TIMER_DEPTH_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_trigger" },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_PAYLOAD_SPEED_PLUS_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_speed_plus", params = { percent = 50 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local TIMER_PAYLOAD_SIZE_PLUS_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "spellforge_size_plus", params = { percent = 100 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local NESTED_DEPTH_REJECTION_TARGET = {
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "frostdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "shockdamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-    { id = "spellforge_timer", params = { seconds = 1.0 } },
-    { id = "firedamage", range = 2, area = 5, duration = 1, magnitudeMin = 2, magnitudeMax = 20 },
-}
-
-local NESTED_AUDIT_TARGETS = {
-    timer_simple = TIMER_FIRE_FROST_TARGET,
-    trigger_simple = TRIGGER_FIRE_FROST_TARGET,
-    timer_payload_multicast = TIMER_PAYLOAD_MULTICAST_X3_TARGET,
-    trigger_payload_multicast = TRIGGER_PAYLOAD_MULTICAST_X3_TARGET,
-    timer_payload_burst_multicast = TIMER_PAYLOAD_BURST_MULTICAST_X5_TARGET,
-    trigger_inside_timer = TRIGGER_INSIDE_TIMER_TARGET,
-    timer_inside_trigger = TIMER_INSIDE_TRIGGER_TARGET,
-    timer_payload_speed_plus = TIMER_PAYLOAD_SPEED_PLUS_TARGET,
-    timer_payload_size_plus = TIMER_PAYLOAD_SIZE_PLUS_TARGET,
-    chain = NON_QUALIFYING_CHAIN_FIRE_DAMAGE_TARGET,
-    depth_rejection = NESTED_DEPTH_REJECTION_TARGET,
-}
-
-local CHAIN_AUDIT_TARGETS = {
-    simple = CHAIN_FIRE_FROST_TARGET,
-    direct_chain_3 = CHAIN_FIRE_FROST_TARGET,
-    trigger_chain_3 = TRIGGER_CHAIN_FROST_TARGET,
-    hop_bounce = CHAIN_FIRE_FROST_TARGET,
-    hop_no_target = CHAIN_FIRE_FROST_TARGET,
-    multicast = CHAIN_MULTICAST_TARGET,
-    pattern = CHAIN_BURST_MULTICAST_TARGET,
-    trigger_timer = CHAIN_TRIGGER_PAYLOAD_TARGET,
-    trigger_chain_multicast = TRIGGER_CHAIN_MULTICAST_TARGET,
-    nested_payload = TRIGGER_CHAIN_PAYLOAD_TARGET,
-    nested_trigger_timer = TIMER_TRIGGER_CHAIN_TARGET,
-    recursion = CHAIN_CHAIN_TARGET,
-    invalid_zero = CHAIN_ZERO_TARGET,
-    invalid_negative = CHAIN_NEGATIVE_TARGET,
-    over_cap = CHAIN_OVER_CAP_TARGET,
-}
-
-local PRESENTATION_METADATA_FIELDS = {
-    "areaVfxRecId",
-    "areaVfxScale",
-    "vfxRecId",
-    "boltModel",
-    "hitModel",
-}
+local function applyPierceProbeMode(mode, opts)
+    if mode == "pierce_disabled" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_FIRE_TARGET }
+        opts.force_pierce_disabled = true
+    elseif mode == "pierce_source_only_dry_run" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_FIRE_TARGET }
+        opts.force_pierce_enabled = true
+    elseif mode == "pierce_source_only_launch" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_FIRE_TARGET }
+        opts.force_pierce_enabled = true
+        opts.dry_run = false
+    elseif mode == "pierce_trigger_simple_event" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_FIRE_FROST_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.register_pierce_probe_binding = true
+    elseif mode == "pierce_trigger_multicast_event" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_MULTICAST_FROST_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.register_pierce_probe_binding = true
+    elseif mode == "pierce_trigger_pattern_event" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.force_payload_pattern_enabled = true
+        opts.register_pierce_probe_binding = true
+    elseif mode == "pierce_trigger_spread_event" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_SPREAD_MULTICAST_FROST_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.force_payload_pattern_enabled = true
+        opts.register_pierce_probe_binding = true
+    elseif mode == "pierce_trigger_chain_event" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_chain_runtime_enabled = true
+        opts.register_pierce_probe_binding = true
+    elseif mode == "pierce_trigger_multicast_disabled" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_MULTICAST_FROST_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_disabled = true
+    elseif mode == "pierce_trigger_pattern_disabled" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_BURST_MULTICAST_FROST_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_payload_multicast_enabled = true
+        opts.force_payload_pattern_disabled = true
+    elseif mode == "pierce_chain_payload_disabled" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_CHAIN_FROST_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+        opts.force_chain_runtime_disabled = true
+    elseif mode == "pierce_timer_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TIMER_TARGET }
+        opts.force_pierce_enabled = true
+    elseif mode == "pierce_bounce_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_BOUNCE_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_bounce_enabled = true
+    elseif mode == "pierce_homing_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_HOMING_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_homing_enabled = true
+    elseif mode == "pierce_speed_plus_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_SPEED_PLUS_TARGET }
+        opts.force_pierce_enabled = true
+    elseif mode == "pierce_size_plus_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_SIZE_PLUS_TARGET }
+        opts.force_pierce_enabled = true
+    elseif mode == "pierce_chain_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_CHAIN_TARGET }
+        opts.force_pierce_enabled = true
+    elseif mode == "pierce_fanout_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_MULTICAST_TARGET }
+        opts.force_pierce_enabled = true
+    elseif mode == "pierce_nested_payload_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_NESTED_TRIGGER_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+    elseif mode == "pierce_recursion_deferred" then
+        opts._spellforge_probe_root = { real_effects = recipes.PIERCE_TRIGGER_PIERCE_PAYLOAD_TARGET }
+        opts.force_pierce_enabled = true
+        opts.force_trigger_enabled = true
+    else
+        return false
+    end
+    return true
+end
 
 local function cloneParams(params)
     local out = {}
@@ -821,7 +279,7 @@ local function cloneEffect(effect)
         magnitudeMax = effect.magnitudeMax,
         params = cloneParams(effect.params),
     }
-    for _, field in ipairs(PRESENTATION_METADATA_FIELDS) do
+    for _, field in ipairs(recipes.PRESENTATION_METADATA_FIELDS) do
         if effect[field] ~= nil then
             out[field] = effect[field]
         end
@@ -1068,8 +526,8 @@ local function timerDetonationAuditProbe(payload)
 end
 
 local function vfxMetadataAuditProbe(payload)
-    local spec, spec_err = firstHelperSpecForAudit(VFX_METADATA_AUDIT_TARGET)
-    local missing_area_spec, missing_err = firstHelperSpecForAudit(VFX_METADATA_MISSING_AREA_TARGET)
+    local spec, spec_err = firstHelperSpecForAudit(recipes.VFX_METADATA_AUDIT_TARGET)
+    local missing_area_spec, missing_err = firstHelperSpecForAudit(recipes.VFX_METADATA_MISSING_AREA_TARGET)
     local presentation = spec and spec.presentation or nil
     local missing_presentation = missing_area_spec and missing_area_spec.presentation or nil
     local launch_fields = sfp_adapter.forwardedLaunchFields({
@@ -1179,7 +637,7 @@ end
 
 local function nestedPayloadAuditProbe(payload)
     local audit_case = payload and payload.audit_case or "timer_simple"
-    local effects = NESTED_AUDIT_TARGETS[audit_case]
+    local effects = recipes.NESTED_AUDIT_TARGETS[audit_case]
     if type(effects) ~= "table" then
         return {
             request_id = payload and payload.request_id,
@@ -1471,7 +929,7 @@ local function chainTargetingProbe(payload)
     end
 
     if chain_case == "hop_bounce" or chain_case == "hop_no_target" then
-        local effects = CHAIN_AUDIT_TARGETS[chain_case] or CHAIN_FIRE_FROST_TARGET
+        local effects = recipes.CHAIN_AUDIT_TARGETS[chain_case] or recipes.CHAIN_FIRE_FROST_TARGET
         local compiled = plan_cache.compileOrGet(cloneEffects(effects))
         if not compiled.ok then
             runtime_stats.inc("chain_hop_dry_run_attempts")
@@ -1516,7 +974,7 @@ local function chainTargetingProbe(payload)
     end
 
     if chain_case == "runtime_deferred" then
-        local dispatch = safeTryDispatch(payload, { node_metadata = { { logical_id = "chain-runtime-deferred" } } }, { real_effects = CHAIN_FIRE_FROST_TARGET }, {
+        local dispatch = safeTryDispatch(payload, { node_metadata = { { logical_id = "chain-runtime-deferred" } } }, { real_effects = recipes.CHAIN_FIRE_FROST_TARGET }, {
             ignore_flag = true,
             dry_run = true,
             force_chain_runtime_disabled = true,
@@ -1538,7 +996,7 @@ local function chainTargetingProbe(payload)
         }
     end
 
-    local effects = CHAIN_AUDIT_TARGETS[chain_case] or CHAIN_FIRE_FROST_TARGET
+    local effects = recipes.CHAIN_AUDIT_TARGETS[chain_case] or recipes.CHAIN_FIRE_FROST_TARGET
     local compiled = plan_cache.compileOrGet(cloneEffects(effects))
     if not compiled.ok then
         runtime_stats.inc("chain_audit_attempts")
@@ -1634,6 +1092,9 @@ local function simulateChainRuntime(dispatch, payload, provider, opts)
         selected_target_ids = {},
         chain_payload_jobs = {},
         chain_payload_launch_count = 0,
+        ir_chain_runtime_hops = 0,
+        ir_chain_runtime_job_count = 0,
+        ir_chain_runtime_real_job_count = 0,
         completed_hops = 0,
     }
     local source_job = dispatch and dispatch.jobs and dispatch.jobs[1] or nil
@@ -1667,6 +1128,11 @@ local function simulateChainRuntime(dispatch, payload, provider, opts)
         local launch_count = tonumber(hop_result.launch_count) or 1
         result.completed_hops = result.completed_hops + 1
         result.chain_payload_launch_count = result.chain_payload_launch_count + launch_count
+        if hop_result.ir_chain_runtime == true then
+            result.ir_chain_runtime_hops = result.ir_chain_runtime_hops + 1
+            result.ir_chain_runtime_job_count = result.ir_chain_runtime_job_count + (tonumber(hop_result.ir_chain_runtime_job_count) or launch_count)
+            result.ir_chain_runtime_real_job_count = result.ir_chain_runtime_real_job_count + (tonumber(hop_result.ir_chain_runtime_real_job_count) or 0)
+        end
         result.selected_target_ids[#result.selected_target_ids + 1] = hop_result.selected_target_id
         local payload_job = hop_result.payload_job or (hop_result.jobs and hop_result.jobs[1])
         for _, job in ipairs(hop_result.jobs or { payload_job }) do
@@ -1789,7 +1255,7 @@ local function chainRuntimeProbe(payload)
         }
     end
 
-    local effects = CHAIN_FIRE_FROST_TARGET
+    local effects = recipes.CHAIN_FIRE_FROST_TARGET
     local provider = chainHopCandidates(chain_case)
     local opts = {
         ignore_flag = true,
@@ -1800,76 +1266,76 @@ local function chainRuntimeProbe(payload)
         chain_candidate_provider = provider,
     }
     if chain_case == "trigger_chain_3" then
-        effects = TRIGGER_CHAIN_FROST_TARGET
+        effects = recipes.TRIGGER_CHAIN_FROST_TARGET
         opts.force_trigger_enabled = true
     elseif chain_case == "chain_speed_plus_disabled" then
-        effects = CHAIN_SPEED_PLUS_FROST_TARGET
+        effects = recipes.CHAIN_SPEED_PLUS_FROST_TARGET
         opts.force_speed_plus_disabled = true
     elseif chain_case == "chain_size_plus_disabled" then
-        effects = CHAIN_SIZE_PLUS_FROST_TARGET
+        effects = recipes.CHAIN_SIZE_PLUS_FROST_TARGET
         opts.force_size_plus_disabled = true
     elseif chain_case == "direct_chain_speed_plus_3" then
-        effects = CHAIN_SPEED_PLUS_FROST_TARGET
+        effects = recipes.CHAIN_SPEED_PLUS_FROST_TARGET
         opts.force_speed_plus_enabled = true
     elseif chain_case == "trigger_chain_speed_plus_3" then
-        effects = TRIGGER_CHAIN_SPEED_PLUS_FROST_TARGET
+        effects = recipes.TRIGGER_CHAIN_SPEED_PLUS_FROST_TARGET
         opts.force_trigger_enabled = true
         opts.force_speed_plus_enabled = true
     elseif chain_case == "direct_chain_size_plus_3" then
-        effects = CHAIN_SIZE_PLUS_FROST_TARGET
+        effects = recipes.CHAIN_SIZE_PLUS_FROST_TARGET
         opts.force_size_plus_enabled = true
     elseif chain_case == "trigger_chain_size_plus_3" then
-        effects = TRIGGER_CHAIN_SIZE_PLUS_FROST_TARGET
+        effects = recipes.TRIGGER_CHAIN_SIZE_PLUS_FROST_TARGET
         opts.force_trigger_enabled = true
         opts.force_size_plus_enabled = true
     elseif chain_case == "direct_chain_multicast_8" then
-        effects = CHAIN_MULTICAST_X8_TARGET
+        effects = recipes.CHAIN_MULTICAST_X8_TARGET
         opts.force_chaos_budget_enabled = true
         opts.force_chain_multicast_enabled = true
         opts.force_payload_multicast_enabled = true
-        opts.max_chain_multicast_fanout = CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
-        opts.max_chain_jobs = limits.MAX_CHAIN_HOPS_CHAOS * CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        opts.max_chain_multicast_fanout = recipes.CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        opts.max_chain_jobs = limits.MAX_CHAIN_HOPS_CHAOS * recipes.CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
         opts.max_live_launches_per_tick = limits.MAX_LIVE_LAUNCHES_PER_TICK_CHAOS
     elseif chain_case == "trigger_chain_multicast_8" then
-        effects = TRIGGER_CHAIN_MULTICAST_X8_TARGET
+        effects = recipes.TRIGGER_CHAIN_MULTICAST_X8_TARGET
         opts.force_chaos_budget_enabled = true
         opts.force_trigger_enabled = true
         opts.force_chain_multicast_enabled = true
         opts.force_payload_multicast_enabled = true
-        opts.max_chain_multicast_fanout = CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
-        opts.max_chain_jobs = limits.MAX_CHAIN_HOPS_CHAOS * CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        opts.max_chain_multicast_fanout = recipes.CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
+        opts.max_chain_jobs = limits.MAX_CHAIN_HOPS_CHAOS * recipes.CHAOS_CHAIN_MULTICAST_FANOUT_COUNT
         opts.max_live_launches_per_tick = limits.MAX_LIVE_LAUNCHES_PER_TICK_CHAOS
     elseif chain_case == "chain_speed_plus_no_valid" then
-        effects = CHAIN_SPEED_PLUS_FROST_TARGET
+        effects = recipes.CHAIN_SPEED_PLUS_FROST_TARGET
         provider = chainLiveCandidates("hop_no_target")
         opts.chain_candidate_provider = provider
         opts.force_speed_plus_enabled = true
     elseif chain_case == "speed_plus_multicast" then
-        effects = CHAIN_SPEED_PLUS_MULTICAST_TARGET
+        effects = recipes.CHAIN_SPEED_PLUS_MULTICAST_TARGET
         opts.force_speed_plus_enabled = true
     elseif chain_case == "size_plus_multicast" then
-        effects = CHAIN_SIZE_PLUS_MULTICAST_TARGET
+        effects = recipes.CHAIN_SIZE_PLUS_MULTICAST_TARGET
         opts.force_size_plus_enabled = true
     elseif chain_case == "speed_plus_pattern" then
-        effects = CHAIN_SPEED_PLUS_BURST_MULTICAST_TARGET
+        effects = recipes.CHAIN_SPEED_PLUS_BURST_MULTICAST_TARGET
         opts.force_speed_plus_enabled = true
     elseif chain_case == "size_plus_pattern" then
-        effects = CHAIN_SIZE_PLUS_BURST_MULTICAST_TARGET
+        effects = recipes.CHAIN_SIZE_PLUS_BURST_MULTICAST_TARGET
         opts.force_size_plus_enabled = true
     elseif chain_case == "speed_plus_trigger_timer" then
-        effects = CHAIN_SPEED_PLUS_TRIGGER_PAYLOAD_TARGET
+        effects = recipes.CHAIN_SPEED_PLUS_TRIGGER_PAYLOAD_TARGET
         opts.force_speed_plus_enabled = true
     elseif chain_case == "size_plus_trigger_timer" then
-        effects = CHAIN_SIZE_PLUS_TIMER_PAYLOAD_TARGET
+        effects = recipes.CHAIN_SIZE_PLUS_TIMER_PAYLOAD_TARGET
         opts.force_size_plus_enabled = true
     elseif chain_case == "speed_plus_recursion" then
-        effects = CHAIN_SPEED_PLUS_CHAIN_TARGET
+        effects = recipes.CHAIN_SPEED_PLUS_CHAIN_TARGET
         opts.force_speed_plus_enabled = true
     elseif chain_case == "size_plus_recursion" then
-        effects = CHAIN_SIZE_PLUS_CHAIN_TARGET
+        effects = recipes.CHAIN_SIZE_PLUS_CHAIN_TARGET
         opts.force_size_plus_enabled = true
     elseif manual_real_gameplay then
-        effects = TRIGGER_CHAIN_FROST_TARGET
+        effects = recipes.TRIGGER_CHAIN_FROST_TARGET
         provider = nil
         opts.chain_candidate_provider = nil
         opts.force_trigger_enabled = true
@@ -1886,36 +1352,36 @@ local function chainRuntimeProbe(payload)
         provider = nil
         opts.chain_candidate_provider = nil
     elseif chain_case == "invalid_zero" then
-        effects = CHAIN_ZERO_TARGET
+        effects = recipes.CHAIN_ZERO_TARGET
     elseif chain_case == "invalid_negative" then
-        effects = CHAIN_NEGATIVE_TARGET
+        effects = recipes.CHAIN_NEGATIVE_TARGET
     elseif chain_case == "over_cap" then
-        effects = CHAIN_OVER_CAP_TARGET
+        effects = recipes.CHAIN_OVER_CAP_TARGET
     elseif chain_case == "multicast" then
-        effects = CHAIN_MULTICAST_TARGET
+        effects = recipes.CHAIN_MULTICAST_TARGET
         opts.force_chain_multicast_disabled = true
     elseif chain_case == "pattern" then
-        effects = CHAIN_BURST_MULTICAST_TARGET
+        effects = recipes.CHAIN_BURST_MULTICAST_TARGET
     elseif chain_case == "trigger_timer" then
-        effects = CHAIN_TRIGGER_PAYLOAD_TARGET
+        effects = recipes.CHAIN_TRIGGER_PAYLOAD_TARGET
     elseif chain_case == "trigger_chain_multicast" then
-        effects = TRIGGER_CHAIN_MULTICAST_TARGET
+        effects = recipes.TRIGGER_CHAIN_MULTICAST_TARGET
         opts.force_trigger_enabled = true
         opts.force_chain_multicast_disabled = true
     elseif chain_case == "nested_payload" then
-        effects = TRIGGER_CHAIN_PAYLOAD_TARGET
+        effects = recipes.TRIGGER_CHAIN_PAYLOAD_TARGET
         opts.force_trigger_enabled = true
     elseif chain_case == "nested_trigger_timer" then
-        effects = TIMER_TRIGGER_CHAIN_TARGET
+        effects = recipes.TIMER_TRIGGER_CHAIN_TARGET
         opts.force_trigger_enabled = true
         opts.force_timer_enabled = true
     elseif chain_case == "recursion" then
-        effects = CHAIN_CHAIN_TARGET
+        effects = recipes.CHAIN_CHAIN_TARGET
     end
 
     local sfp_launch_before = runtime_stats.get("sfp_launch_attempts")
     if chain_case == "disabled" then
-        local compiled = plan_cache.compileOrGet(cloneEffects(CHAIN_FIRE_FROST_TARGET))
+        local compiled = plan_cache.compileOrGet(cloneEffects(recipes.CHAIN_FIRE_FROST_TARGET))
         local audit = nil
         if compiled.ok then
             local slots = plan_cache.attachEmissionSlots(compiled.recipe_id)
@@ -1925,7 +1391,7 @@ local function chainRuntimeProbe(payload)
                 scan_radius = limits.MAX_CHAIN_SCAN_RADIUS,
             })
         end
-        local dispatch = safeTryDispatch(payload, { node_metadata = { { logical_id = "chain-runtime-disabled" } } }, { real_effects = CHAIN_FIRE_FROST_TARGET }, opts)
+        local dispatch = safeTryDispatch(payload, { node_metadata = { { logical_id = "chain-runtime-disabled" } } }, { real_effects = recipes.CHAIN_FIRE_FROST_TARGET }, opts)
         return {
             request_id = payload and payload.request_id,
             ok = dispatch and dispatch.ok == false and dispatch.used_live_2_2c == false and audit and audit.future_runtime_candidate == true,
@@ -1979,6 +1445,9 @@ local function chainRuntimeProbe(payload)
         probe.completed_hops = simulated.completed_hops
         probe.chain_payload_launch_count = simulated.chain_payload_launch_count
         probe.chain_payload_jobs = simulated.chain_payload_jobs
+        probe.ir_chain_runtime_hops = simulated.ir_chain_runtime_hops
+        probe.ir_chain_runtime_job_count = simulated.ir_chain_runtime_job_count
+        probe.ir_chain_runtime_real_job_count = simulated.ir_chain_runtime_real_job_count
         probe.source_hit_result = simulated.source_hit_result
         probe.duplicate_source_suppressed = simulated.duplicate_source_result and simulated.duplicate_source_result.duplicate_suppressed == true or false
         probe.branch_source_suppressed = simulated.branch_source_result and simulated.branch_source_result.duplicate_suppressed == true or false
@@ -1999,7 +1468,7 @@ local function chainRuntimeProbe(payload)
         or chain_case == "trigger_chain_multicast_8"
         or chain_case == "filters"
     local expected_fanout_count = (chain_case == "direct_chain_multicast_8"
-        or chain_case == "trigger_chain_multicast_8") and CHAOS_CHAIN_MULTICAST_FANOUT_COUNT or 1
+        or chain_case == "trigger_chain_multicast_8") and recipes.CHAOS_CHAIN_MULTICAST_FANOUT_COUNT or 1
     local expected_modifier_kind = nil
     if string.find(chain_case, "speed_plus", 1, true) then
         expected_modifier_kind = "speed_plus"
@@ -2084,7 +1553,7 @@ local function chainRuntimeProbe(payload)
 
     local marker = probe.ok and "SPELLFORGE_CHAIN_RUNTIME_PROBE_OK" or "SPELLFORGE_CHAIN_RUNTIME_PROBE_REJECTED"
     log.info(string.format(
-        "%s chain_case=%s live_mode=%s chain_shape=%s payload_modifier_kind=%s fanout_count=%s requested_hops=%s completed_hops=%s selected_target_ids=%s stop_reason=%s rejection_reason=%s",
+        "%s chain_case=%s live_mode=%s chain_shape=%s payload_modifier_kind=%s fanout_count=%s requested_hops=%s completed_hops=%s ir_chain_hops=%s ir_chain_jobs=%s selected_target_ids=%s stop_reason=%s rejection_reason=%s",
         marker,
         tostring(chain_case),
         tostring(probe.live_mode),
@@ -2093,6 +1562,8 @@ local function chainRuntimeProbe(payload)
         tostring(probe.chain_multicast_fanout_count),
         tostring(probe.requested_hops),
         tostring(probe.completed_hops),
+        tostring(probe.ir_chain_runtime_hops),
+        tostring(probe.ir_chain_runtime_job_count),
         table.concat(probe.selected_target_ids or {}, ","),
         tostring(probe.stop_reason),
         tostring(probe.rejection_reason)
@@ -2192,6 +1663,22 @@ local function bounceRejected(reason, details, counter_name)
         tostring(details and details.source_slot_id or nil),
         tostring(details and details.payload_slot_id or nil),
         tostring(details and details.bounce_max or nil)
+    ))
+    return rejected(reason, details)
+end
+
+local function pierceRejected(reason, details, counter_name)
+    runtime_stats.inc("live_pierce_rejected")
+    if counter_name then
+        runtime_stats.inc(counter_name)
+    end
+    log.info(string.format(
+        "SPELLFORGE_PIERCE_DEFERRED reason=%s plan_recipe_id=%s source_slot_id=%s payload_slot_id=%s pierce_limit=%s",
+        tostring(reason),
+        tostring(details and details.plan_recipe_id or nil),
+        tostring(details and details.source_slot_id or nil),
+        tostring(details and details.payload_slot_id or nil),
+        tostring(details and details.pierce_limit or nil)
     ))
     return rejected(reason, details)
 end
@@ -2384,6 +1871,7 @@ local function effectListHasOperator(effects, opcode)
         or opcode == "Trigger" and "spellforge_trigger"
         or opcode == "Chain" and "spellforge_chain"
         or opcode == "Bounce" and "spellforge_bounce"
+        or opcode == "Pierce" and "spellforge_pierce"
         or opcode == "Speed+" and "spellforge_speed_plus"
         or opcode == "Size+" and "spellforge_size_plus"
         or opcode == "Homing" and "spellforge_homing"
@@ -2859,6 +2347,16 @@ local function jobSummary(job_id)
         post_launch_bounce_attempted = job and job.post_launch_bounce_attempted == true or false,
         post_launch_bounce_ok = job and job.post_launch_bounce_ok == true or false,
         post_launch_bounce_error = job and job.post_launch_bounce_error or nil,
+        pierce_runtime = job and firstPresent(job.pierce_runtime, payload and payload.pierce_runtime) or nil,
+        pierce_role = job and firstPresent(job.pierce_role, payload and payload.pierce_role) or nil,
+        pierce_id = job and firstPresent(job.pierce_id, payload and payload.pierce_id) or nil,
+        pierce_count = job and firstPresent(job.pierce_count, payload and payload.pierce_count) or nil,
+        pierce_limit = job and firstPresent(job.pierce_limit, payload and payload.pierce_limit) or nil,
+        piercing = job and firstPresent(job.piercing, payload and payload.piercing) or nil,
+        pierceLimit = job and firstPresent(job.pierceLimit, payload and payload.pierceLimit) or nil,
+        post_launch_pierce_attempted = job and job.post_launch_pierce_attempted == true or false,
+        post_launch_pierce_ok = job and job.post_launch_pierce_ok == true or false,
+        post_launch_pierce_error = job and job.post_launch_pierce_error or nil,
         post_launch_detonate_on_actor_attempted = job and job.post_launch_detonate_on_actor_attempted == true or false,
         post_launch_detonate_on_actor_ok = job and job.post_launch_detonate_on_actor_ok == true or false,
         post_launch_detonate_on_actor_error = job and job.post_launch_detonate_on_actor_error or nil,
@@ -2868,8 +2366,8 @@ local function jobSummary(job_id)
         source_helper_engine_id = job and job.source_helper_engine_id or nil,
         source_postfix_opcode = job and job.source_postfix_opcode or nil,
         payload_slot_id = job and job.payload_slot_id or nil,
-        trigger_route = job and job.trigger_route or nil,
-        trigger_duplicate_key = job and job.trigger_duplicate_key or nil,
+        trigger_route = job and (job.trigger_route or (payload and payload.trigger_route)) or nil,
+        trigger_duplicate_key = job and (job.trigger_duplicate_key or (payload and payload.trigger_duplicate_key)) or nil,
         timer_source_slot_id = job and (job.timer_source_slot_id or (payload and payload.timer_source_slot_id)) or nil,
         timer_payload_slot_id = job and (job.timer_payload_slot_id or (payload and payload.timer_payload_slot_id)) or nil,
         timer_id = job and (job.timer_id or (payload and payload.timer_id)) or nil,
@@ -2920,7 +2418,9 @@ local function jobSummary(job_id)
         projectile_id = job and job.projectile_id or nil,
         projectile_id_source = job and job.projectile_id_source or nil,
         projectile_registered = job and job.projectile_registered == true or false,
+        launch_start_pos = job and (job.launch_start_pos or (payload and payload.start_pos)) or nil,
         launch_direction = job and (job.launch_direction or (payload and payload.direction)) or nil,
+        excludeTarget = job and (job.excludeTarget or (payload and payload.excludeTarget)) or nil,
         launch_user_data = job and job.launch_user_data or nil,
         error = job and job.error or nil,
     }
@@ -4650,6 +4150,7 @@ local function tryChainDispatch(compiled, launch_payload, options)
         tostring(chain_plan.max_hops)
     )
     local binding = {
+        plan = attached.plan,
         recipe_id = compiled.recipe_id,
         display_recipe_id = result_recipe_id,
         cast_id = cast_id,
@@ -4676,7 +4177,9 @@ local function tryChainDispatch(compiled, launch_payload, options)
         candidate_provider = options.chain_candidate_provider or options.candidate_provider,
         scan_radius = options.chain_scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
         max_jobs_per_tick = options.max_jobs_per_tick,
+        max_chain_jobs = options.max_chain_jobs,
         max_live_launches_per_tick = options.max_live_launches_per_tick,
+        chaos_budget_profile = options.chaos_budget_profile,
         force_enabled = options.force_chain_runtime_enabled == true,
     }
 
@@ -4946,6 +4449,7 @@ local function tryTimerDispatch(compiled, launch_payload, options)
         payload_pattern = timer_plan.payload_pattern == true,
         payload_pattern_kind = timer_plan.payload_pattern_kind,
         payload_pattern_op = timer_plan.payload_pattern_op,
+        plan = attached.plan,
         max_payload_fanout = timer_plan.max_payload_fanout,
         max_projectiles = timer_plan.max_projectiles,
         max_jobs_per_tick = timer_plan.max_jobs_per_tick,
@@ -5134,6 +4638,10 @@ local function tryTimerDispatch(compiled, launch_payload, options)
         timer_pending_count = schedule.pending_count,
         timer_status = timer_status,
         timer_duplicate_suppressed = duplicate_schedule and duplicate_schedule.duplicate_suppressed == true or false,
+        ir_timer_runtime_planned = schedule.ir_timer_runtime_planned == true,
+        ir_timer_runtime_fallback_used = schedule.ir_timer_runtime_fallback_used == true,
+        ir_timer_runtime_fallback_reason = schedule.ir_timer_runtime_fallback_reason,
+        ir_timer_runtime_mismatch = schedule.ir_timer_runtime_mismatch == true,
         projectile_id = summary.projectile_id,
         projectile_ids = summary.projectile_id and { summary.projectile_id } or {},
         projectile_id_source = summary.projectile_id_source,
@@ -5288,6 +4796,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
     local source_job = job_inputs[1]
     local binding = {
         recipe_id = compiled.recipe_id,
+        plan = attached.plan,
         cast_id = cast_id,
         bounce_id = bounce_id,
         source_slot_id = bounce_plan.source_slot_id,
@@ -5336,6 +4845,7 @@ local function tryBounceDispatch(compiled, launch_payload, options)
     local chain_binding = nil
     if bounce_plan.has_chain_payload == true then
         chain_binding = {
+            plan = attached.plan,
             recipe_id = compiled.recipe_id,
             display_recipe_id = result_recipe_id,
             cast_id = cast_id,
@@ -5363,7 +4873,9 @@ local function tryBounceDispatch(compiled, launch_payload, options)
             candidate_provider = options.chain_candidate_provider or options.candidate_provider,
             scan_radius = options.chain_scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
             max_jobs_per_tick = options.max_jobs_per_tick,
+            max_chain_jobs = options.max_chain_jobs,
             max_live_launches_per_tick = options.max_live_launches_per_tick,
+            chaos_budget_profile = options.chaos_budget_profile,
             force_enabled = options.force_chain_runtime_enabled == true,
         }
         live_chain.decorateSourceJob(source_job, chain_binding)
@@ -5663,6 +5175,407 @@ local function tryBounceDispatch(compiled, launch_payload, options)
     }
 end
 
+local function tryPierceDispatch(compiled, launch_payload, options)
+    runtime_stats.inc("live_pierce_attempts")
+    if options.force_pierce_disabled == true then
+        return pierceRejected("live_pierce_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_pierce_disabled_rejections")
+    end
+    if options.force_pierce_enabled ~= true and not dev.livePierceEnabled() then
+        return pierceRejected("live_pierce_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_pierce_disabled_rejections")
+    end
+
+    local capabilities = sfp_adapter.capabilities()
+    if not capabilities.has_setSpellPiercing and not capabilities.has_setSpellPhysics then
+        return pierceRejected("sfp_pierce_event_unavailable", {
+            plan_recipe_id = compiled.recipe_id,
+        }, "live_pierce_capability_rejections")
+    end
+
+    local attached = plan_cache.attachHelperRecords(compiled.recipe_id, { limits = options.budget_limits })
+    if not attached.ok then
+        return pierceRejected("helper_records_failed", {
+            plan_recipe_id = compiled.recipe_id,
+            error = firstErrorMessage(attached),
+            errors = attached.errors,
+        })
+    end
+
+    local pierce_plan, pierce_reason = live_pierce.selectV0Plan(attached.plan, {
+        max_pierce_count = options.max_pierce_count,
+        max_depth = options.max_nested_payload_depth,
+        max_jobs = options.max_nested_payload_jobs,
+        max_fanout = options.max_payload_fanout,
+        max_projectiles = options.max_projectiles,
+        max_hops = options.max_chain_hops,
+        allow_payload_multicast = payloadMulticastRuntimeEnabled(options),
+        allow_payload_pattern = payloadPatternRuntimeEnabled(options),
+        allow_chain_multicast = dev.liveChainMulticastEnabled(),
+        chaos_budget_profile = options.chaos_budget_profile,
+        max_jobs_per_tick = options.max_jobs_per_tick,
+        max_live_launches_per_tick = options.max_live_launches_per_tick,
+    })
+    if not pierce_plan then
+        return pierceRejected(pierce_reason or "pierce_v0_rejected", {
+            plan_recipe_id = compiled.recipe_id,
+        })
+    end
+    if pierce_plan.has_trigger_payload == true and (options.force_trigger_enabled ~= true and not dev.liveTriggerEnabled()) then
+        return pierceRejected("live_trigger_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+            source_slot_id = pierce_plan.source_slot_id,
+            payload_slot_id = pierce_plan.payload_slot_id,
+        }, "live_trigger_disabled_rejections")
+    end
+    if pierce_plan.has_chain_payload == true
+        and (options.force_chain_runtime_disabled == true
+            or (options.force_chain_runtime_enabled ~= true and not dev.liveChainRuntimeEnabled())) then
+        return pierceRejected("pierce_chain_payload_disabled", {
+            plan_recipe_id = compiled.recipe_id,
+            source_slot_id = pierce_plan.source_slot_id,
+            payload_slot_id = pierce_plan.payload_slot_id,
+        }, "live_pierce_deferred_reject")
+    end
+
+    local source_recipe_id = options.source_recipe_id or launch_payload.recipe_id
+    local result_recipe_id = source_recipe_id or compiled.recipe_id
+    local cast_id = nextCastId(result_recipe_id, compiled.recipe_id)
+    local pierce_id = string.format("pierce:%s:%s:%s", tostring(cast_id), tostring(pierce_plan.source_slot_id), tostring(pierce_plan.pierce_limit))
+    local chain_id = pierce_plan.has_chain_payload == true
+        and string.format("chain:%s:%s:%s", tostring(cast_id), tostring(pierce_plan.source_slot_id), tostring(pierce_plan.payload_slot_id))
+        or nil
+    local job_inputs = buildJobInputs({ pierce_plan.source }, compiled.recipe_id, cast_id, launch_payload, nil)
+    local source_job = job_inputs[1]
+    if not source_job then
+        return pierceRejected("source_job_missing", {
+            plan_recipe_id = compiled.recipe_id,
+            source_slot_id = pierce_plan.source_slot_id,
+        })
+    end
+
+    local binding = {
+        plan = attached.plan,
+        recipe_id = compiled.recipe_id,
+        display_recipe_id = result_recipe_id,
+        cast_id = cast_id,
+        pierce_id = pierce_id,
+        source_slot_id = pierce_plan.source_slot_id,
+        source_helper_engine_id = pierce_plan.source_helper_engine_id,
+        payload_slot_id = pierce_plan.payload_slot_id,
+        payload_helper_engine_id = pierce_plan.payload_helper_engine_id,
+        payloads = pierce_plan.payloads,
+        payload_slot_ids = pierce_plan.payload_slot_ids,
+        payload_helper_engine_ids = pierce_plan.payload_helper_engine_ids,
+        payload_count = pierce_plan.payload_count,
+        payload_multicast = pierce_plan.payload_multicast == true,
+        payload_pattern = pierce_plan.payload_pattern == true,
+        payload_pattern_kind = pierce_plan.payload_pattern_kind,
+        has_trigger_payload = pierce_plan.has_trigger_payload == true,
+        has_chain_payload = pierce_plan.has_chain_payload == true,
+        chain_id = chain_id,
+        chain_shape = pierce_plan.chain_shape,
+        chain_requested_hops = pierce_plan.chain_requested_hops,
+        chain_max_hops = pierce_plan.chain_max_hops,
+        chain_targeting_mode = "no_immediate_repeat",
+        chain_candidate_provider = options.chain_candidate_provider or options.candidate_provider,
+        max_chain_ticks = options.max_chain_ticks,
+        max_jobs_per_tick = pierce_plan.max_jobs_per_tick,
+        force_chain_runtime_enabled = options.force_chain_runtime_enabled == true,
+        pierce_limit = pierce_plan.pierce_limit,
+        actor = launch_payload.actor or launch_payload.sender,
+        start_pos = launch_payload.start_pos,
+        direction = launch_payload.direction,
+        max_payload_fanout = options.max_payload_fanout,
+        max_projectiles = options.max_projectiles,
+        max_live_launches_per_tick = pierce_plan.max_live_launches_per_tick,
+        chaos_budget_profile = pierce_plan.chaos_budget_profile,
+        force_payload_multicast_enabled = options.force_payload_multicast_enabled == true,
+        force_payload_pattern_enabled = options.force_payload_pattern_enabled == true,
+    }
+    local chain_binding = nil
+    if pierce_plan.has_chain_payload == true then
+        chain_binding = {
+            plan = attached.plan,
+            recipe_id = compiled.recipe_id,
+            display_recipe_id = result_recipe_id,
+            cast_id = cast_id,
+            chain_id = chain_id,
+            chain_shape = "trigger_payload_chain",
+            source_slot_id = pierce_plan.source_slot_id,
+            source_helper_engine_id = pierce_plan.source_helper_engine_id,
+            payload_slot_id = pierce_plan.payload_slot_id,
+            payload_helper_engine_id = pierce_plan.payload_helper_engine_id,
+            root_source_slot_id = pierce_plan.source_slot_id,
+            requested_hops = pierce_plan.chain_requested_hops,
+            max_hops = pierce_plan.chain_max_hops,
+            candidate_cap = options.max_chain_scan_candidates or limits.MAX_CHAIN_SCAN_CANDIDATES,
+            targeting_mode = "no_immediate_repeat",
+            actor = launch_payload.actor or launch_payload.sender,
+            candidate_provider = options.chain_candidate_provider or options.candidate_provider,
+            scan_radius = options.chain_scan_radius or limits.MAX_CHAIN_SCAN_RADIUS,
+            max_jobs_per_tick = options.max_jobs_per_tick,
+            max_chain_jobs = options.max_chain_jobs,
+            max_live_launches_per_tick = options.max_live_launches_per_tick,
+            chaos_budget_profile = options.chaos_budget_profile,
+            force_enabled = options.force_chain_runtime_enabled == true,
+        }
+        live_chain.decorateSourceJob(source_job, chain_binding)
+    end
+    live_pierce.decorateSourceJob(source_job, binding)
+
+    if options.dry_run == true then
+        local probe_source_job = nil
+        local probe_projectile_id = nil
+        if options.register_pierce_probe_binding == true then
+            binding.source_job_id = string.format("probe_job:%s", tostring(cast_id))
+            if not live_pierce.registerBinding(binding) then
+                return pierceRejected("pierce_probe_binding_failed", {
+                    plan_recipe_id = compiled.recipe_id,
+                    source_slot_id = pierce_plan.source_slot_id,
+                    payload_slot_id = pierce_plan.payload_slot_id,
+                })
+            end
+            if chain_binding then
+                chain_binding.source_job_id = binding.source_job_id
+                if not live_chain.registerBinding(chain_binding) then
+                    return pierceRejected("pierce_chain_probe_binding_failed", {
+                        plan_recipe_id = compiled.recipe_id,
+                        source_slot_id = pierce_plan.source_slot_id,
+                        payload_slot_id = pierce_plan.payload_slot_id,
+                    }, "live_pierce_deferred_reject")
+                end
+            end
+
+            local source_payload = source_job.payload or {}
+            local source_user_data = sfp_userdata.buildHelperUserData({
+                runtime = "2.2c_live_helper",
+                mapping = helper_records.getByEngineId(pierce_plan.source_helper_engine_id),
+                recipe_id = compiled.recipe_id,
+                slot_id = pierce_plan.source_slot_id,
+                helper_engine_id = pierce_plan.source_helper_engine_id,
+                job_kind = orchestrator.LIVE_SIMPLE_LAUNCH_JOB_KIND,
+                job_id = binding.source_job_id,
+                cast_id = cast_id,
+                emission_index = source_job.emission_index,
+                group_index = source_job.group_index,
+                fanout_count = source_job.fanout_count,
+                source_slot_id = source_payload.source_slot_id,
+                source_prefix_opcode = source_payload.source_prefix_opcode,
+                source_postfix_opcode = source_payload.source_postfix_opcode,
+                source_helper_engine_id = source_payload.source_helper_engine_id,
+                trigger_source_slot_id = source_payload.trigger_source_slot_id,
+                trigger_payload_slot_id = source_payload.trigger_payload_slot_id,
+                trigger_payload_slot_ids = source_payload.trigger_payload_slot_ids,
+                has_trigger_payload = source_payload.has_trigger_payload,
+                has_chain_payload = source_payload.has_chain_payload,
+                payload_multicast = source_payload.payload_multicast,
+                payload_pattern = source_payload.payload_pattern,
+                payload_pattern_kind = source_payload.payload_pattern_kind,
+                pierce_runtime = source_payload.pierce_runtime,
+                pierce_role = source_payload.pierce_role,
+                pierce_id = source_payload.pierce_id,
+                pierce_limit = source_payload.pierce_limit,
+                pierce_trigger_payload_slot_id = source_payload.pierce_trigger_payload_slot_id,
+                branch_scope = source_payload.branch_scope,
+                branch_id = source_payload.branch_id,
+                branch_parent_id = source_payload.branch_parent_id,
+                branch_kind = source_payload.branch_kind,
+                branch_index = source_payload.branch_index,
+                branch_count = source_payload.branch_count,
+            })
+            probe_projectile_id = string.format("probe_projectile:%s:%s", tostring(cast_id), tostring(pierce_plan.source_slot_id))
+            probe_source_job = {
+                job_id = binding.source_job_id,
+                job_status = "complete",
+                slot_id = pierce_plan.source_slot_id,
+                helper_engine_id = pierce_plan.source_helper_engine_id,
+                cast_id = cast_id,
+                fanout_count = 1,
+                pierce_runtime = true,
+                pierce_role = "source",
+                pierce_id = pierce_id,
+                pierce_limit = pierce_plan.pierce_limit,
+                piercing = true,
+                pierceLimit = pierce_plan.pierce_limit,
+                launch_accepted = false,
+                projectile_id = probe_projectile_id,
+                projectile_registered = false,
+                launch_direction = launch_payload.direction,
+                launch_user_data = source_user_data,
+            }
+        end
+        return {
+            ok = true,
+            used_live_2_2c = true,
+            dry_run = true,
+            pierce_probe_binding_registered = options.register_pierce_probe_binding == true,
+            recipe_id = result_recipe_id,
+            plan_recipe_id = compiled.recipe_id,
+            slot_id = pierce_plan.source_slot_id,
+            helper_engine_id = pierce_plan.source_helper_engine_id,
+            source_slot_id = pierce_plan.source_slot_id,
+            source_helper_engine_id = pierce_plan.source_helper_engine_id,
+            slot_ids = { pierce_plan.source_slot_id },
+            helper_engine_ids = { pierce_plan.source_helper_engine_id },
+            pierce_id = pierce_id,
+            pierce_mode = pierce_plan.has_trigger_payload == true and "trigger_payload" or "source",
+            pierce_limit = pierce_plan.pierce_limit,
+            piercing = true,
+            pierceLimit = pierce_plan.pierce_limit,
+            has_trigger_payload = pierce_plan.has_trigger_payload == true,
+            trigger_payload_slot_id = pierce_plan.payload_slot_id,
+            trigger_payload_helper_engine_id = pierce_plan.payload_helper_engine_id,
+            trigger_payload_slot_ids = pierce_plan.payload_slot_ids,
+            trigger_payload_helper_engine_ids = pierce_plan.payload_helper_engine_ids,
+            trigger_payload_count = pierce_plan.payload_count,
+            payload_count = pierce_plan.payload_count or 0,
+            payload_multicast = pierce_plan.payload_multicast == true,
+            payload_pattern = pierce_plan.payload_pattern == true,
+            payload_pattern_kind = pierce_plan.payload_pattern_kind,
+            payload_chain_runtime = pierce_plan.has_chain_payload == true,
+            has_chain_payload = pierce_plan.has_chain_payload == true,
+            chain_id = chain_id,
+            chain_shape = pierce_plan.chain_shape,
+            chain_requested_hops = pierce_plan.chain_requested_hops,
+            chain_max_hops = pierce_plan.chain_max_hops,
+            projectile_id = probe_projectile_id,
+            projectile_ids = probe_projectile_id and { probe_projectile_id } or {},
+            jobs = probe_source_job and { probe_source_job } or nil,
+            cast_id = cast_id,
+            runtime = "2.2c_live_helper",
+            fallback = false,
+            dispatch_count = 1,
+            source_dispatch_count = 1,
+            fanout_count = 1,
+            payload_fanout_count = pierce_plan.payload_count,
+            slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
+            helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
+            effect_id = pierce_plan.source.slot.effects and pierce_plan.source.slot.effects[1] and pierce_plan.source.slot.effects[1].id or nil,
+            simple_note = "pierce_v0",
+            live_mode = "pierce",
+        }
+    end
+
+    local enqueue = orchestrator.enqueue(source_job)
+    if not enqueue.ok then
+        return pierceRejected("enqueue_failed", {
+            recipe_id = result_recipe_id,
+            plan_recipe_id = compiled.recipe_id,
+            error = enqueue.error,
+        })
+    end
+    binding.source_job_id = enqueue.job_id
+    if not live_pierce.registerBinding(binding) then
+        orchestrator.cancel(enqueue.job_id)
+        return pierceRejected("pierce_binding_failed", {
+            plan_recipe_id = compiled.recipe_id,
+            source_slot_id = pierce_plan.source_slot_id,
+            payload_slot_id = pierce_plan.payload_slot_id,
+        })
+    end
+    if chain_binding then
+        chain_binding.source_job_id = enqueue.job_id
+        if not live_chain.registerBinding(chain_binding) then
+            orchestrator.cancel(enqueue.job_id)
+            return pierceRejected("pierce_chain_binding_failed", {
+                plan_recipe_id = compiled.recipe_id,
+                source_slot_id = pierce_plan.source_slot_id,
+                payload_slot_id = pierce_plan.payload_slot_id,
+            }, "live_pierce_deferred_reject")
+        end
+    end
+
+    local tick_result = tickUntilJobsSettled({ enqueue.job_id }, options)
+    local summary = jobSummary(enqueue.job_id)
+    log.info(string.format(
+        "SPELLFORGE_PIERCE_SOURCE_LAUNCH_CONFIG recipe_id=%s display_recipe_id=%s cast_id=%s source_slot_id=%s helper_engine_id=%s projectile_id=%s projectile_id_source=%s piercing=%s pierceLimit=%s post_launch_pierce_ok=%s launch_accepted=%s job_status=%s",
+        tostring(compiled.recipe_id),
+        tostring(result_recipe_id),
+        tostring(cast_id),
+        tostring(pierce_plan.source_slot_id),
+        tostring(pierce_plan.source_helper_engine_id),
+        tostring(summary.projectile_id),
+        tostring(summary.projectile_id_source),
+        tostring(summary.piercing == true),
+        tostring(summary.pierceLimit),
+        tostring(summary.post_launch_pierce_ok == true),
+        tostring(summary.launch_accepted == true),
+        tostring(summary.job_status)
+    ))
+    log.info(string.format(
+        "SPELLFORGE_LIVE_PIERCE_SOURCE_OK recipe_id=%s plan_recipe_id=%s cast_id=%s pierce_id=%s source_slot_id=%s payload_slot_id=%s pierce_limit=%s projectile_id=%s piercing=%s post_launch_pierce_ok=%s post_launch_pierce_error=%s",
+        tostring(result_recipe_id),
+        tostring(compiled.recipe_id),
+        tostring(cast_id),
+        tostring(pierce_id),
+        tostring(pierce_plan.source_slot_id),
+        tostring(pierce_plan.payload_slot_id),
+        tostring(pierce_plan.pierce_limit),
+        tostring(summary.projectile_id),
+        tostring(summary.piercing == true),
+        tostring(summary.post_launch_pierce_ok == true),
+        tostring(summary.post_launch_pierce_error)
+    ))
+    runtime_stats.inc("live_pierce_source_ok")
+    runtime_stats.inc("live_2_2c_dispatch_ok")
+
+    return {
+        ok = true,
+        used_live_2_2c = true,
+        recipe_id = result_recipe_id,
+        plan_recipe_id = compiled.recipe_id,
+        slot_id = pierce_plan.source_slot_id,
+        helper_engine_id = pierce_plan.source_helper_engine_id,
+        slot_ids = { pierce_plan.source_slot_id },
+        helper_engine_ids = { pierce_plan.source_helper_engine_id },
+        pierce_id = pierce_id,
+        pierce_limit = pierce_plan.pierce_limit,
+        piercing = summary.piercing == true,
+        pierceLimit = summary.pierceLimit,
+        post_launch_pierce_ok = summary.post_launch_pierce_ok == true,
+        post_launch_pierce_error = summary.post_launch_pierce_error,
+        has_trigger_payload = pierce_plan.has_trigger_payload == true,
+        trigger_payload_slot_id = pierce_plan.payload_slot_id,
+        trigger_payload_helper_engine_id = pierce_plan.payload_helper_engine_id,
+        trigger_payload_slot_ids = pierce_plan.payload_slot_ids,
+        trigger_payload_helper_engine_ids = pierce_plan.payload_helper_engine_ids,
+        trigger_payload_count = pierce_plan.payload_count,
+        payload_multicast = pierce_plan.payload_multicast == true,
+        payload_pattern = pierce_plan.payload_pattern == true,
+        payload_pattern_kind = pierce_plan.payload_pattern_kind,
+        payload_chain_runtime = pierce_plan.has_chain_payload == true,
+        has_chain_payload = pierce_plan.has_chain_payload == true,
+        chain_id = chain_id,
+        chain_shape = pierce_plan.chain_shape,
+        chain_requested_hops = pierce_plan.chain_requested_hops,
+        chain_max_hops = pierce_plan.chain_max_hops,
+        projectile_id = summary.projectile_id,
+        projectile_ids = summary.projectile_id and { summary.projectile_id } or {},
+        projectile_id_source = summary.projectile_id_source,
+        projectile_registered = summary.projectile_registered == true,
+        job_id = enqueue.job_id,
+        job_ids = { enqueue.job_id },
+        jobs = { summary },
+        job_status = summary.job_status,
+        cast_id = cast_id,
+        runtime = "2.2c_live_helper",
+        fallback = false,
+        dispatch_count = 1,
+        source_dispatch_count = 1,
+        fanout_count = 1,
+        payload_fanout_count = pierce_plan.payload_count,
+        all_launch_jobs_complete = tick_result.all_complete == true,
+        slot_count = attached.plan.slot_count or #attached.plan.emission_slots,
+        helper_record_count = attached.plan.helper_record_count or #attached.plan.helper_records,
+        effect_id = pierce_plan.source.slot.effects and pierce_plan.source.slot.effects[1] and pierce_plan.source.slot.effects[1].id or nil,
+        simple_note = "pierce_v0",
+        live_mode = "pierce",
+    }
+end
+
 local function tryTriggerDispatch(compiled, launch_payload, options)
     runtime_stats.inc("live_trigger_attempts")
     if options.force_trigger_disabled == true then
@@ -5713,6 +5626,7 @@ local function tryTriggerDispatch(compiled, launch_payload, options)
     local source_job = job_inputs[1]
     local binding = {
         recipe_id = compiled.recipe_id,
+        plan = attached.plan,
         cast_id = cast_id,
         source_slot_id = trigger_plan.source_slot_id,
         source_helper_engine_id = trigger_plan.source_helper_engine_id,
@@ -5961,6 +5875,7 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
     local has_trigger_effect = effectListHasOperator(effects, "Trigger")
     local has_chain_effect = effectListHasOperator(effects, "Chain")
     local has_bounce_effect = effectListHasOperator(effects, "Bounce")
+    local has_pierce_effect = effectListHasOperator(effects, "Pierce")
     local has_size_plus_effect = effectListHasOperator(effects, "Size+")
     local has_speed_plus_effect = effectListHasOperator(effects, "Speed+")
     local has_homing_effect = effectListHasOperator(effects, "Homing")
@@ -6066,6 +5981,10 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
             runtime_stats.inc("live_bounce_attempts")
             return bounceRejected("compile_failed", details)
         end
+        if has_pierce_effect then
+            runtime_stats.inc("live_pierce_attempts")
+            return pierceRejected("compile_failed", details)
+        end
         if estimated_pattern_kind ~= nil then
             return patternRejected(estimated_pattern_kind, "compile_failed", details)
         end
@@ -6076,6 +5995,10 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
     end
 
     local compiled_bounds = compiled.plan and compiled.plan.bounds or nil
+    if compiled_bounds and compiled_bounds.has_pierce then
+        return tryPierceDispatch(compiled, launch_payload, options)
+    end
+
     if compiled_bounds and compiled_bounds.has_bounce then
         return tryBounceDispatch(compiled, launch_payload, options)
     end
@@ -6086,6 +6009,10 @@ function live_simple_dispatch.tryDispatch(payload, entry, root, opts)
 
     if has_bounce_effect then
         return tryBounceDispatch(compiled, launch_payload, options)
+    end
+
+    if has_pierce_effect then
+        return tryPierceDispatch(compiled, launch_payload, options)
     end
 
     if has_timer_effect and has_trigger_effect then
@@ -6424,7 +6351,7 @@ function live_simple_dispatch.onProbe(payload)
     -- Smoke probes run back-to-back in script callbacks; treat each probe as a fresh update for launch-density accounting.
     orchestrator.advanceTime(0)
     local probe_entry = { node_metadata = { { logical_id = "probe" } } }
-    local probe_root = { real_effects = SIMPLE_FIRE_DAMAGE_TARGET }
+    local probe_root = { real_effects = recipes.SIMPLE_FIRE_DAMAGE_TARGET }
     local opts = {
         ignore_flag = true,
         dry_run = true,
@@ -6712,6 +6639,11 @@ function live_simple_dispatch.onProbe(payload)
             payload_pattern = status and status.payload_pattern == true or false,
             payload_pattern_kind = status and status.payload_pattern_kind or nil,
             payload_pattern_direction_keys = status and status.payload_pattern_direction_keys or nil,
+            ir_timer_runtime = status and status.ir_timer_runtime == true or false,
+            ir_timer_runtime_job_count = status and status.ir_timer_runtime_job_count or nil,
+            ir_timer_runtime_fallback_used = status and status.ir_timer_runtime_fallback_used == true or false,
+            ir_timer_runtime_fallback_reason = status and status.ir_timer_runtime_fallback_reason or nil,
+            ir_timer_runtime_mismatch = status and status.ir_timer_runtime_mismatch == true or false,
             nested_final_fanout = status and status.nested_final_fanout == true or false,
             nested_final_fanout_kind = status and status.nested_final_fanout_kind or nil,
             timer_delay_ticks = status and status.timer_delay_ticks or nil,
@@ -6765,63 +6697,63 @@ function live_simple_dispatch.onProbe(payload)
         })
         return
     elseif mode == "multicast_disabled" then
-        probe_root = { real_effects = MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_disabled = true
     elseif mode == "multicast_dry_run" then
-        probe_root = { real_effects = MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_enabled = true
     elseif mode == "multicast_launch" then
-        probe_root = { real_effects = MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_enabled = true
         opts.dry_run = false
     elseif mode == "chaos_multicast_high_dry_run" then
-        probe_root = { real_effects = MULTICAST_X16_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.MULTICAST_X16_FIRE_DAMAGE_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_multicast_enabled = true
     elseif mode == "chaos_multicast_high_launch" then
-        probe_root = { real_effects = MULTICAST_X16_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.MULTICAST_X16_FIRE_DAMAGE_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_multicast_enabled = true
         opts.dry_run = false
         opts.allow_pending_launch_jobs = true
     elseif mode == "chaos_multicast_over_cap" then
-        probe_root = { real_effects = MULTICAST_OVER_CHAOS_CAP_TARGET }
+        probe_root = { real_effects = recipes.MULTICAST_OVER_CHAOS_CAP_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_multicast_enabled = true
     elseif mode == "spread_disabled" then
-        probe_root = { real_effects = SPREAD_MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SPREAD_MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_enabled = true
         opts.force_pattern_disabled = true
     elseif mode == "spread_dry_run" then
-        probe_root = { real_effects = SPREAD_MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SPREAD_MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_enabled = true
         opts.force_pattern_enabled = true
     elseif mode == "spread_launch" then
-        probe_root = { real_effects = SPREAD_MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SPREAD_MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_enabled = true
         opts.force_pattern_enabled = true
         opts.dry_run = false
     elseif mode == "burst_disabled" then
-        probe_root = { real_effects = BURST_MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.BURST_MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_enabled = true
         opts.force_pattern_disabled = true
     elseif mode == "burst_dry_run" then
-        probe_root = { real_effects = BURST_MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.BURST_MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_enabled = true
         opts.force_pattern_enabled = true
     elseif mode == "burst_launch" then
-        probe_root = { real_effects = BURST_MULTICAST_X3_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.BURST_MULTICAST_X3_FIRE_DAMAGE_TARGET }
         opts.force_multicast_enabled = true
         opts.force_pattern_enabled = true
         opts.dry_run = false
     elseif mode == "trigger_disabled" then
-        probe_root = { real_effects = TRIGGER_FIRE_FROST_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_FIRE_FROST_TARGET }
         opts.force_trigger_disabled = true
     elseif mode == "trigger_dry_run" then
-        probe_root = { real_effects = TRIGGER_FIRE_FROST_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_FIRE_FROST_TARGET }
         opts.force_trigger_enabled = true
     elseif mode == "trigger_launch" or mode == "trigger_post_hit" or mode == "trigger_post_hit_fallback" then
-        probe_root = { real_effects = TRIGGER_FIRE_FROST_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_FIRE_FROST_TARGET }
         opts.force_trigger_enabled = true
         opts.dry_run = false
     elseif applyBounceProbeMode(mode, opts) then
@@ -6840,35 +6772,42 @@ function live_simple_dispatch.onProbe(payload)
             opts.chain_source_target = bounceChainMockSourceTarget()
             opts.chain_candidate_provider = bounceChainMockCandidates()
         end
+    elseif applyPierceProbeMode(mode, opts) then
+        probe_root = opts._spellforge_probe_root
+        opts._spellforge_probe_root = nil
+        if mode == "pierce_trigger_chain_event" then
+            opts.chain_source_target = bounceChainMockSourceTarget()
+            opts.chain_candidate_provider = bounceChainMockCandidates()
+        end
     elseif mode == "trigger_payload_multicast_disabled" then
-        probe_root = { real_effects = TRIGGER_PAYLOAD_MULTICAST_X3_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_MULTICAST_X3_TARGET }
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_disabled = true
     elseif mode == "trigger_payload_multicast_post_hit" then
-        probe_root = { real_effects = TRIGGER_PAYLOAD_MULTICAST_X3_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_MULTICAST_X3_TARGET }
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.dry_run = false
     elseif mode == "chaos_trigger_payload_multicast_post_hit" then
-        probe_root = { real_effects = TRIGGER_PAYLOAD_MULTICAST_X16_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_MULTICAST_X16_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.dry_run = false
         opts.allow_pending_launch_jobs = true
     elseif mode == "trigger_payload_pattern_disabled" then
-        probe_root = { real_effects = TRIGGER_PAYLOAD_BURST_MULTICAST_X5_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_BURST_MULTICAST_X5_TARGET }
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_disabled = true
     elseif mode == "trigger_payload_burst_post_hit" then
-        probe_root = { real_effects = TRIGGER_PAYLOAD_BURST_MULTICAST_X5_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_BURST_MULTICAST_X5_TARGET }
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_enabled = true
         opts.dry_run = false
     elseif mode == "chaos_trigger_payload_burst_post_hit" then
-        probe_root = { real_effects = TRIGGER_PAYLOAD_BURST_MULTICAST_X16_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_BURST_MULTICAST_X16_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
@@ -6876,19 +6815,19 @@ function live_simple_dispatch.onProbe(payload)
         opts.dry_run = false
         opts.allow_pending_launch_jobs = true
     elseif mode == "trigger_payload_spread_post_hit" then
-        probe_root = { real_effects = TRIGGER_PAYLOAD_SPREAD_MULTICAST_X3_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_PAYLOAD_SPREAD_MULTICAST_X3_TARGET }
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_enabled = true
         opts.dry_run = false
     elseif mode == "timer_disabled" then
-        probe_root = { real_effects = TIMER_FIRE_FROST_TARGET }
+        probe_root = { real_effects = recipes.TIMER_FIRE_FROST_TARGET }
         opts.force_timer_disabled = true
     elseif mode == "timer_dry_run" then
-        probe_root = { real_effects = TIMER_FIRE_FROST_TARGET }
+        probe_root = { real_effects = recipes.TIMER_FIRE_FROST_TARGET }
         opts.force_timer_enabled = true
     elseif mode == "timer_launch" or mode == "timer_real_delay_launch" or mode == "timer_real_delay_sequence" then
-        probe_root = { real_effects = TIMER_FIRE_FROST_TARGET }
+        probe_root = { real_effects = recipes.TIMER_FIRE_FROST_TARGET }
         opts.force_timer_enabled = true
         opts.dry_run = false
         if mode ~= "timer_real_delay_launch" and mode ~= "timer_real_delay_sequence" then
@@ -6898,17 +6837,17 @@ function live_simple_dispatch.onProbe(payload)
             opts.timer_duplicate_schedule_probe = true
         end
     elseif mode == "timer_payload_multicast_disabled" then
-        probe_root = { real_effects = TIMER_PAYLOAD_MULTICAST_X3_TARGET }
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_MULTICAST_X3_TARGET }
         opts.force_timer_enabled = true
         opts.force_payload_multicast_disabled = true
     elseif mode == "timer_payload_multicast_sequence" then
-        probe_root = { real_effects = TIMER_PAYLOAD_MULTICAST_X3_TARGET }
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_MULTICAST_X3_TARGET }
         opts.force_timer_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.dry_run = false
         opts.timer_duplicate_schedule_probe = true
     elseif mode == "chaos_timer_payload_multicast_sequence" then
-        probe_root = { real_effects = TIMER_PAYLOAD_MULTICAST_X16_TARGET }
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_MULTICAST_X16_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_timer_enabled = true
         opts.force_payload_multicast_enabled = true
@@ -6916,26 +6855,26 @@ function live_simple_dispatch.onProbe(payload)
         opts.timer_duplicate_schedule_probe = true
         opts.allow_pending_launch_jobs = true
     elseif mode == "timer_payload_pattern_disabled" then
-        probe_root = { real_effects = TIMER_PAYLOAD_SPREAD_MULTICAST_X3_TARGET }
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_SPREAD_MULTICAST_X3_TARGET }
         opts.force_timer_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_disabled = true
     elseif mode == "timer_payload_burst_sequence" then
-        probe_root = { real_effects = TIMER_PAYLOAD_BURST_MULTICAST_X5_TARGET }
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_BURST_MULTICAST_X5_TARGET }
         opts.force_timer_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_enabled = true
         opts.dry_run = false
         opts.timer_duplicate_schedule_probe = true
     elseif mode == "timer_payload_spread_sequence" then
-        probe_root = { real_effects = TIMER_PAYLOAD_SPREAD_MULTICAST_X3_TARGET }
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_SPREAD_MULTICAST_X3_TARGET }
         opts.force_timer_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_payload_pattern_enabled = true
         opts.dry_run = false
         opts.timer_duplicate_schedule_probe = true
     elseif mode == "chaos_timer_payload_spread_sequence" then
-        probe_root = { real_effects = TIMER_PAYLOAD_SPREAD_MULTICAST_X16_TARGET }
+        probe_root = { real_effects = recipes.TIMER_PAYLOAD_SPREAD_MULTICAST_X16_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_timer_enabled = true
         opts.force_payload_multicast_enabled = true
@@ -6944,54 +6883,54 @@ function live_simple_dispatch.onProbe(payload)
         opts.timer_duplicate_schedule_probe = true
         opts.allow_pending_launch_jobs = true
     elseif mode == "nested_payload_runtime_deferred" then
-        probe_root = { real_effects = TRIGGER_INSIDE_TIMER_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_INSIDE_TIMER_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_nested_trigger_timer_disabled = true
     elseif mode == "nested_trigger_timer_disabled" then
-        probe_root = { real_effects = TRIGGER_INSIDE_TIMER_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_INSIDE_TIMER_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_disabled = true
     elseif mode == "nested_timer_trigger_sequence" then
-        probe_root = { real_effects = TRIGGER_INSIDE_TIMER_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_INSIDE_TIMER_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
         opts.dry_run = false
         opts.timer_duplicate_schedule_probe = true
     elseif mode == "nested_trigger_timer_sequence" then
-        probe_root = { real_effects = TIMER_INSIDE_TRIGGER_TARGET }
+        probe_root = { real_effects = recipes.TIMER_INSIDE_TRIGGER_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
         opts.dry_run = false
     elseif mode == "nested_tt_depth_reject" then
-        probe_root = { real_effects = TIMER_TRIGGER_TIMER_DEPTH_TARGET }
+        probe_root = { real_effects = recipes.TIMER_TRIGGER_TIMER_DEPTH_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
     elseif mode == "nested_tt_same_kind_reject" then
-        probe_root = { real_effects = TIMER_INSIDE_TIMER_TARGET }
+        probe_root = { real_effects = recipes.TIMER_INSIDE_TIMER_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
     elseif mode == "nested_tt_fanout_reject" then
-        probe_root = { real_effects = TIMER_TRIGGER_NESTED_MULTICAST_TARGET }
+        probe_root = { real_effects = recipes.TIMER_TRIGGER_NESTED_MULTICAST_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
         opts.force_nested_final_fanout_disabled = true
     elseif mode == "nested_final_fanout_disabled" then
-        probe_root = { real_effects = TRIGGER_TIMER_NESTED_MULTICAST_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_TIMER_NESTED_MULTICAST_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_nested_final_fanout_disabled = true
     elseif mode == "nested_trigger_timer_final_multicast_sequence" then
-        probe_root = { real_effects = TRIGGER_TIMER_NESTED_MULTICAST_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_TIMER_NESTED_MULTICAST_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
@@ -6999,7 +6938,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.force_payload_multicast_enabled = true
         opts.dry_run = false
     elseif mode == "chaos_nested_trigger_timer_final_multicast_sequence" then
-        probe_root = { real_effects = TRIGGER_TIMER_NESTED_MULTICAST_X16_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_TIMER_NESTED_MULTICAST_X16_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
@@ -7009,7 +6948,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.dry_run = false
         opts.allow_pending_launch_jobs = true
     elseif mode == "nested_trigger_timer_final_burst_sequence" then
-        probe_root = { real_effects = TRIGGER_TIMER_NESTED_BURST_MULTICAST_X5_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_TIMER_NESTED_BURST_MULTICAST_X5_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
@@ -7018,7 +6957,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.force_payload_pattern_enabled = true
         opts.dry_run = false
     elseif mode == "nested_timer_trigger_final_multicast_sequence" then
-        probe_root = { real_effects = TIMER_TRIGGER_NESTED_MULTICAST_TARGET }
+        probe_root = { real_effects = recipes.TIMER_TRIGGER_NESTED_MULTICAST_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
@@ -7027,7 +6966,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.dry_run = false
         opts.timer_duplicate_schedule_probe = true
     elseif mode == "nested_timer_trigger_final_spread_sequence" then
-        probe_root = { real_effects = TIMER_TRIGGER_NESTED_SPREAD_MULTICAST_X3_TARGET }
+        probe_root = { real_effects = recipes.TIMER_TRIGGER_NESTED_SPREAD_MULTICAST_X3_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
@@ -7037,7 +6976,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.dry_run = false
         opts.timer_duplicate_schedule_probe = true
     elseif mode == "chaos_nested_timer_trigger_final_spread_sequence" then
-        probe_root = { real_effects = TIMER_TRIGGER_NESTED_SPREAD_MULTICAST_X16_TARGET }
+        probe_root = { real_effects = recipes.TIMER_TRIGGER_NESTED_SPREAD_MULTICAST_X16_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
@@ -7049,7 +6988,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.timer_duplicate_schedule_probe = true
         opts.allow_pending_launch_jobs = true
     elseif mode == "nested_final_fanout_cap_reject" then
-        probe_root = { real_effects = TIMER_TRIGGER_NESTED_MULTICAST_TARGET }
+        probe_root = { real_effects = recipes.TIMER_TRIGGER_NESTED_MULTICAST_TARGET }
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
         opts.force_nested_trigger_timer_enabled = true
@@ -7057,7 +6996,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.force_payload_multicast_enabled = true
         opts.nested_final_fanout_max_fanout = 2
     elseif mode == "chaos_nested_final_fanout_over_cap" then
-        probe_root = { real_effects = TRIGGER_TIMER_NESTED_MULTICAST_OVER_CHAOS_CAP_TARGET }
+        probe_root = { real_effects = recipes.TRIGGER_TIMER_NESTED_MULTICAST_OVER_CHAOS_CAP_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_timer_enabled = true
         opts.force_trigger_enabled = true
@@ -7065,29 +7004,29 @@ function live_simple_dispatch.onProbe(payload)
         opts.force_nested_final_fanout_enabled = true
         opts.force_payload_multicast_enabled = true
     elseif mode == "chaos_chain_multicast_still_deferred" then
-        probe_root = { real_effects = CHAIN_MULTICAST_TARGET }
+        probe_root = { real_effects = recipes.CHAIN_MULTICAST_TARGET }
         opts.force_chaos_budget_enabled = true
         opts.force_chain_runtime_enabled = true
         opts.force_payload_multicast_enabled = true
         opts.force_chain_multicast_disabled = true
     elseif mode == "speed_plus_disabled" then
-        probe_root = { real_effects = SPEED_PLUS_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SPEED_PLUS_FIRE_DAMAGE_TARGET }
         opts.force_speed_plus_disabled = true
     elseif mode == "speed_plus_dry_run" then
-        probe_root = { real_effects = SPEED_PLUS_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SPEED_PLUS_FIRE_DAMAGE_TARGET }
         opts.force_speed_plus_enabled = true
     elseif mode == "speed_plus_launch" then
-        probe_root = { real_effects = SPEED_PLUS_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SPEED_PLUS_FIRE_DAMAGE_TARGET }
         opts.force_speed_plus_enabled = true
         opts.dry_run = false
     elseif mode == "size_plus_disabled" then
-        probe_root = { real_effects = SIZE_PLUS_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SIZE_PLUS_FIRE_DAMAGE_TARGET }
         opts.force_size_plus_disabled = true
     elseif mode == "size_plus_dry_run" then
-        probe_root = { real_effects = SIZE_PLUS_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SIZE_PLUS_FIRE_DAMAGE_TARGET }
         opts.force_size_plus_enabled = true
     elseif mode == "size_plus_launch" then
-        probe_root = { real_effects = SIZE_PLUS_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.SIZE_PLUS_FIRE_DAMAGE_TARGET }
         opts.force_size_plus_enabled = true
         opts.dry_run = false
     elseif mode == "homing_disabled" then
@@ -7140,7 +7079,7 @@ function live_simple_dispatch.onProbe(payload)
         opts.soft_homing_probe = true
         opts.soft_homing_max_lifetime_seconds = limits.HOMING_MAX_LIFETIME_SECONDS
     elseif mode == "non_qualifying" then
-        probe_root = { real_effects = NON_QUALIFYING_CHAIN_FIRE_DAMAGE_TARGET }
+        probe_root = { real_effects = recipes.NON_QUALIFYING_CHAIN_FIRE_DAMAGE_TARGET }
     elseif mode ~= "qualifying_dry_run" then
         send(sender, events.LIVE_SIMPLE_DISPATCH_PROBE_RESULT, {
             request_id = payload and payload.request_id,
@@ -7210,6 +7149,7 @@ function live_simple_dispatch.onProbe(payload)
     end
     if (mode == "bounce_trigger_simple_post_bounce"
         or mode == "bounce_trigger_multicast_post_bounce"
+        or mode == "bounce_trigger_burst_post_bounce"
         or mode == "bounce_chain_payload_no_target"
         or mode == "bounce_chain_payload_mock_handoff")
         and result.ok == true
@@ -7238,6 +7178,9 @@ function live_simple_dispatch.onProbe(payload)
         }
         if mode == "bounce_trigger_multicast_post_bounce" then
             bounce_opts.force_payload_multicast_enabled = true
+        elseif mode == "bounce_trigger_burst_post_bounce" then
+            bounce_opts.force_payload_multicast_enabled = true
+            bounce_opts.force_payload_pattern_enabled = true
         elseif mode == "bounce_chain_payload_no_target"
             or mode == "bounce_chain_payload_mock_handoff" then
             bounce_opts.force_chain_runtime_enabled = true
@@ -7257,6 +7200,11 @@ function live_simple_dispatch.onProbe(payload)
         result.bounce_trigger_payload_launch_count = first_payload and first_payload.launch_count or nil
         result.bounce_trigger_payload_projectile_ids = first_payload and first_payload.projectile_ids or nil
         result.bounce_trigger_payload_launch_user_data = first_payload and first_payload.launch_user_data or nil
+        result.ir_bounce_runtime = first_payload and first_payload.ir_bounce_runtime == true or false
+        result.ir_bounce_runtime_job_count = first_payload and first_payload.ir_bounce_runtime_job_count or nil
+        result.ir_bounce_runtime_fallback_used = first_payload and first_payload.ir_bounce_runtime_fallback_used == true or false
+        result.ir_bounce_runtime_fallback_reason = first_payload and first_payload.ir_bounce_runtime_fallback_reason or nil
+        result.ir_bounce_runtime_mismatch = first_payload and first_payload.ir_bounce_runtime_mismatch == true or false
         result.bounce_chain_stop_reason = first_payload and first_payload.stop_reason or nil
         result.bounce_chain_result = first_payload and first_payload.chain_result or nil
         result.bounce_chain_provider = first_payload and first_payload.provider or nil
@@ -7266,6 +7214,108 @@ function live_simple_dispatch.onProbe(payload)
         result.bounce_duplicate_suppressed = duplicate and duplicate.duplicate_suppressed == true
         if first and first.ok == true and duplicate and duplicate.duplicate_suppressed == true then
             runtime_stats.inc("live_bounce_trigger_payload_smoke_observed")
+        end
+    end
+    if (mode == "pierce_trigger_simple_event"
+        or mode == "pierce_trigger_multicast_event"
+        or mode == "pierce_trigger_pattern_event"
+        or mode == "pierce_trigger_spread_event"
+        or mode == "pierce_trigger_chain_event")
+        and result.ok == true
+        and result.pending_source_launch_job ~= true then
+        local source_job = result.jobs and result.jobs[1] or nil
+        local user_data = source_job and source_job.launch_user_data or nil
+        local pierce_hit_pos = { x = 0, y = 0, z = 0 }
+        local pierce_velocity = { x = 1, y = 0, z = 0 }
+        local pierce_actor = {
+            id = "A",
+            object = "A",
+            position = pierce_hit_pos,
+            cell = "chain-test-cell",
+            is_actor = true,
+            is_alive = true,
+            is_valid = true,
+        }
+        local pierce_payload = {
+            spellId = result.helper_engine_id,
+            projectileId = result.projectile_id or ((payload and payload.request_id or "pierce-event") .. ":source-projectile"),
+            userData = user_data,
+            attacker = payload and (payload.actor or payload.sender),
+            hitObject = pierce_actor,
+            actorId = "A",
+            hitPos = pierce_hit_pos,
+            hitNormal = { x = -1, y = 0, z = 0 },
+            velocity = pierce_velocity,
+            pierceCount = 1,
+            pierceLimit = result.pierce_limit,
+            isPierce = true,
+        }
+        local pierce_opts = {
+            force_enabled = true,
+            allow_payload_multicast = mode == "pierce_trigger_multicast_event"
+                or mode == "pierce_trigger_pattern_event"
+                or mode == "pierce_trigger_spread_event",
+            allow_payload_pattern = mode == "pierce_trigger_pattern_event"
+                or mode == "pierce_trigger_spread_event",
+            allow_chain_multicast = false,
+            simulate_update_ticks = true,
+        }
+        local first = live_pierce.handlePiercePayload(pierce_payload, pierce_opts)
+        local duplicate = live_pierce.handlePiercePayload(pierce_payload, pierce_opts)
+        local first_payload = first
+        if first and type(first.job_ids) == "table" and #first.job_ids > 0 and first.jobs == nil then
+            tickUntilJobsSettled(first.job_ids, options)
+            local jobs = {}
+            for index, job_id in ipairs(first.job_ids) do
+                jobs[index] = jobSummary(job_id)
+            end
+            first.jobs = jobs
+        end
+        result.post_pierce_result = first
+        result.duplicate_pierce_result = duplicate
+        result.pierce_trigger_route = first_payload and first_payload.trigger_route or nil
+        result.pierce_trigger_payload_job_id = first_payload and first_payload.job_id or nil
+        result.pierce_trigger_payload_job_ids = first_payload and first_payload.job_ids or nil
+        result.pierce_trigger_payload_jobs = first_payload and first_payload.jobs or nil
+        result.pierce_trigger_payload_slot_id = first_payload and first_payload.payload_slot_id or nil
+        result.pierce_trigger_payload_slot_ids = first_payload and first_payload.payload_slot_ids or nil
+        result.pierce_trigger_payload_count = first_payload and first_payload.payload_count or nil
+        result.pierce_trigger_payload_launch_count = first_payload and first_payload.launch_count or nil
+        local first_job_summary = first_payload and first_payload.jobs and first_payload.jobs[1] or nil
+        local first_job_user_data = first_job_summary and first_job_summary.launch_user_data or nil
+        if type(first_job_summary) == "table" then
+            if type(first_job_user_data) ~= "table" then
+                first_job_user_data = {}
+            end
+            first_job_user_data.trigger_route = first_job_user_data.trigger_route or first_job_summary.trigger_route
+            first_job_user_data.pierce_runtime = first_job_user_data.pierce_runtime or first_job_summary.pierce_runtime
+            first_job_user_data.pierce_role = first_job_user_data.pierce_role or first_job_summary.pierce_role
+            first_job_user_data.current_hit_target_id = first_job_user_data.current_hit_target_id or first_job_summary.current_hit_target_id
+            first_job_user_data.excludeTarget = first_job_user_data.excludeTarget or first_job_summary.excludeTarget
+        end
+        result.pierce_trigger_payload_launch_user_data = first_job_user_data or first_payload
+            and first_payload.jobs
+            and first_payload.jobs[1]
+            and first_payload.jobs[1].launch_user_data
+            or nil
+        result.pierce_chain_result = first_payload and first_payload.pierce_chain_result or first_payload and first_payload.chain_result or nil
+        result.pierce_chain_provider = first_payload and first_payload.provider or nil
+        result.pierce_chain_hop_index = first_payload and first_payload.chain_hop_index or nil
+        result.pierce_chain_current_hit_target_id = first_payload and first_payload.current_hit_target_id or nil
+        result.pierce_chain_selected_target_id = first_payload and first_payload.selected_target_id or nil
+        result.ir_pierce_runtime = first_payload and first_payload.ir_pierce_runtime == true or false
+        result.ir_pierce_runtime_job_count = first_payload and first_payload.ir_pierce_runtime_job_count or nil
+        result.pierce_duplicate_suppressed = duplicate and duplicate.duplicate == true
+        local first_job = result.pierce_trigger_payload_jobs and result.pierce_trigger_payload_jobs[1] or nil
+        local launch_start = first_job and first_job.launch_start_pos or nil
+        result.pierce_payload_origin_safe = launch_start ~= nil
+            and (tonumber(launch_start.x) ~= tonumber(pierce_hit_pos.x)
+                or tonumber(launch_start.y) ~= tonumber(pierce_hit_pos.y)
+                or tonumber(launch_start.z) ~= tonumber(pierce_hit_pos.z))
+        result.pierce_exclude_target_carried = first_job and first_job.excludeTarget ~= nil or false
+        result.pierce_current_hit_target_id = first_job and first_job.current_hit_target_id or result.pierce_chain_current_hit_target_id
+        if first and first.ok == true and duplicate and duplicate.duplicate == true then
+            runtime_stats.inc("live_pierce_trigger_payload_ok")
         end
     end
     if mode == "timer_launch" and result.ok == true and type(result.timer_id) == "string" then
@@ -7319,7 +7369,7 @@ function live_simple_dispatch.onProbe(payload)
         result.expected_payload_count = expected_payload_count
     end
     local ok = false
-    if mode == "non_qualifying" or mode == "multicast_disabled" or mode == "spread_disabled" or mode == "burst_disabled" or mode == "trigger_disabled" or mode == "timer_disabled" or mode == "speed_plus_disabled" or mode == "size_plus_disabled" or mode == "homing_disabled" or mode == "bounce_disabled" or mode == "bounce_over_cap" or mode == "bounce_fanout_deferred" or mode == "bounce_timer_deferred" or mode == "bounce_chain_deferred" or mode == "bounce_chain_payload_disabled" or mode == "bounce_nested_payload_deferred" or mode == "bounce_speed_plus_deferred" or mode == "bounce_size_plus_deferred" or mode == "bounce_homing_deferred" or mode == "bounce_trigger_multicast_disabled" or mode == "bounce_trigger_pattern_disabled" or mode == "payload_multicast_disabled" or mode == "trigger_payload_multicast_disabled" or mode == "timer_payload_multicast_disabled" or mode == "trigger_payload_pattern_disabled" or mode == "timer_payload_pattern_disabled" or mode == "nested_trigger_timer_disabled" or mode == "nested_tt_depth_reject" or mode == "nested_tt_same_kind_reject" or mode == "nested_tt_fanout_reject" or mode == "nested_final_fanout_disabled" or mode == "nested_final_fanout_cap_reject" or mode == "chaos_multicast_over_cap" or mode == "chaos_nested_final_fanout_over_cap" or mode == "chaos_chain_multicast_still_deferred" then
+    if mode == "non_qualifying" or mode == "multicast_disabled" or mode == "spread_disabled" or mode == "burst_disabled" or mode == "trigger_disabled" or mode == "timer_disabled" or mode == "speed_plus_disabled" or mode == "size_plus_disabled" or mode == "homing_disabled" or mode == "bounce_disabled" or mode == "bounce_over_cap" or mode == "bounce_fanout_deferred" or mode == "bounce_timer_deferred" or mode == "bounce_chain_deferred" or mode == "bounce_chain_payload_disabled" or mode == "bounce_nested_payload_deferred" or mode == "bounce_speed_plus_deferred" or mode == "bounce_size_plus_deferred" or mode == "bounce_homing_deferred" or mode == "bounce_trigger_multicast_disabled" or mode == "bounce_trigger_pattern_disabled" or mode == "pierce_disabled" or mode == "pierce_trigger_multicast_disabled" or mode == "pierce_trigger_pattern_disabled" or mode == "pierce_chain_payload_disabled" or mode == "pierce_timer_deferred" or mode == "pierce_bounce_deferred" or mode == "pierce_homing_deferred" or mode == "pierce_speed_plus_deferred" or mode == "pierce_size_plus_deferred" or mode == "pierce_chain_deferred" or mode == "pierce_fanout_deferred" or mode == "pierce_nested_payload_deferred" or mode == "pierce_recursion_deferred" or mode == "payload_multicast_disabled" or mode == "trigger_payload_multicast_disabled" or mode == "timer_payload_multicast_disabled" or mode == "trigger_payload_pattern_disabled" or mode == "timer_payload_pattern_disabled" or mode == "nested_trigger_timer_disabled" or mode == "nested_tt_depth_reject" or mode == "nested_tt_same_kind_reject" or mode == "nested_tt_fanout_reject" or mode == "nested_final_fanout_disabled" or mode == "nested_final_fanout_cap_reject" or mode == "chaos_multicast_over_cap" or mode == "chaos_nested_final_fanout_over_cap" or mode == "chaos_chain_multicast_still_deferred" then
         ok = result.ok == false and result.used_live_2_2c == false and type(result.fallback_reason) == "string"
     elseif mode == "speed_plus_dry_run" then
         ok = result.ok == true
@@ -7470,14 +7520,14 @@ function live_simple_dispatch.onProbe(payload)
             runtime_stats.inc("live_homing_smoke_observed")
         end
     elseif mode == "multicast_dry_run" or mode == "chaos_multicast_high_dry_run" then
-        local expected_count = mode == "chaos_multicast_high_dry_run" and CHAOS_HIGH_FANOUT_COUNT or 3
+        local expected_count = mode == "chaos_multicast_high_dry_run" and recipes.CHAOS_HIGH_FANOUT_COUNT or 3
         ok = result.ok == true
             and result.used_live_2_2c == true
             and result.dry_run == true
             and result.live_mode == "multicast"
             and result.dispatch_count == expected_count
     elseif mode == "multicast_launch" or mode == "chaos_multicast_high_launch" then
-        local expected_count = mode == "chaos_multicast_high_launch" and CHAOS_HIGH_FANOUT_COUNT or 3
+        local expected_count = mode == "chaos_multicast_high_launch" and recipes.CHAOS_HIGH_FANOUT_COUNT or 3
         ok = result.ok == true
             and result.used_live_2_2c == true
             and result.live_mode == "multicast"
@@ -7692,7 +7742,9 @@ function live_simple_dispatch.onProbe(payload)
             and #result.trigger_payload_slot_ids == 3
             and result.payload_projectile_launches == 0
             and result.payload_detonation_mode == "bounce_trigger_payload_fanout"
-    elseif mode == "bounce_trigger_multicast_post_bounce" then
+    elseif mode == "bounce_trigger_multicast_post_bounce" or mode == "bounce_trigger_burst_post_bounce" then
+        local expected_count = mode == "bounce_trigger_burst_post_bounce" and 5 or 3
+        local expected_kind = mode == "bounce_trigger_burst_post_bounce" and "Burst" or nil
         local first_job = result.bounce_trigger_payload_jobs and result.bounce_trigger_payload_jobs[1] or nil
         local user_data = result.bounce_trigger_payload_launch_user_data
         ok = result.ok == true
@@ -7702,23 +7754,24 @@ function live_simple_dispatch.onProbe(payload)
             and result.dispatch_count == 1
             and result.bounce_probe_binding_registered == true
             and result.payload_multicast == true
-            and result.payload_pattern == false
+            and (expected_kind == nil or (result.payload_pattern == true and result.payload_pattern_kind == expected_kind))
+            and (expected_kind ~= nil or result.payload_pattern == false)
             and result.post_bounce_result
             and result.post_bounce_result.ok == true
             and result.bounce_duplicate_suppressed == true
             and result.bounce_trigger_route == "bounce"
-            and tonumber(result.bounce_trigger_payload_count) == 3
-            and tonumber(result.bounce_trigger_payload_launch_count) == 3
+            and tonumber(result.bounce_trigger_payload_count) == expected_count
+            and tonumber(result.bounce_trigger_payload_launch_count) == expected_count
             and type(result.bounce_trigger_payload_slot_ids) == "table"
-            and #result.bounce_trigger_payload_slot_ids == 3
+            and #result.bounce_trigger_payload_slot_ids == expected_count
             and type(first_job) == "table"
             and first_job.trigger_route == "bounce"
             and first_job.bounce_runtime == true
-            and first_job.branch_kind == "bounce_trigger_payload_multicast"
+            and first_job.branch_kind == (expected_kind and "bounce_trigger_payload_pattern" or "bounce_trigger_payload_multicast")
             and type(user_data) == "table"
             and user_data.trigger_route == "bounce"
             and user_data.bounce_role == "trigger_payload_launch"
-            and user_data.branch_kind == "bounce_trigger_payload_multicast"
+            and user_data.branch_kind == (expected_kind and "bounce_trigger_payload_pattern" or "bounce_trigger_payload_multicast")
     elseif mode == "bounce_trigger_burst_dry_run" or mode == "bounce_trigger_spread_dry_run" then
         local expected_count = mode == "bounce_trigger_burst_dry_run" and 5 or 3
         local expected_kind = mode == "bounce_trigger_burst_dry_run" and "Burst" or "Spread"
@@ -7780,6 +7833,128 @@ function live_simple_dispatch.onProbe(payload)
             and user_data.bounce_trigger_payload_slot_id == result.trigger_payload_slot_id
             and user_data.source_prefix_opcode == "Bounce"
             and user_data.source_postfix_opcode == "Trigger"
+    elseif mode == "pierce_source_only_dry_run" then
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "pierce"
+            and result.pierce_mode == "source"
+            and result.dispatch_count == 1
+            and result.source_dispatch_count == 1
+            and tonumber(result.pierce_limit) == 3
+            and result.piercing == true
+            and tonumber(result.pierceLimit) == 3
+            and type(result.source_slot_id) == "string"
+            and type(result.source_helper_engine_id) == "string"
+            and result.has_trigger_payload == false
+            and result.trigger_payload_slot_id == nil
+            and tonumber(result.payload_count) == 0
+            and result.payload_multicast == false
+            and result.payload_pattern == false
+            and result.payload_chain_runtime == false
+            and result.has_chain_payload == false
+            and result.pierce_probe_binding_registered == false
+    elseif mode == "pierce_source_only_launch" then
+        local job = result.jobs and result.jobs[1] or nil
+        local user_data = job and job.launch_user_data or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.live_mode == "pierce"
+            and result.dispatch_count == 1
+            and result.source_dispatch_count == 1
+            and tonumber(result.pierce_limit) == 3
+            and job
+            and job.job_status == "complete"
+            and job.launch_accepted == true
+            and job.piercing == true
+            and tonumber(job.pierceLimit) == 3
+            and job.post_launch_pierce_ok == true
+            and type(user_data) == "table"
+            and user_data.pierce_runtime == true
+            and user_data.pierce_role == "source"
+            and user_data.pierce_trigger_payload_slot_id == nil
+            and user_data.source_prefix_opcode == "Pierce"
+            and user_data.source_postfix_opcode == nil
+    elseif mode == "pierce_trigger_simple_event" then
+        local user_data = result.pierce_trigger_payload_launch_user_data
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "pierce"
+            and result.pierce_probe_binding_registered == true
+            and result.post_pierce_result
+            and result.post_pierce_result.ok == true
+            and result.pierce_duplicate_suppressed == true
+            and result.pierce_trigger_route == "pierce"
+            and tonumber(result.pierce_trigger_payload_count) == 1
+            and tonumber(result.pierce_trigger_payload_launch_count) == 1
+            and result.pierce_payload_origin_safe == true
+            and result.pierce_exclude_target_carried == true
+            and result.pierce_current_hit_target_id == "A"
+            and type(user_data) == "table"
+            and user_data.trigger_route == "pierce"
+            and user_data.pierce_runtime == true
+            and user_data.pierce_role == "trigger_payload_launch"
+            and user_data.current_hit_target_id == "A"
+            and user_data.excludeTarget ~= nil
+    elseif mode == "pierce_trigger_multicast_event"
+        or mode == "pierce_trigger_pattern_event"
+        or mode == "pierce_trigger_spread_event" then
+        local expected_count = mode == "pierce_trigger_pattern_event" and 5 or 3
+        local expected_kind = mode == "pierce_trigger_pattern_event" and "Burst"
+            or mode == "pierce_trigger_spread_event" and "Spread"
+            or nil
+        local first_job = result.pierce_trigger_payload_jobs and result.pierce_trigger_payload_jobs[1] or nil
+        local user_data = result.pierce_trigger_payload_launch_user_data
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "pierce"
+            and result.pierce_probe_binding_registered == true
+            and result.payload_multicast == true
+            and (expected_kind == nil or (result.payload_pattern == true and result.payload_pattern_kind == expected_kind))
+            and (expected_kind ~= nil or result.payload_pattern == false)
+            and result.post_pierce_result
+            and result.post_pierce_result.ok == true
+            and result.pierce_duplicate_suppressed == true
+            and result.pierce_trigger_route == "pierce"
+            and tonumber(result.pierce_trigger_payload_count) == expected_count
+            and tonumber(result.pierce_trigger_payload_launch_count) == expected_count
+            and type(result.pierce_trigger_payload_slot_ids) == "table"
+            and #result.pierce_trigger_payload_slot_ids == expected_count
+            and type(first_job) == "table"
+            and first_job.trigger_route == "pierce"
+            and first_job.pierce_runtime == true
+            and first_job.current_hit_target_id == "A"
+            and first_job.excludeTarget ~= nil
+            and type(user_data) == "table"
+            and user_data.trigger_route == "pierce"
+            and user_data.pierce_runtime == true
+            and user_data.pierce_role == "trigger_payload_launch"
+    elseif mode == "pierce_trigger_chain_event" then
+        local chain_result = result.pierce_chain_result
+        local first_job = result.pierce_trigger_payload_jobs and result.pierce_trigger_payload_jobs[1] or nil
+        ok = result.ok == true
+            and result.used_live_2_2c == true
+            and result.dry_run == true
+            and result.live_mode == "pierce"
+            and result.pierce_probe_binding_registered == true
+            and result.payload_chain_runtime == true
+            and result.post_pierce_result
+            and result.post_pierce_result.ok == true
+            and result.pierce_duplicate_suppressed == true
+            and result.pierce_trigger_route == "pierce_chain"
+            and type(chain_result) == "table"
+            and chain_result.ok == true
+            and chain_result.provider == "mock"
+            and tonumber(chain_result.launch_count) == 1
+            and tonumber(result.pierce_chain_hop_index) == 1
+            and result.pierce_chain_current_hit_target_id == "A"
+            and result.pierce_chain_selected_target_id == "B"
+            and type(first_job) == "table"
+            and first_job.chain_runtime == true
+            and first_job.chain_role == "payload"
+            and first_job.current_hit_target_id == "A"
     elseif mode == "trigger_post_hit" or mode == "trigger_post_hit_fallback" then
         local user_data = result.trigger_payload_launch_user_data
         ok = result.ok == true
@@ -7797,7 +7972,7 @@ function live_simple_dispatch.onProbe(payload)
             and user_data.payload_slot_id == result.trigger_payload_slot_id
             and user_data.depth == 1
     elseif mode == "trigger_payload_multicast_post_hit" or mode == "chaos_trigger_payload_multicast_post_hit" then
-        local expected_count = mode == "chaos_trigger_payload_multicast_post_hit" and CHAOS_HIGH_FANOUT_COUNT or 3
+        local expected_count = mode == "chaos_trigger_payload_multicast_post_hit" and recipes.CHAOS_HIGH_FANOUT_COUNT or 3
         local source_pending_ok = mode == "chaos_trigger_payload_multicast_post_hit"
             and result.pending_source_launch_job == true
         local pending_ok = mode == "chaos_trigger_payload_multicast_post_hit"
@@ -7815,7 +7990,7 @@ function live_simple_dispatch.onProbe(payload)
             and type(result.trigger_payload_slot_ids) == "table"
             and #result.trigger_payload_slot_ids == expected_count)
     elseif mode == "trigger_payload_burst_post_hit" or mode == "trigger_payload_spread_post_hit" or mode == "chaos_trigger_payload_burst_post_hit" then
-        local expected_count = mode == "trigger_payload_burst_post_hit" and 5 or (mode == "chaos_trigger_payload_burst_post_hit" and CHAOS_HIGH_FANOUT_COUNT or 3)
+        local expected_count = mode == "trigger_payload_burst_post_hit" and 5 or (mode == "chaos_trigger_payload_burst_post_hit" and recipes.CHAOS_HIGH_FANOUT_COUNT or 3)
         local expected_kind = (mode == "trigger_payload_burst_post_hit" or mode == "chaos_trigger_payload_burst_post_hit") and "Burst" or "Spread"
         local source_pending_ok = mode == "chaos_trigger_payload_burst_post_hit"
             and result.pending_source_launch_job == true
@@ -7891,7 +8066,7 @@ function live_simple_dispatch.onProbe(payload)
             and tonumber(result.timer_delay_seconds) ~= nil
             and tonumber(result.timer_due_seconds) ~= nil
     elseif mode == "timer_payload_multicast_sequence" or mode == "chaos_timer_payload_multicast_sequence" then
-        local expected_count = mode == "chaos_timer_payload_multicast_sequence" and CHAOS_HIGH_FANOUT_COUNT or 3
+        local expected_count = mode == "chaos_timer_payload_multicast_sequence" and recipes.CHAOS_HIGH_FANOUT_COUNT or 3
         ok = result.ok == true
             and result.used_live_2_2c == true
             and result.live_mode == "timer"
@@ -7910,7 +8085,7 @@ function live_simple_dispatch.onProbe(payload)
             and result.timer_delay_semantics == "async_simulation_timer"
             and result.real_delay_test == true
     elseif mode == "timer_payload_burst_sequence" or mode == "timer_payload_spread_sequence" or mode == "chaos_timer_payload_spread_sequence" then
-        local expected_count = mode == "timer_payload_burst_sequence" and 5 or (mode == "chaos_timer_payload_spread_sequence" and CHAOS_HIGH_FANOUT_COUNT or 3)
+        local expected_count = mode == "timer_payload_burst_sequence" and 5 or (mode == "chaos_timer_payload_spread_sequence" and recipes.CHAOS_HIGH_FANOUT_COUNT or 3)
         local expected_kind = mode == "timer_payload_burst_sequence" and "Burst" or "Spread"
         ok = result.ok == true
             and result.used_live_2_2c == true

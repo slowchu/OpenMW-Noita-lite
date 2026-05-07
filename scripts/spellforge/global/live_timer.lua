@@ -1,8 +1,10 @@
 local async = require("openmw.async")
 
+local dev = require("scripts.spellforge.shared.dev")
 local limits = require("scripts.spellforge.shared.limits")
 local log = require("scripts.spellforge.shared.log").new("global.live_timer")
 local helper_records = require("scripts.spellforge.global.helper_records")
+local ir_runtime_adapter = require("scripts.spellforge.global.ir_runtime_adapter")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
 local payload_multicast = require("scripts.spellforge.global.payload_multicast")
 local payload_pattern = require("scripts.spellforge.global.payload_pattern")
@@ -515,6 +517,14 @@ local function shortKey(key)
     return nil
 end
 
+local function shallowCopy(value)
+    local out = {}
+    for key, item in pairs(value or {}) do
+        out[key] = item
+    end
+    return out
+end
+
 local function sourceUserData(value)
     if type(value) == "table" then
         return value.source_user_data
@@ -581,6 +591,88 @@ local function copyBranchFields(target, branch)
     target.branch_index = branch.branch_index
     target.branch_count = branch.branch_count
     target.chain_continuation_group_id = branch.chain_continuation_group_id
+end
+
+local function irTimerRuntimeEnabled(options)
+    if options and options.force_ir_timer_runtime_disabled == true then
+        return false
+    end
+    return (options and options.force_ir_timer_runtime_enabled == true)
+        or dev.irTimerRuntimeEnabled()
+end
+
+local function irPlannerOptions(binding, options)
+    return {
+        allow_payload_multicast = binding.payload_multicast == true
+            or (options and options.allow_payload_multicast == true)
+            or (options and options.force_payload_multicast_enabled == true),
+        allow_payload_pattern = binding.payload_pattern == true
+            or (options and options.allow_payload_pattern == true)
+            or (options and options.force_payload_pattern_enabled == true),
+        max_depth = options and options.max_depth or limits.MAX_RECURSION_DEPTH,
+        max_jobs = binding.max_payload_fanout or (options and options.max_jobs),
+        max_fanout = binding.max_payload_fanout or (options and options.max_fanout),
+        max_projectiles = binding.max_projectiles or (options and options.max_projectiles),
+        max_live_launches_per_tick = binding.max_live_launches_per_tick
+            or (options and options.max_live_launches_per_tick),
+        chaos_budget_profile = binding.chaos_budget_profile or (options and options.chaos_budget_profile),
+    }
+end
+
+local function irTimerFallback(binding, reason, marker)
+    runtime_stats.inc("ir_timer_runtime_fallback")
+    log.info(string.format(
+        "%s recipe_id=%s cast_id=%s source_slot_id=%s reason=%s",
+        marker or "SPELLFORGE_IR_TIMER_RUNTIME_FALLBACK",
+        tostring(binding and binding.recipe_id),
+        tostring(binding and binding.cast_id),
+        tostring(binding and binding.source_slot_id),
+        tostring(reason)
+    ))
+    return {
+        fallback = true,
+        reason = reason,
+        mismatch = marker == "SPELLFORGE_IR_TIMER_RUNTIME_MISMATCH",
+    }
+end
+
+local function irTimerMismatch(binding, reason)
+    runtime_stats.inc("ir_timer_runtime_mismatch")
+    return irTimerFallback(binding, reason, "SPELLFORGE_IR_TIMER_RUNTIME_MISMATCH")
+end
+
+local function validateIrTimerJobPlan(binding, payloads, continuation_plan, job_plan)
+    if type(continuation_plan) ~= "table" or continuation_plan.ok ~= true then
+        return false, continuation_plan and continuation_plan.rejection_reason or "continuation_plan_failed"
+    end
+    if continuation_plan.source_slot_id ~= binding.source_slot_id then
+        return false, "source_slot_mismatch"
+    end
+    if continuation_plan.source_helper_engine_id ~= binding.source_helper_engine_id then
+        return false, "source_helper_mismatch"
+    end
+    if type(job_plan) ~= "table" or job_plan.ok ~= true then
+        return false, job_plan and job_plan.rejection_reason or "runtime_job_plan_failed"
+    end
+    if tonumber(job_plan.planned_job_count) ~= #payloads then
+        return false, "payload_count_mismatch"
+    end
+    for index, payload in ipairs(payloads or {}) do
+        local job = job_plan.planned_jobs and job_plan.planned_jobs[index] or nil
+        if type(job) ~= "table" then
+            return false, "planned_job_missing"
+        end
+        if job.slot_id ~= payload.slot_id or job.payload_slot_id ~= payload.slot_id then
+            return false, "payload_slot_mismatch"
+        end
+        if job.helper_engine_id ~= payload.helper_engine_id then
+            return false, "payload_helper_mismatch"
+        end
+        if job.kind ~= orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND then
+            return false, "job_kind_mismatch"
+        end
+    end
+    return true, nil
 end
 
 local function finiteNonNegative(value)
@@ -793,6 +885,54 @@ local function clearPendingTimer(timer_id)
     end
 end
 
+local function buildIrTimerRuntimePlan(binding, payloads, options, timer_context)
+    if not irTimerRuntimeEnabled(options) then
+        return nil
+    end
+    if binding.nested_tt == true or binding.nested_final_fanout == true then
+        return nil
+    end
+
+    runtime_stats.inc("ir_timer_runtime_attempts")
+    local plan = binding.plan or binding.compiled_plan or binding.attached_plan
+    local planner_options = irPlannerOptions(binding, options)
+    local event = {
+        event_kind = "timer_matured",
+        source_slot_id = binding.source_slot_id,
+        source_postfix_opcode = "Timer",
+        cast_id = binding.cast_id,
+        source_job_id = binding.source_job_id,
+        parent_job_id = binding.source_job_id,
+        timer_id = timer_context and timer_context.timer_id,
+        timer_delay_ticks = timer_context and timer_context.delay_ticks,
+        timer_delay_seconds = timer_context and timer_context.delay_seconds,
+        timer_due_tick = timer_context and timer_context.due_tick,
+        timer_due_seconds = timer_context and timer_context.due_seconds,
+        branch_scope = branchScope(binding),
+        branch_parent_id = branchParentId(binding),
+    }
+    local planned = ir_runtime_adapter.planEvent(binding, plan, event, planner_options)
+    if planned.ok ~= true then
+        if planned.stage == "ir" then
+            return irTimerFallback(binding, planned.rejection_reason)
+        end
+        return irTimerMismatch(binding, planned.rejection_reason or "continuation_plan_failed")
+    end
+    local continuation_plan = planned.continuation_plan
+    local job_plan = planned.job_plan
+    local valid, reason = validateIrTimerJobPlan(binding, payloads, continuation_plan, job_plan)
+    if not valid then
+        return irTimerMismatch(binding, reason)
+    end
+
+    return {
+        ok = true,
+        continuation_plan = continuation_plan,
+        job_plan = job_plan,
+        event = event,
+    }
+end
+
 local function validateTimerData(data)
     if type(data) ~= "table" then
         return nil, "timer data missing"
@@ -883,6 +1023,316 @@ local function validateTimerData(data)
     }, nil
 end
 
+local function recordTimerPayloadEnqueued(data, source_result, job_ids, payload_slot_ids, payload_helper_engine_ids, ir_runtime)
+    runtime_stats.inc("live_timer_async_payload_enqueued", #job_ids)
+    runtime_stats.inc("live_timer_payload_jobs_enqueued", #job_ids)
+    if ir_runtime == true then
+        runtime_stats.inc("ir_timer_runtime_enqueued")
+        runtime_stats.inc("ir_timer_runtime_jobs_enqueued", #job_ids)
+    end
+    if data.nested_tt == true then
+        if data.nested_tt_kind == "timer_trigger" then
+            runtime_stats.inc("nested_tt_intermediate_jobs", #job_ids)
+        elseif data.nested_tt_kind == "trigger_timer" then
+            runtime_stats.inc("nested_tt_final_jobs", #job_ids)
+            runtime_stats.inc("nested_tt_runtime_ok")
+        end
+    end
+    if data.payload_multicast == true then
+        runtime_stats.inc("payload_multicast_jobs", #job_ids)
+        runtime_stats.inc("payload_multicast_timer_jobs", #job_ids)
+        runtime_stats.inc("payload_multicast_runtime_ok")
+    end
+    if data.payload_pattern == true then
+        runtime_stats.inc("payload_pattern_jobs", #job_ids)
+        runtime_stats.inc("payload_pattern_timer_jobs", #job_ids)
+        runtime_stats.inc("payload_pattern_runtime_ok")
+        if data.payload_pattern_kind == "Spread" then
+            runtime_stats.inc("payload_pattern_spread_jobs", #job_ids)
+        elseif data.payload_pattern_kind == "Burst" then
+            runtime_stats.inc("payload_pattern_burst_jobs", #job_ids)
+        end
+    end
+    runtime_stats.max("chaos_budget_max_jobs_observed", #job_ids)
+    runtime_stats.max("chaos_budget_max_projectiles_observed", #job_ids)
+    runtime_stats.max("chaos_budget_max_queue_observed", orchestrator.queueLength())
+    if #job_ids > limits.MAX_NESTED_PAYLOAD_FANOUT then
+        runtime_stats.inc("chaos_budget_high_fanout_smoke")
+        log.info(string.format(
+            "SPELLFORGE_CHAOS_STRESS_OK profile=chaos observed_jobs=%d observed_projectiles=%d observed_queue=%d live_mode=timer_payload fanout_count=%d",
+            #job_ids,
+            #job_ids,
+            orchestrator.queueLength(),
+            #job_ids
+        ))
+    end
+    if data.nested_final_fanout == true then
+        runtime_stats.inc("nested_final_fanout_jobs", #job_ids)
+        runtime_stats.inc("nested_final_fanout_timer_jobs", #job_ids)
+        runtime_stats.inc("nested_final_fanout_runtime_ok")
+        if data.payload_pattern_kind == "Spread" then
+            runtime_stats.inc("nested_final_fanout_spread_jobs", #job_ids)
+        elseif data.payload_pattern_kind == "Burst" then
+            runtime_stats.inc("nested_final_fanout_burst_jobs", #job_ids)
+        end
+    end
+    rememberTimerResult(mergeSourceDetonationResult({
+        timer_id = data.timer_id,
+        ok = true,
+        status = "payload_enqueued",
+        job_id = job_ids[1],
+        job_ids = job_ids,
+        payload_count = #job_ids,
+        payload_multicast = data.payload_multicast == true,
+        payload_pattern = data.payload_pattern == true,
+        payload_pattern_kind = data.payload_pattern_kind,
+        payload_pattern_direction_keys = data.payload_pattern_direction_keys,
+        nested_tt = data.nested_tt == true,
+        nested_tt_kind = data.nested_tt_kind,
+        nested_tt_payload_role = data.nested_tt_payload_role,
+        nested_final_fanout = data.nested_final_fanout == true,
+        nested_final_fanout_kind = data.nested_final_fanout_kind,
+        cast_id = data.cast_id,
+        source_slot_id = data.source_slot_id,
+        source_helper_engine_id = data.source_helper_engine_id,
+        payload_slot_id = payload_slot_ids[1],
+        payload_helper_engine_id = payload_helper_engine_ids[1],
+        payload_slot_ids = payload_slot_ids,
+        payload_helper_engine_ids = payload_helper_engine_ids,
+        ir_timer_runtime = ir_runtime == true,
+        ir_timer_runtime_job_count = ir_runtime == true and #job_ids or nil,
+        ir_timer_runtime_fallback_used = data.ir_timer_runtime_fallback_reason ~= nil,
+        ir_timer_runtime_fallback_reason = data.ir_timer_runtime_fallback_reason,
+        ir_timer_runtime_mismatch = data.ir_timer_runtime_mismatch == true,
+    }, source_result))
+    if ir_runtime == true then
+        local first_queued_job = orchestrator.getJob(job_ids[1])
+        log.info(string.format(
+            "SPELLFORGE_IR_TIMER_RUNTIME_ENQUEUED timer_id=%s recipe_id=%s cast_id=%s source_slot_id=%s payload_count=%s first_job_id=%s branch_kind=%s",
+            tostring(data.timer_id),
+            tostring(data.recipe_id),
+            tostring(data.cast_id),
+            tostring(data.source_slot_id),
+            tostring(#job_ids),
+            tostring(job_ids[1]),
+            tostring(first_queued_job and first_queued_job.branch_kind or nil)
+        ))
+    end
+    local marker = data.nested_final_fanout == true
+        and "SPELLFORGE_NESTED_FINAL_FANOUT_TIMER_ENQUEUED"
+        or data.payload_pattern == true
+        and "SPELLFORGE_PAYLOAD_PATTERN_TIMER_ENQUEUED"
+        or data.payload_multicast == true
+        and "SPELLFORGE_PAYLOAD_MULTICAST_TIMER_ENQUEUED"
+        or "SPELLFORGE_LIVE_TIMER_ASYNC_PAYLOAD_ENQUEUED"
+    local first_queued_job = orchestrator.getJob(job_ids[1])
+    log.info(string.format(
+        "%s timer_id=%s job_count=%s cast_id=%s source_slot_id=%s payload_count=%s pattern_kind=%s first_payload_slot_id=%s first_branch_id=%s branch_kind=%s",
+        marker,
+        tostring(data.timer_id),
+        tostring(#job_ids),
+        tostring(data.cast_id),
+        tostring(data.source_slot_id),
+        tostring(#job_ids),
+        tostring(data.payload_pattern_kind),
+        tostring(payload_slot_ids[1]),
+        tostring(first_queued_job and first_queued_job.branch_id or nil),
+        tostring(first_queued_job and first_queued_job.branch_kind or nil)
+    ))
+    return mergeSourceDetonationResult({
+        ok = true,
+        job_id = job_ids[1],
+        job_ids = job_ids,
+        payload_count = #job_ids,
+        timer_id = data.timer_id,
+        ir_timer_runtime = ir_runtime == true,
+        ir_timer_runtime_job_count = ir_runtime == true and #job_ids or nil,
+        ir_timer_runtime_fallback_used = data.ir_timer_runtime_fallback_reason ~= nil,
+        ir_timer_runtime_fallback_reason = data.ir_timer_runtime_fallback_reason,
+        ir_timer_runtime_mismatch = data.ir_timer_runtime_mismatch == true,
+    }, source_result)
+end
+
+local function enrichIrTimerPayload(planned_job, data, payload, index, count, payload_depth)
+    local branch = branchInfo(data, payload, index, count)
+    local payload_launch = shallowCopy(planned_job.payload or {})
+    payload_launch.actor = data.actor
+    payload_launch.start_pos = data.start_pos
+    payload_launch.direction = payload.direction or data.direction
+    payload_launch.hit_object = data.hit_object
+    payload_launch.cast_id = data.cast_id
+    payload_launch.source_slot_id = data.source_slot_id
+    payload_launch.source_helper_engine_id = data.source_helper_engine_id
+    payload_launch.source_postfix_opcode = "Timer"
+    payload_launch.root_source_slot_id = payload.root_source_slot_id or data.root_source_slot_id
+    payload_launch.current_source_slot_id = payload.current_source_slot_id or payload.slot_id
+    payload_launch.parent_slot_id = payload.parent_slot_id or data.source_slot_id
+    payload_launch.payload_depth = payload.payload_depth or payload_depth
+    payload_launch.nested_stage_kind = payload.nested_stage_kind or data.nested_stage_kind
+    payload_launch.nested_stage_index = payload.nested_stage_index or data.nested_stage_index
+    payload_launch.has_trigger_payload = payload.has_trigger_payload
+    payload_launch.has_timer_payload = payload.has_timer_payload
+    payload_launch.payload_slot_id = payload.slot_id
+    payload_launch.timer_source_slot_id = data.source_slot_id
+    payload_launch.timer_payload_slot_id = payload.slot_id
+    payload_launch.timer_id = data.timer_id
+    payload_launch.timer_delay_ticks = data.delay_ticks
+    payload_launch.timer_delay_seconds = data.delay_seconds
+    payload_launch.timer_scheduled_tick = data.scheduled_tick
+    payload_launch.timer_due_tick = data.due_tick
+    payload_launch.timer_scheduled_seconds = data.scheduled_seconds
+    payload_launch.timer_due_seconds = data.due_seconds
+    payload_launch.timer_delay_semantics = "async_simulation_timer"
+    payload_launch.timer_duplicate_key = shortKey(data.duplicate_key)
+    payload_launch.payload_multicast = data.payload_multicast == true
+    payload_launch.payload_pattern = data.payload_pattern == true
+    payload_launch.payload_count = count
+    payload_launch.fanout_count = count
+    payload_launch.emission_index = payload.emission_index
+    payload_launch.group_index = payload.group_index
+    payload_launch.pattern_kind = payload.pattern_kind
+    payload_launch.pattern_index = payload.pattern_index
+    payload_launch.pattern_count = payload.pattern_count
+    payload_launch.pattern_direction_key = payload.pattern_direction_key
+    payload_launch.nested_final_fanout = data.nested_final_fanout == true
+    payload_launch.nested_final_fanout_kind = data.nested_final_fanout_kind
+    payload_launch.final_fanout_count = data.nested_final_fanout == true and count or nil
+    payload_launch.final_fanout_index = data.nested_final_fanout == true and index or nil
+    copyBranchFields(payload_launch, branch)
+
+    local job = shallowCopy(planned_job)
+    job.kind = orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND
+    job.recipe_id = data.recipe_id
+    job.slot_id = payload.slot_id
+    job.helper_engine_id = payload.helper_engine_id
+    job.idempotency_key = string.format("%s:%s", tostring(data.duplicate_key), tostring(payload.slot_id))
+    job.source_job_id = data.source_job_id
+    job.parent_job_id = data.source_job_id
+    job.depth = payload_depth
+    job.cast_id = data.cast_id
+    job.emission_index = payload.emission_index
+    job.group_index = payload.group_index
+    job.fanout_count = count
+    job.max_live_launches_per_tick = data.max_live_launches_per_tick
+    job.chaos_budget_profile = data.chaos_budget_profile
+    job.root_source_slot_id = payload.root_source_slot_id or data.root_source_slot_id
+    job.current_source_slot_id = payload.current_source_slot_id or payload.slot_id
+    job.parent_slot_id = payload.parent_slot_id or data.source_slot_id
+    job.payload_depth = payload.payload_depth or payload_depth
+    job.nested_stage_kind = payload.nested_stage_kind or data.nested_stage_kind
+    job.nested_stage_index = payload.nested_stage_index or data.nested_stage_index
+    job.has_trigger_payload = payload.has_trigger_payload
+    job.has_timer_payload = payload.has_timer_payload
+    job.pattern_kind = payload.pattern_kind
+    job.pattern_index = payload.pattern_index
+    job.pattern_count = payload.pattern_count
+    job.pattern_direction_key = payload.pattern_direction_key
+    job.nested_final_fanout = data.nested_final_fanout == true
+    job.nested_final_fanout_kind = data.nested_final_fanout_kind
+    job.final_fanout_count = data.nested_final_fanout == true and count or nil
+    job.final_fanout_index = data.nested_final_fanout == true and index or nil
+    job.timer_async = true
+    job.timer_id = data.timer_id
+    job.source_slot_id = data.source_slot_id
+    job.source_helper_engine_id = data.source_helper_engine_id
+    job.source_postfix_opcode = "Timer"
+    job.payload_slot_id = payload.slot_id
+    job.timer_source_slot_id = data.source_slot_id
+    job.timer_payload_slot_id = payload.slot_id
+    job.timer_delay_ticks = data.delay_ticks
+    job.timer_delay_seconds = data.delay_seconds
+    job.timer_scheduled_tick = data.scheduled_tick
+    job.timer_due_tick = data.due_tick
+    job.timer_scheduled_seconds = data.scheduled_seconds
+    job.timer_due_seconds = data.due_seconds
+    job.timer_delay_semantics = "async_simulation_timer"
+    job.timer_duplicate_key = shortKey(data.duplicate_key)
+    copyBranchFields(job, branch)
+    job.payload = payload_launch
+    return job
+end
+
+local function noteIrTimerCallbackMismatch(data, reason)
+    runtime_stats.inc("ir_timer_runtime_mismatch")
+    runtime_stats.inc("ir_timer_runtime_fallback")
+    data.ir_timer_runtime_fallback_reason = reason
+    data.ir_timer_runtime_mismatch = true
+    data.ir_timer_runtime = false
+    log.info(string.format(
+        "SPELLFORGE_IR_TIMER_RUNTIME_MISMATCH timer_id=%s recipe_id=%s cast_id=%s source_slot_id=%s reason=%s",
+        tostring(data.timer_id),
+        tostring(data.recipe_id),
+        tostring(data.cast_id),
+        tostring(data.source_slot_id),
+        tostring(reason)
+    ))
+end
+
+local function enqueueIrTimerRuntime(data, validated, source_result)
+    if data.ir_timer_runtime ~= true then
+        return nil
+    end
+    local job_plan = data.ir_timer_runtime_job_plan
+    if type(job_plan) ~= "table" or job_plan.ok ~= true then
+        noteIrTimerCallbackMismatch(data, "runtime_job_plan_missing")
+        return nil
+    end
+    if tonumber(job_plan.planned_job_count) ~= #validated.payloads then
+        noteIrTimerCallbackMismatch(data, "payload_count_mismatch")
+        return nil
+    end
+
+    local job_ids = {}
+    local payload_slot_ids = {}
+    local payload_helper_engine_ids = {}
+    for index, payload in ipairs(validated.payloads) do
+        local planned_job = job_plan.planned_jobs and job_plan.planned_jobs[index] or nil
+        if type(planned_job) ~= "table" then
+            noteIrTimerCallbackMismatch(data, "planned_job_missing")
+            return nil
+        end
+        if planned_job.slot_id ~= payload.slot_id or planned_job.payload_slot_id ~= payload.slot_id then
+            noteIrTimerCallbackMismatch(data, "payload_slot_mismatch")
+            return nil
+        end
+        if planned_job.helper_engine_id ~= payload.helper_engine_id then
+            noteIrTimerCallbackMismatch(data, "payload_helper_mismatch")
+            return nil
+        end
+        if planned_job.kind ~= orchestrator.LIVE_TIMER_PAYLOAD_JOB_KIND then
+            noteIrTimerCallbackMismatch(data, "job_kind_mismatch")
+            return nil
+        end
+
+        local job = enrichIrTimerPayload(planned_job, data, payload, index, #validated.payloads, validated.payload_depth)
+        local enqueue = orchestrator.enqueue(job)
+        if not enqueue.ok then
+            runtime_stats.inc("live_timer_payload_route_failed")
+            rememberTimerResult(mergeSourceDetonationResult({
+                timer_id = data.timer_id,
+                ok = false,
+                error = enqueue.error or "IR timer payload enqueue failed",
+                status = "enqueue_failed",
+                job_ids = job_ids,
+                ir_timer_runtime = true,
+            }, source_result))
+            return { ok = false, error = enqueue.error or "IR timer payload enqueue failed" }
+        end
+        job_ids[#job_ids + 1] = enqueue.job_id
+        payload_slot_ids[#payload_slot_ids + 1] = payload.slot_id
+        payload_helper_engine_ids[#payload_helper_engine_ids + 1] = payload.helper_engine_id
+    end
+
+    return recordTimerPayloadEnqueued(
+        data,
+        source_result,
+        job_ids,
+        payload_slot_ids,
+        payload_helper_engine_ids,
+        true
+    )
+end
+
 local function enqueuePayloadFromTimer(data, source_result)
     local validated, validation_error = validateTimerData(data)
     if not validated then
@@ -894,6 +1344,11 @@ local function enqueuePayloadFromTimer(data, source_result)
             status = "validation_failed",
         }, source_result))
         return { ok = false, error = validation_error }
+    end
+
+    local ir_result = enqueueIrTimerRuntime(data, validated, source_result)
+    if ir_result ~= nil then
+        return ir_result
     end
 
     local job_ids = {}
@@ -1019,106 +1474,14 @@ local function enqueuePayloadFromTimer(data, source_result)
         payload_helper_engine_ids[#payload_helper_engine_ids + 1] = payload.helper_engine_id
     end
 
-    runtime_stats.inc("live_timer_async_payload_enqueued", #job_ids)
-    runtime_stats.inc("live_timer_payload_jobs_enqueued", #job_ids)
-    if data.nested_tt == true then
-        if data.nested_tt_kind == "timer_trigger" then
-            runtime_stats.inc("nested_tt_intermediate_jobs", #job_ids)
-        elseif data.nested_tt_kind == "trigger_timer" then
-            runtime_stats.inc("nested_tt_final_jobs", #job_ids)
-            runtime_stats.inc("nested_tt_runtime_ok")
-        end
-    end
-    if data.payload_multicast == true then
-        runtime_stats.inc("payload_multicast_jobs", #job_ids)
-        runtime_stats.inc("payload_multicast_timer_jobs", #job_ids)
-        runtime_stats.inc("payload_multicast_runtime_ok")
-    end
-    if data.payload_pattern == true then
-        runtime_stats.inc("payload_pattern_jobs", #job_ids)
-        runtime_stats.inc("payload_pattern_timer_jobs", #job_ids)
-        runtime_stats.inc("payload_pattern_runtime_ok")
-        if data.payload_pattern_kind == "Spread" then
-            runtime_stats.inc("payload_pattern_spread_jobs", #job_ids)
-        elseif data.payload_pattern_kind == "Burst" then
-            runtime_stats.inc("payload_pattern_burst_jobs", #job_ids)
-        end
-    end
-    runtime_stats.max("chaos_budget_max_jobs_observed", #job_ids)
-    runtime_stats.max("chaos_budget_max_projectiles_observed", #job_ids)
-    runtime_stats.max("chaos_budget_max_queue_observed", orchestrator.queueLength())
-    if #job_ids > limits.MAX_NESTED_PAYLOAD_FANOUT then
-        runtime_stats.inc("chaos_budget_high_fanout_smoke")
-        log.info(string.format(
-            "SPELLFORGE_CHAOS_STRESS_OK profile=chaos observed_jobs=%d observed_projectiles=%d observed_queue=%d live_mode=timer_payload fanout_count=%d",
-            #job_ids,
-            #job_ids,
-            orchestrator.queueLength(),
-            #job_ids
-        ))
-    end
-    if data.nested_final_fanout == true then
-        runtime_stats.inc("nested_final_fanout_jobs", #job_ids)
-        runtime_stats.inc("nested_final_fanout_timer_jobs", #job_ids)
-        runtime_stats.inc("nested_final_fanout_runtime_ok")
-        if data.payload_pattern_kind == "Spread" then
-            runtime_stats.inc("nested_final_fanout_spread_jobs", #job_ids)
-        elseif data.payload_pattern_kind == "Burst" then
-            runtime_stats.inc("nested_final_fanout_burst_jobs", #job_ids)
-        end
-    end
-    rememberTimerResult(mergeSourceDetonationResult({
-        timer_id = data.timer_id,
-        ok = true,
-        status = "payload_enqueued",
-        job_id = job_ids[1],
-        job_ids = job_ids,
-        payload_count = #job_ids,
-        payload_multicast = data.payload_multicast == true,
-        payload_pattern = data.payload_pattern == true,
-        payload_pattern_kind = data.payload_pattern_kind,
-        payload_pattern_direction_keys = data.payload_pattern_direction_keys,
-        nested_tt = data.nested_tt == true,
-        nested_tt_kind = data.nested_tt_kind,
-        nested_tt_payload_role = data.nested_tt_payload_role,
-        nested_final_fanout = data.nested_final_fanout == true,
-        nested_final_fanout_kind = data.nested_final_fanout_kind,
-        cast_id = data.cast_id,
-        source_slot_id = data.source_slot_id,
-        source_helper_engine_id = data.source_helper_engine_id,
-        payload_slot_id = payload_slot_ids[1],
-        payload_helper_engine_id = payload_helper_engine_ids[1],
-        payload_slot_ids = payload_slot_ids,
-        payload_helper_engine_ids = payload_helper_engine_ids,
-    }, source_result))
-    local marker = data.nested_final_fanout == true
-        and "SPELLFORGE_NESTED_FINAL_FANOUT_TIMER_ENQUEUED"
-        or data.payload_pattern == true
-        and "SPELLFORGE_PAYLOAD_PATTERN_TIMER_ENQUEUED"
-        or data.payload_multicast == true
-        and "SPELLFORGE_PAYLOAD_MULTICAST_TIMER_ENQUEUED"
-        or "SPELLFORGE_LIVE_TIMER_ASYNC_PAYLOAD_ENQUEUED"
-    local first_queued_job = orchestrator.getJob(job_ids[1])
-    log.info(string.format(
-        "%s timer_id=%s job_count=%s cast_id=%s source_slot_id=%s payload_count=%s pattern_kind=%s first_payload_slot_id=%s first_branch_id=%s branch_kind=%s",
-        marker,
-        tostring(data.timer_id),
-        tostring(#job_ids),
-        tostring(data.cast_id),
-        tostring(data.source_slot_id),
-        tostring(#job_ids),
-        tostring(data.payload_pattern_kind),
-        tostring(payload_slot_ids[1]),
-        tostring(first_queued_job and first_queued_job.branch_id or nil),
-        tostring(first_queued_job and first_queued_job.branch_kind or nil)
-    ))
-    return mergeSourceDetonationResult({
-        ok = true,
-        job_id = job_ids[1],
-        job_ids = job_ids,
-        payload_count = #job_ids,
-        timer_id = data.timer_id,
-    }, source_result)
+    return recordTimerPayloadEnqueued(
+        data,
+        source_result,
+        job_ids,
+        payload_slot_ids,
+        payload_helper_engine_ids,
+        false
+    )
 end
 
 local function helperPresentation(helper_engine_id)
@@ -1404,6 +1767,13 @@ function live_timer.schedulePayload(binding, opts)
     ttl_seconds = ttl_seconds or (delay_seconds + TIMER_EXPIRY_GRACE_SECONDS)
     runtime_stats.inc("live_timer_real_delay_attempts")
     local timer_id = nextTimerId(binding)
+    local ir_runtime = buildIrTimerRuntimePlan(binding, payloads, options, {
+        timer_id = timer_id,
+        delay_ticks = delay_ticks,
+        delay_seconds = delay_seconds,
+        due_tick = due_tick,
+        due_seconds = due_seconds,
+    })
     local timer_data = {
         schema = "spellforge_live_timer_async_v1",
         timer_id = timer_id,
@@ -1462,6 +1832,10 @@ function live_timer.schedulePayload(binding, opts)
         ttl_seconds = ttl_seconds,
         duplicate_key = key,
         reliable_arg_complete = true,
+        ir_timer_runtime = ir_runtime and ir_runtime.ok == true or false,
+        ir_timer_runtime_job_plan = ir_runtime and ir_runtime.ok == true and ir_runtime.job_plan or nil,
+        ir_timer_runtime_fallback_reason = ir_runtime and ir_runtime.fallback and ir_runtime.reason or nil,
+        ir_timer_runtime_mismatch = ir_runtime and ir_runtime.mismatch == true or false,
     }
     local callback = live_timer.registerCallbacks()
     local timer_ok, timer_or_err = pcall(function()
@@ -1515,6 +1889,10 @@ function live_timer.schedulePayload(binding, opts)
         ttl_seconds = ttl_seconds,
         pending_count = pendingCount(),
         timer_delay_semantics = "async_simulation_timer",
+        ir_timer_runtime_planned = ir_runtime and ir_runtime.ok == true or false,
+        ir_timer_runtime_fallback_used = ir_runtime and ir_runtime.fallback == true or false,
+        ir_timer_runtime_fallback_reason = ir_runtime and ir_runtime.fallback and ir_runtime.reason or nil,
+        ir_timer_runtime_mismatch = ir_runtime and ir_runtime.mismatch == true or false,
     }
 end
 
@@ -1634,6 +2012,18 @@ function live_timer.timerStatus(timer_id)
         payload_pattern = (pending and pending.payload_pattern == true) or (result and result.payload_pattern == true) or false,
         payload_pattern_kind = (pending and pending.payload_pattern_kind) or (result and result.payload_pattern_kind) or nil,
         payload_pattern_direction_keys = (pending and pending.payload_pattern_direction_keys) or (result and result.payload_pattern_direction_keys) or nil,
+        ir_timer_runtime_planned = pending and pending.ir_timer_runtime == true or false,
+        ir_timer_runtime = result and result.ir_timer_runtime == true or false,
+        ir_timer_runtime_job_count = result and result.ir_timer_runtime_job_count or nil,
+        ir_timer_runtime_fallback_used = (pending and pending.ir_timer_runtime_fallback_reason ~= nil)
+            or (result and result.ir_timer_runtime_fallback_used == true)
+            or false,
+        ir_timer_runtime_fallback_reason = (pending and pending.ir_timer_runtime_fallback_reason)
+            or (result and result.ir_timer_runtime_fallback_reason)
+            or nil,
+        ir_timer_runtime_mismatch = (pending and pending.ir_timer_runtime_mismatch == true)
+            or (result and result.ir_timer_runtime_mismatch == true)
+            or false,
         nested_tt = (pending and pending.nested_tt == true) or (result and result.nested_tt == true) or false,
         nested_tt_kind = (pending and pending.nested_tt_kind) or (result and result.nested_tt_kind) or nil,
         nested_tt_payload_role = (pending and pending.nested_tt_payload_role) or (result and result.nested_tt_payload_role) or nil,

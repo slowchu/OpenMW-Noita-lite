@@ -59,6 +59,14 @@ local opcodes = {
             bounces = { type = "integer", min = 1, max = limits.MAX_BOUNCE_COUNT_HARD, default = 3 },
         },
     },
+    Pierce = {
+        kind = "launch_modifier",
+        display_name = "Pierce",
+        description = "Pass through N unique actors; the next actor or geometry hit stops normally.",
+        parameters = {
+            pierces = { type = "integer", min = 1, max = limits.MAX_PIERCE_COUNT_HARD, default = 2 },
+        },
+    },
     Homing = {
         kind = "launch_modifier",
         display_name = "Homing",

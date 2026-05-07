@@ -131,6 +131,12 @@ function sfp_userdata.buildHelperUserData(args)
     setScalar(out, "bounce_trigger_payload_slot_id", input.bounce_trigger_payload_slot_id)
     setScalar(out, "bounce_manual_detonation", input.bounce_manual_detonation)
     setScalar(out, "bounce_final", input.bounce_final)
+    setScalar(out, "pierce_runtime", input.pierce_runtime)
+    setScalar(out, "pierce_role", input.pierce_role)
+    setScalar(out, "pierce_id", input.pierce_id)
+    setScalar(out, "pierce_count", input.pierce_count)
+    setScalar(out, "pierce_limit", input.pierce_limit)
+    setScalar(out, "pierce_trigger_payload_slot_id", input.pierce_trigger_payload_slot_id)
     setScalar(out, "payload_modifier_kind", input.payload_modifier_kind)
     setScalar(out, "speed_plus", input.speed_plus)
     setScalar(out, "speed_plus_mode", input.speed_plus_mode)
@@ -263,6 +269,12 @@ function sfp_userdata.compactSpellforgeUserData(user_data)
         "bounce_trigger_payload_slot_id",
         "bounce_manual_detonation",
         "bounce_final",
+        "pierce_runtime",
+        "pierce_role",
+        "pierce_id",
+        "pierce_count",
+        "pierce_limit",
+        "pierce_trigger_payload_slot_id",
         "payload_modifier_kind",
         "speed_plus",
         "speed_plus_mode",

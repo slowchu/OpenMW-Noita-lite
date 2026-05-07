@@ -1,168 +1,17 @@
-local limits = require("scripts.spellforge.shared.limits")
+local defs = require("scripts.spellforge.global.feature_matrix_defs")
+local feature_matrix_ir = require("scripts.spellforge.global.feature_matrix_ir")
 local parser = require("scripts.spellforge.global.parser")
+local runtime_ir = require("scripts.spellforge.global.runtime_ir")
+local limits = require("scripts.spellforge.shared.limits")
 
 local feature_matrix = {}
 
-feature_matrix.VERSION = "spellforge-feature-matrix-v1"
+feature_matrix.VERSION = defs.VERSION
 
-local FLAG_LIVE_2_2C = "SpellforgeDev.enable_live_2_2c_runtime"
-local FLAG_MULTICAST = "SpellforgeDev.enable_live_multicast"
-local FLAG_SPREAD_BURST = "SpellforgeDev.enable_live_spread_burst"
-local FLAG_TRIGGER = "SpellforgeDev.enable_live_trigger"
-local FLAG_TIMER = "SpellforgeDev.enable_live_timer"
-local FLAG_SPEED_PLUS = "SpellforgeDev.enable_live_speed_plus"
-local FLAG_SIZE_PLUS = "SpellforgeDev.enable_live_size_plus"
-local FLAG_PAYLOAD_MULTICAST = "SpellforgeDev.enable_live_payload_multicast_v0"
-local FLAG_PAYLOAD_PATTERN = "SpellforgeDev.enable_live_payload_pattern_v0"
-local FLAG_NESTED_TRIGGER_TIMER = "SpellforgeDev.enable_live_nested_trigger_timer_v1"
-local FLAG_NESTED_FINAL_FANOUT = "SpellforgeDev.enable_live_nested_final_fanout_v0"
-local FLAG_CHAIN = "SpellforgeDev.enable_live_chain_runtime_v0"
-local FLAG_CHAIN_MULTICAST = "SpellforgeDev.enable_live_chain_multicast_v0"
-local FLAG_BOUNCE = "SpellforgeDev.enable_live_bounce_v0"
-local FLAG_HOMING = "SpellforgeDev.enable_live_homing_v0"
-local FLAG_SOFT_HOMING = "SpellforgeDev.enable_live_soft_homing_v0"
-
-local OPCODE_TO_FEATURE = {
-    Multicast = "multicast",
-    Spread = "spread_burst",
-    Burst = "spread_burst",
-    ["Speed+"] = "speed_plus",
-    ["Size+"] = "size_plus",
-    Chain = "chain",
-    Bounce = "bounce",
-    Homing = "homing",
-    Trigger = "trigger",
-    Timer = "timer",
-}
-
-local FEATURE_DEFS = {
-    {
-        id = "simple_projectile",
-        display_name = "Simple projectile",
-        category = "core",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C },
-        summary = "Compiled helper/orchestrator dispatch for ordinary emitter groups.",
-    },
-    {
-        id = "multicast",
-        display_name = "Multicast",
-        category = "fanout",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C, FLAG_MULTICAST },
-        summary = "Primary Multicast fanout, with payload Multicast covered by its payload gate.",
-    },
-    {
-        id = "spread_burst",
-        display_name = "Spread/Burst",
-        category = "fanout",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C, FLAG_SPREAD_BURST },
-        summary = "Launch-time deterministic pattern directions for Multicast emissions.",
-    },
-    {
-        id = "trigger",
-        display_name = "Trigger",
-        category = "payload",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C, FLAG_TRIGGER },
-        summary = "Direct Trigger payload routing for conservative payload groups.",
-    },
-    {
-        id = "timer",
-        display_name = "Timer",
-        category = "payload",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C, FLAG_TIMER },
-        summary = "Direct Timer payload routing through OpenMW simulation timers.",
-    },
-    {
-        id = "payload_multicast",
-        display_name = "Payload Multicast",
-        category = "payload",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C, FLAG_PAYLOAD_MULTICAST },
-        summary = "Direct Trigger/Timer payload Multicast groups, including Bounce-owned Trigger payload fanout.",
-    },
-    {
-        id = "payload_pattern",
-        display_name = "Payload Spread/Burst",
-        category = "payload",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C, FLAG_PAYLOAD_MULTICAST, FLAG_PAYLOAD_PATTERN },
-        summary = "Direct Trigger/Timer payload Multicast plus Spread/Burst groups, including Bounce-owned Trigger payload patterns.",
-    },
-    {
-        id = "nested_trigger_timer",
-        display_name = "Nested Trigger/Timer",
-        category = "payload",
-        status = "feature_gated_narrow",
-        gates = { FLAG_LIVE_2_2C, FLAG_NESTED_TRIGGER_TIMER },
-        summary = "Opposite-kind depth-2 Trigger/Timer chains only.",
-    },
-    {
-        id = "nested_final_fanout",
-        display_name = "Nested Final Fanout",
-        category = "payload",
-        status = "feature_gated_narrow",
-        gates = { FLAG_LIVE_2_2C, FLAG_NESTED_FINAL_FANOUT },
-        summary = "Bounded final Multicast or pattern fanout after mixed depth-2 Trigger/Timer chains.",
-    },
-    {
-        id = "speed_plus",
-        display_name = "Speed+",
-        category = "modifier",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C, FLAG_SPEED_PLUS },
-        summary = "Launch-time speed mutation.",
-    },
-    {
-        id = "size_plus",
-        display_name = "Size+",
-        category = "modifier",
-        status = "feature_gated",
-        gates = { FLAG_LIVE_2_2C, FLAG_SIZE_PLUS },
-        summary = "Helper effect area mutation.",
-    },
-    {
-        id = "chain",
-        display_name = "Chain",
-        category = "targeting",
-        status = "feature_gated_narrow",
-        gates = { FLAG_LIVE_2_2C, FLAG_CHAIN },
-        summary = "Direct and Trigger->Chain simple payload hops, plus narrow Speed+/Size+ payload modifiers.",
-    },
-    {
-        id = "chain_multicast",
-        display_name = "Chain+Multicast",
-        category = "targeting",
-        status = "feature_gated_narrow",
-        gates = { FLAG_LIVE_2_2C, FLAG_CHAIN, FLAG_CHAIN_MULTICAST },
-        summary = "Bounded sibling fanout per Chain hop with one continuation claim per hop.",
-    },
-    {
-        id = "bounce",
-        display_name = "Bounce",
-        category = "targeting",
-        status = "feature_gated_narrow",
-        gates = { FLAG_LIVE_2_2C, FLAG_BOUNCE },
-        summary = "Bounce v0 source projectiles, Trigger payload fanout, and the narrow Trigger->Chain payload bridge.",
-    },
-    {
-        id = "homing",
-        display_name = "Homing",
-        category = "targeting",
-        status = "feature_gated_narrow",
-        gates = { FLAG_LIVE_2_2C, FLAG_HOMING },
-        optional_gates = { FLAG_SOFT_HOMING },
-        summary = "Narrow primary Homing -> simple target projectile shape.",
-    },
-}
-
-local FEATURE_BY_ID = {}
-for _, def in ipairs(FEATURE_DEFS) do
-    FEATURE_BY_ID[def.id] = def
-end
+local OPCODE_TO_FEATURE = defs.OPCODE_TO_FEATURE
+local FEATURE_BY_ID = defs.FEATURE_BY_ID
+local FLAG_LIVE_2_2C = defs.FLAGS.LIVE_2_2C
+local FLAG_SOFT_HOMING = defs.FLAGS.SOFT_HOMING
 
 local function cloneArray(values)
     local out = {}
@@ -282,6 +131,7 @@ local function scanGroups(groups, summary, depth, payload_stack)
         local has_speed = hasOpcode(prefix, "Speed+")
         local has_size = hasOpcode(prefix, "Size+")
         local has_bounce = hasOpcode(prefix, "Bounce")
+        local has_pierce = hasOpcode(prefix, "Pierce")
         local has_homing = hasOpcode(prefix, "Homing")
         local has_trigger = hasOpcode(postfix, "Trigger")
         local has_timer = hasOpcode(postfix, "Timer")
@@ -345,6 +195,37 @@ local function scanGroups(groups, summary, depth, payload_stack)
             end
         end
 
+        if has_pierce then
+            addSet(summary.combos, "pierce_source")
+            if has_trigger and has_payload_effects then
+                addSet(summary.combos, "pierce_trigger_payload")
+                if groupsHavePrefixOpcode(payload_groups, "Chain") then
+                    addSet(summary.combos, "pierce_trigger_chain")
+                    if groupsHavePrefixOpcode(payload_groups, "Multicast")
+                        or groupsHavePrefixOpcode(payload_groups, "Spread")
+                        or groupsHavePrefixOpcode(payload_groups, "Burst") then
+                        addSet(summary.deferred_reasons, "pierce_fanout_deferred")
+                    end
+                    if groupsHavePrefixOpcode(payload_groups, "Speed+") or groupsHavePrefixOpcode(payload_groups, "Size+") then
+                        addSet(summary.deferred_reasons, "pierce_modifier_deferred")
+                    end
+                end
+                if groupsHavePrefixOpcode(payload_groups, "Multicast") then
+                    addSet(summary.combos, "pierce_trigger_payload_multicast")
+                end
+                if groupsHavePrefixOpcode(payload_groups, "Spread") or groupsHavePrefixOpcode(payload_groups, "Burst") then
+                    addSet(summary.combos, "pierce_trigger_payload_pattern")
+                end
+                if groupsHavePrefixOpcode(payload_groups, "Pierce") then
+                    addSet(summary.deferred_reasons, "pierce_recursion_deferred")
+                end
+                if groupsHavePostfixOpcode(payload_groups, "Trigger")
+                    or groupsHavePostfixOpcode(payload_groups, "Timer") then
+                    addSet(summary.deferred_reasons, "pierce_nested_payload_deferred")
+                end
+            end
+        end
+
         if has_chain and has_pattern then
             addSet(summary.deferred_reasons, "chain_pattern_deferred")
         end
@@ -386,6 +267,28 @@ local function scanGroups(groups, summary, depth, payload_stack)
             addSet(summary.deferred_reasons, "bounce_homing_deferred")
         end
 
+        if has_pierce and has_timer then
+            addSet(summary.deferred_reasons, "pierce_timer_deferred")
+        end
+        if has_pierce and has_bounce then
+            addSet(summary.deferred_reasons, "pierce_bounce_deferred")
+        end
+        if has_pierce and (has_multicast or has_pattern) then
+            addSet(summary.deferred_reasons, "pierce_fanout_deferred")
+        end
+        if has_pierce and has_chain then
+            addSet(summary.deferred_reasons, "pierce_chain_deferred")
+        end
+        if has_pierce and (has_speed or has_size) then
+            addSet(summary.deferred_reasons, "pierce_modifier_deferred")
+        end
+        if has_pierce and has_homing then
+            addSet(summary.deferred_reasons, "pierce_homing_deferred")
+        end
+        if has_pierce and (depth > 0 or hasSet(payload_stack, "Pierce")) then
+            addSet(summary.deferred_reasons, "pierce_nested_payload_deferred")
+        end
+
         if has_homing and (
             has_chain
             or has_multicast
@@ -411,6 +314,9 @@ local function scanGroups(groups, summary, depth, payload_stack)
             end
             if has_chain then
                 addSet(child_stack, "Chain")
+            end
+            if has_pierce then
+                addSet(child_stack, "Pierce")
             end
 
             if payload_groups then
@@ -445,6 +351,9 @@ local function buildSummary(plan)
 
     if summary.active.bounce and summary.active.chain and not summary.combos.bounce_trigger_chain then
         addSet(summary.deferred_reasons, "bounce_chain_deferred")
+    end
+    if summary.active.pierce and summary.active.chain and not summary.combos.pierce_trigger_chain then
+        addSet(summary.deferred_reasons, "pierce_chain_deferred")
     end
 
     if summary.max_payload_depth > limits.MAX_NESTED_PAYLOAD_DEPTH then
@@ -491,19 +400,10 @@ local function collectRequiredFlags(active_features)
 end
 
 function feature_matrix.catalog()
-    local out = {}
-    local empty_summary = {
-        active = {},
-        counts = {},
-        min_depth = {},
-    }
-    for i, def in ipairs(FEATURE_DEFS) do
-        out[i] = buildFeatureEntry(def.id, empty_summary)
-    end
-    return out
+    return defs.catalog()
 end
 
-function feature_matrix.analyze(plan, opts)
+function feature_matrix.legacyAnalyze(plan, opts)
     local options = opts or {}
     local summary = buildSummary(plan or {})
     local active_feature_ids = sortedKeys(summary.active)
@@ -540,10 +440,30 @@ function feature_matrix.analyze(plan, opts)
             max_chain_hops = limits.MAX_CHAIN_HOPS,
             max_chain_multicast_fanout = limits.MAX_CHAIN_MULTICAST_FANOUT,
             max_bounce_count = limits.MAX_BOUNCE_COUNT,
+            max_pierce_count = limits.MAX_PIERCE_COUNT,
             max_nested_payload_depth = limits.MAX_NESTED_PAYLOAD_DEPTH,
         },
         notes = options.notes,
     }
+end
+
+local function hasRequiredIrArtifacts(plan)
+    return type(plan) == "table"
+        and type(plan.emission_slots) == "table"
+        and #plan.emission_slots > 0
+        and type(plan.helper_specs) == "table"
+        and #plan.helper_specs == #plan.emission_slots
+end
+
+function feature_matrix.analyze(plan, opts)
+    if hasRequiredIrArtifacts(plan) then
+        local ir = runtime_ir.build(plan, opts)
+        if ir and ir.ok == true then
+            return feature_matrix_ir.analyzeFromIr(ir, opts)
+        end
+    end
+
+    return feature_matrix.legacyAnalyze(plan, opts)
 end
 
 return feature_matrix
