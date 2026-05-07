@@ -1,4 +1,4 @@
-# Spellforge Current State — 2.2c Feature-Gated Runtime
+# Spellforge Current State - 2.2c Feature-Gated Runtime
 
 This file tracks the current implementation state of Spellforge / OpenMW-Noita-lite.
 
@@ -10,9 +10,20 @@ This file tracks the current implementation state of Spellforge / OpenMW-Noita-l
 
 Live 2.2c remains **feature-gated and default-off**. The stable 2.2b intercept-dispatch path is still preserved as the working foundation and fallback path.
 
+Latest handoff truth:
+
+- The public support matrix is IR-backed, and Trigger, Timer, Bounce, Chain, and Pierce now prefer the shared IR continuation/job-planning adapter path under their existing live gates.
+- Legacy Trigger/Timer/Bounce/Chain fallback paths remain available during migration; Pierce is new and IR-only.
+- Smoke90/Smoke91 proved the consolidated Trigger/Timer/Bounce/Chain IR adapter path with zero fallback/mismatch counts. Smoke101 proved Pierce v0 smoke plus the live SFP Pierce pass-through budget.
+- `Pierce 3` now means three actor pass-throughs, then normal collision on the fourth actor or any geometry hit. Smoke101 showed projectiles piercing three distinct dremora and then colliding with a fourth distinct dremora, with no Spellforge limit-stop or old exit-nudge marker.
+- Launch-modifier policy v0 is shared: `launch_modifier_policy.lua` owns Speed+/Size+ payload and source-launch decisions plus pre-materialization Size+ helper-spec mutation. `runtime_job_planner.lua` applies accepted payload mutations to IR-planned jobs, and generic source launch/spec creation applies accepted source mutations before SFP launch fields are finalized. Event adapters pass event context, gates, caps, and their own Bounce/Pierce facts, but do not interpret Speed+/Size+ semantics. The policy now supports payload Speed+/Size+ shapes plus source `Bounce/Pierce -> Speed+` or `Bounce/Pierce -> Size+` simple launch composition, while combined source Speed+ Size+ remains deferred. The `I` all-IR smoke starts with `SPELLFORGE_PAYLOAD_MODIFIER_POLICY_CONFORMANCE_OK` and `SPELLFORGE_SOURCE_MODIFIER_POLICY_CONFORMANCE_OK` to prove policy consumption without event-specific Speed+/Size+ semantics.
+- The spellcrafting shell is functional and intentionally not visually final. Opcode/runtime correctness is still the priority before more UI polish.
+
 A UI-facing static contract now feeds the dev-gated visible spellcrafting shell. It accepts the effect-list recipe model `spellforge-ui-recipe-v1`, returns structured validation issues, and can produce dry-run planning previews through emission slots and helper specs without materializing helper records, launching projectiles, or requiring the SFP backend to be ready.
 
 The player side now has a UI API boundary, persistence/lifecycle model, and first visible shell for spellcrafting work. Saved recipes use `spellforge-saved-recipe-v1`, player storage keeps saved recipes plus generated-spell lifecycle state, and UI-created spell cleanup can request compiled-record/helper-record cleanup without adding helper records to the player spellbook.
+
+The 2.2d IR migration is underway behind the existing default-off live gates: runtime IR, the public IR-backed feature matrix, continuation planning, and runtime job planning are in place. Live Trigger, Timer, Bounce, Chain, and Pierce now prefer IR-planned adapter paths whenever their matching live runtime gate is enabled; the explicit `SpellforgeDev.enable_ir_*_runtime_v0` flags still exist as dev overrides. The migrated adapters feed a shared `global/ir_runtime_adapter.lua` IR build/continuation/job planning helper and keep legacy runtime paths available as fallback during migration. Smoke90 and Smoke91 proved the consolidated all-IR adapter smoke with zero Trigger/Timer/Bounce/Chain fallback or mismatch counts; Smoke101 proved Pierce's SFP 1.8-backed event path and pass-through semantics.
 
 ### Currently implemented core/gated pieces
 
@@ -79,6 +90,7 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
   - payload execution remains orchestrator-bounded after the async callback
   - payload Multicast v0 uses one Timer schedule/callback to enqueue the bounded payload group
   - nested Trigger/Timer v1 can use Timer as the first or second stage only when `SpellforgeDev.enable_live_nested_trigger_timer_v1` is enabled
+  - when live Timer is enabled, direct Timer payload enqueueing prefers runtime IR + continuation/job planners, then enqueues through the same orchestrator/runtime launch path; nested/final-fanout Timer paths still use the legacy selector path
 
 - **Payload Multicast v0**
   - feature-gated by `SpellforgeDev.enable_live_payload_multicast_v0`
@@ -95,6 +107,22 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
     - source -> Timer -> Multicast N + Spread/Burst simple payload helpers
     - source -> Trigger -> Multicast N + Spread/Burst simple payload helpers
   - applies deterministic launch-time directions and does not steer after launch
+
+- **Payload launch-modifier policy v0**
+  - Speed+/Size+ payload semantics are owned by `global/launch_modifier_policy.lua` and applied to IR-planned runtime jobs by `global/runtime_job_planner.lua`
+  - event adapters may pass source opcode, event context, origin/direction/hit identity, gates, and caps into the shared IR runtime path, but they must not compute Speed+/Size+ mutations or add event-specific Speed+/Size+ branches
+  - Size+ helper-spec mutation is pre-materialized through the shared policy before helper records are created
+  - legacy Chain compatibility code may preserve/copy policy-produced modifier metadata while migration is in progress, but it must not recompute modifier semantics
+  - current live proofs cover Trigger and Timer payload Speed+, Size+, and combined Speed+ Size+ simple payload routes through the shared IR adapter; Chain Speed+/Size+ compatibility, including combined Speed+ Size+ on a simple Chain payload branch and one Speed+ or one Size+ with bounded Chain payload Multicast, remains preserved through the same policy
+  - Bounce/Pierce policy consumption must be broadened through the shared policy/job-planner/source-launch path only, not by copying Trigger/Timer/Chain modifier logic
+  - combined Speed+ Size+ with payload Multicast, Speed+/Size+ with payload Pattern, nested Speed+/Size+ payloads, Homing combinations, arbitrary recursion, per-frame actor scans, and per-projectile Lua brains remain deferred
+
+- **Source launch-modifier policy v0**
+  - Speed+/Size+ source semantics are owned by `global/launch_modifier_policy.lua`
+  - direct simple Speed+ and Size+ source launches apply policy metadata through generic launch-spec mutation
+  - `Bounce N -> Speed+ -> simple target emitter`, `Bounce N -> Size+ -> simple target emitter`, `Pierce N -> Speed+ -> simple target emitter`, and `Pierce N -> Size+ -> simple target emitter` are feature-gated source-policy shapes
+  - Bounce/Pierce event adapters still only provide Bounce/Pierce runtime fields; they do not compute Speed+/Size+ fields
+  - combined source Speed+ Size+, source Speed+/Size+ with Multicast/Spread/Burst, Homing, Timer, direct source Chain, nested payload runtime, and recursive stacks remain deferred
 
 - **Nested Trigger/Timer v1**
   - feature-gated by `SpellforgeDev.enable_live_nested_trigger_timer_v1`
@@ -145,16 +173,22 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
   - Chain payload Speed+ also requires `SpellforgeDev.enable_live_speed_plus`
   - Chain payload Size+ also requires `SpellforgeDev.enable_live_size_plus`
   - `SpellforgeDev.enable_live_chain_multicast_v0` enables the narrow bounded fanout shapes `source -> Chain N -> Multicast -> simple payload` and `source -> Trigger -> Chain N -> Multicast -> simple payload`
+  - the same Chain Multicast gate allows `source -> Chain N -> Speed+ -> Multicast -> simple payload`, `source -> Chain N -> Size+ -> Multicast -> simple payload`, and matching `source -> Trigger -> Chain N -> ...` forms when the matching Speed+/Size+ gate is enabled
   - Chain+Multicast launches sibling payloads per hop but shares one continuation claim per hop, so fanout does not branch into exponential Chain continuations
   - `Chain N` launches up to N sequential payload hops, one hop per accepted hit event
   - uses `no_immediate_repeat` targeting, excluding only the current hit target and allowing A->B->A->B bounces
   - uses deterministic mock providers for smokes and a bounded real provider on discrete Chain hit/hop events when `openmw.world.activeActors` is available
+  - the real provider separates bounded active-actor inspection from the returned candidate cap and filters caster/current-hit actors before line-of-sight
   - real-provider candidates are filtered through a player-local line-of-sight raycast before selection
   - each Chain hop is orchestrator-queued, SFP/MagExp-launched, and carries continuation `userData`
+  - when live Chain runtime is enabled, qualified Chain payload hops prefer runtime IR + continuation/job planners, then merge back into the existing bounded Chain enqueue path; target selection, duplicate suppression, Chain+Multicast continuation grouping, and Speed+/Size+ payload metadata remain legacy-compatible
+  - Smoke88 proved deterministic IR Chain handoff/enqueue for direct Chain, Trigger Chain, Chain+Multicast, Trigger Chain+Multicast, and Chain Speed+/Size+ variants with zero fallback/mismatch; Smoke89 proved a positive real-provider LOS handoff with candidates, LOS results, selected real targets, queued hops, and accepted payload launches
+  - Smoke110 proved six manual real-provider Chain probes with caster/current-hit prefiltering, zero actor-scan/candidate-cap hits, three selected real targets, three queued hops, three accepted payload launches, and clean `max_hops_reached` stops per shot
+  - `SPELLFORGE_CHAIN_PROVIDER_PREFILTER_CAPS_OK` is the deterministic injected-actor regression for provider prefiltering and separate actor-scan/returned-candidate caps
   - Chain continuation `userData` and Speed+/Size+ modifier metadata coexist on modified payload launches
   - stops cleanly at max hops or when no valid target exists
   - duplicate hit suppression is scoped per cast/chain/hop/projectile identity and, for Chain+Multicast, per hop continuation group
-  - Chain with Spread/Burst/Trigger/Timer/nested payload, Chain+modifier+Multicast, Chain recursion, per-frame actor scans, per-projectile Lua loops, and post-launch steering remain deferred
+  - Chain with Spread/Burst/Trigger/Timer/nested payload, combined Speed+ Size+ plus Chain Multicast, Chain recursion, per-frame actor scans, per-projectile Lua loops, and post-launch steering remain deferred
 
 - **Speed+ v1**
   - feature-gated by `SpellforgeDev.enable_live_speed_plus`
@@ -192,10 +226,31 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
     - `Bounce N -> target emitter -> Trigger -> payload Multicast` when payload Multicast v0 is enabled
     - `Bounce N -> target emitter -> Trigger -> payload Spread/Burst + Multicast` when payload Multicast and payload Pattern v0 are enabled
     - `Bounce N -> target emitter -> Trigger -> Chain N -> simple payload` when Chain runtime v0 is enabled
+    - `Bounce N -> Speed+ -> simple target emitter` when Speed+ is enabled
+    - `Bounce N -> Size+ -> simple target emitter` when Size+ is enabled
   - Smoke76/manual checks observed bounce callbacks and clean routing for actor/contact hits, interior wall/statics, exterior wall/statics, and terrain/ground
   - Bounce event payloads do not always include a hit actor; the Chain bridge infers one source target near the bounce point through a bounded provider lookup when possible
   - real Bounce Trigger->Chain handoff stops safely when no valid Chain candidates exist, including `candidate_count=0`
-  - source-level Bounce with Timer, direct Chain, Speed+/Size+, Homing, arbitrary nested payload runtime, recursion, unsupported fanout, post-launch steering, and per-projectile Lua brains remains deferred
+  - when live Bounce v0 is enabled, Bounce Trigger simple-payload detonation and Chain handoff prefer IR planning/validation while keeping their existing live routes; Bounce Trigger payload Multicast and Spread/Burst fanout enqueue IR-planned jobs through the same orchestrator/runtime launch path
+  - source-level Bounce with Timer, direct Chain, combined Speed+ Size+, Homing, arbitrary nested payload runtime, recursion, unsupported fanout, post-launch steering, and per-projectile Lua brains remains deferred
+
+- **Pierce v0**
+  - feature-gated by `SpellforgeDev.enable_live_pierce_v0`
+  - backed by SFP 1.8 `piercing`, `pierceLimit`, `setSpellPiercing`, and `MagExp_OnProjectilePierce`
+  - supports:
+    - `Pierce N -> simple target emitter`
+    - `Pierce N -> target emitter -> Trigger -> simple payload`
+    - `Pierce N -> target emitter -> Trigger -> payload Multicast` when payload Multicast v0 is enabled
+    - `Pierce N -> target emitter -> Trigger -> payload Spread/Burst + Multicast` when payload Multicast and payload Pattern v0 are enabled
+    - `Pierce N -> target emitter -> Trigger -> Chain N -> simple payload` when Chain runtime v0 is enabled
+    - `Pierce N -> Speed+ -> simple target emitter` when Speed+ is enabled
+    - `Pierce N -> Size+ -> simple target emitter` when Size+ is enabled
+  - `Pierce N` uses `N` as the pass-through budget: `Pierce 3` passes through three unique actors, then stops/detonates on the next actor or any normal geometry collision
+  - Smoke101 proved the live source path against a line of actors: three Pierce events on three distinct dremora, followed by normal projectile collision on a fourth distinct dremora
+  - SFP owns source projectile pass-through and one-hit-per-actor tracking; Spellforge only routes Trigger continuations from Pierce events
+  - direct Trigger payload launches use a forward offset from the pierce hit position and carry the pierced actor as `current_hit_target_id` / `excludeTarget` where possible
+  - Pierce Trigger payload and Chain routes use the shared IR runtime adapter; Pierce is new and IR-only with no legacy combo-specific runtime to preserve
+  - source-level Pierce with Timer, Bounce, Homing, combined Speed+ Size+, direct Chain, source Multicast/Spread/Burst, arbitrary nested payload runtime, recursion, repeated same-actor ticks, post-launch steering combinations, and per-projectile Lua brains remains deferred
 
 - **Chaos budget v0**
   - dev/test-gated by `SpellforgeDev.enable_chaos_budget_v0`
@@ -205,7 +260,7 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
   - Chain remains sequential; Chain+Multicast has a separate bounded fanout cap of 3 by default and 8 in chaos/dev smokes, while Chain+Pattern remains deferred
   - over-budget spells reject before unsafe enqueue/launch and are visible in runtime stats
 
-- **SFP/MagExp 1.7 boundary support**
+- **SFP/MagExp 1.7/1.8 boundary support**
   - centralized `global/sfp_adapter.lua`
   - forwards supported launch metadata:
     - `userData`
@@ -218,6 +273,8 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
     - `accelerationExp`
     - `maxLifetime`
     - `forceVec`
+    - `piercing`
+    - `pierceLimit`
     - `spawnOffset`
     - `areaVfxRecId`
     - `areaVfxScale`
@@ -242,6 +299,7 @@ The player side now has a UI API boundary, persistence/lifecycle model, and firs
 - Chain runtime beyond the narrow direct/Trigger simple payload, Speed+/Size+ payload-modifier, and bounded Multicast payload-fanout shapes
 - broader Homing combinations and Gravity runtime
 - Bounce runtime beyond source-only, simple Trigger payloads, Trigger payload fanout, and the Trigger->Chain simple-payload bridge
+- Pierce runtime beyond source-only, simple Trigger payloads, Trigger payload fanout, and the Trigger->Chain simple-payload bridge
 - Speed+ acceleration behavior
 - Speed+ damage scaling
 - post-launch projectile mutation
@@ -353,6 +411,8 @@ Current shared limits include:
 - `MAX_CHAIN_SCAN_CANDIDATES = 16`
 - `MAX_CHAIN_JOBS_PER_CAST = 5`
 - `MAX_CHAIN_MULTICAST_FANOUT = 3` by default, `8` in the chaos/dev profile
+- `MAX_PIERCE_COUNT = 3`, hard cap `MAX_PIERCE_COUNT_HARD = 5`
+- `PIERCE_PAYLOAD_EXIT_OFFSET = 48`
 - `MAX_JOBS_PER_TICK = 16`
 
 Chain-related limits guard Chain audit/dry-run probes, the narrow direct/Trigger simple-payload Chain v0 runtime, and the bounded real target provider.
@@ -393,9 +453,8 @@ Rules for future Chain:
 Still deferred:
 
 - Chain with Spread/Burst
-- Chain with Speed+/Size+ plus Multicast on the same payload branch
+- Chain with combined Speed+ Size+ plus Multicast on the same payload branch
 - Chain with Trigger/Timer payloads
-- Chain with both Speed+ and Size+ on the same payload branch
 - Chain recursion or Chain->Chain composition
 - Chain inside mixed nested Trigger/Timer or nested final fanout
 - real broad actor scans
@@ -1262,14 +1321,14 @@ What exists now:
 - Chain runtime still uses injected/mock candidates first for deterministic smoke coverage
 - when no injected provider is supplied, Chain asks a real provider backed by `openmw.world.activeActors`
 - the real provider runs only on discrete Chain source/hop hit events
-- candidates are capped by `MAX_CHAIN_SCAN_RADIUS`, `MAX_CHAIN_SCAN_CANDIDATES`, and `MAX_CHAIN_VERTICAL_DELTA` using actor base positions
+- candidates are capped by `MAX_CHAIN_SCAN_RADIUS`, `MAX_CHAIN_SCAN_ACTORS`, `MAX_CHAIN_SCAN_CANDIDATES`, and `MAX_CHAIN_VERTICAL_DELTA` using actor base positions
 - candidates then pass through a bounded player-local LOS raycast gate, so walls/floors/ceilings can reject otherwise valid nearby actors
 - real Chain payload bolts launch between raised actor aim points so same-floor close targets remain visible
 - non-actor hit routes are stopped before they can advance Chain, which prevents wall/static collisions from forking extra hops
-- caster/current-target exclusion and `no_immediate_repeat` remain enforced by the resolver
+- caster/current-target exclusion is pre-filtered by the real provider and remains enforced by the resolver for `no_immediate_repeat`
 - the provider returns real candidates when supported, or reports `chain_target_provider_unavailable` safely
 - Chain stops cleanly at max hops, no valid target, or unavailable provider
-- provider stats report real/mock attempts, availability, returned candidates, cap/radius use, and selection source
+- provider stats report real/mock attempts, availability, active actors inspected, returned candidates, cap/radius use, current/caster exclusions, and selection source
 
 Still deferred:
 
@@ -1284,11 +1343,15 @@ Still deferred:
 
 Manual gameplay smoke:
 
-- press `L` for the dedicated manual Chain real-provider probe; live Chain target selection now uses a strict same-floor vertical tolerance, LOS raycasts, and raised aim points
+- press `Numpad 5` for deterministic/mock Chain runtime proof; press `L` for the dedicated visual/manual Chain real-provider probe
+- the `L` probe now snapshots runtime stats before the shot and reports per-shot candidate/LOS/handoff deltas afterward
+- live Chain target selection uses a strict same-floor vertical tolerance, LOS raycasts, and raised aim points
 - use `Fire Damage -> Trigger -> Chain 3 -> Frost Damage`
 - place at least two valid nearby actors
 - hit actor A with the source helper
 - expect `SPELLFORGE_CHAIN_PROVIDER_REAL_OK`, `SPELLFORGE_CHAIN_LOS_REQUESTED`, `SPELLFORGE_CHAIN_LOS_LOCAL_RESULT`, `SPELLFORGE_CHAIN_LOS_RESULT`, `SPELLFORGE_CHAIN_REAL_TARGET_SELECTED`, `SPELLFORGE_CHAIN_HOP_ENQUEUED`, and `SPELLFORGE_CHAIN_HOP_PAYLOAD_OK`
+- expect `SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_STATUS` and `SPELLFORGE_CHAIN_REAL_PROVIDER_DIAGNOSTIC_STATUS` after the shot; useful diagnostic reasons include `no_source_actor_hit`, `no_candidates_returned`, `actor_scan_cap_exhausted`, `no_visible_target`, `provider_unavailable`, and `positive_handoff`
+- Smoke110's expected healthy follow-up shape is `positive_handoff=true`, `provider_real_ok=3`, `real_target_selected=3`, `chain_hop_enqueued=3`, `chain_payload_launch_ok=3`, `current_excluded=3`, `caster_excluded=3`, and no cap hits
 - if actor B is hit and actor A remains valid/nearby, `no_immediate_repeat` may bounce back toward A
 - Chain should stop at hop 3, `no_valid_chain_target`, or `no_visible_chain_target`
 
@@ -1317,7 +1380,6 @@ Still deferred:
 - Chain with Multicast/Spread/Burst
 - Chain with Trigger/Timer payloads
 - Chain recursion or Chain->Chain composition
-- Chain with both Speed+ and Size+ on the same payload branch
 - Chain inside mixed nested Trigger/Timer or nested final fanout
 - actor scans per projectile per frame
 - per-projectile Lua loops
@@ -1348,7 +1410,8 @@ What exists now:
   - nested payload job budget: 32 -> 64
   - jobs per orchestrator tick: 16 -> 24
   - live helper launches per simulation update window: 8 default, 4 chaos sustained pacing cap, 8 chaos adaptive first-update launch burst
-- Chain scan candidates: 16 -> 24
+  - Chain returned candidates: 16 -> 24
+  - Chain active-actor scan cap: 64 -> 96
   - Chain+Multicast fanout: 3 -> 8
 - hard parser/runtime safety rails remain above the chaos profile and still reject over-budget recipes
 - high-fanout smokes cover direct Multicast, Trigger payload Multicast, Timer payload Multicast, Trigger/Timer payload Spread/Burst, and mixed nested final fanout
@@ -1364,7 +1427,7 @@ What exists now:
 Still deferred:
 
 - Chain with Spread/Burst
-- Chain with Speed+/Size+ plus Multicast on the same payload branch
+- Chain with combined Speed+ Size+ plus Multicast on the same payload branch
 - Chain with Trigger/Timer payloads
 - Chain recursion or Chain->Chain composition
 - Chain inside mixed nested Trigger/Timer or nested final fanout
@@ -1435,7 +1498,7 @@ Still deferred:
 - source-level Bounce + Spread/Burst
 - Bounce + Timer
 - direct source Bounce + Chain
-- Bounce + Speed+/Size+
+- Bounce + combined source Speed+ Size+
 - nested Bounce payload runtime
 - Bounce recursion
 - Bounce + Homing and Gravity runtime
@@ -1464,7 +1527,7 @@ What changed:
 - the `G` smoke runs Trigger payload Bounce dry-run coverage before the live launch
 - the `G` smoke also dry-runs `Bounce 3 Fire Damage -> Trigger -> Chain 3 -> Frost Damage` and asserts the payload branch routes to Chain runtime instead of a simple at-position detonation
 - the smoke asserts Bounce disabled and over-cap recipes reject clearly
-- the smoke asserts source-level Bounce + Multicast/fanout, Bounce + Timer, direct source Bounce + Chain, Bounce + Speed+, and Bounce + Size+ remain deferred
+- the smoke now supersedes this older check: single Bounce source Speed+ or Size+ is supported through shared policy, while combined source Speed+ Size+ remains deferred
 - the live Bounce launch assertion now checks that only the source projectile is launched
 - the Trigger payload is expected to use `bounce_detonate_at_pos`, not a second payload projectile launch
 - source job/userData assertions confirm `bounce_runtime`, `source_prefix_opcode=Bounce`, `source_postfix_opcode=Trigger`, and Trigger payload slot identity survive launch preparation
@@ -1476,7 +1539,7 @@ Still deferred:
 - source-level Bounce + Spread/Burst
 - Bounce + Timer
 - direct source Bounce + Chain
-- Bounce + Speed+/Size+
+- Bounce + combined source Speed+ Size+
 - nested Bounce payload runtime
 - Bounce recursion
 
@@ -1510,7 +1573,7 @@ Still deferred:
 - source-level Bounce + Multicast
 - source-level Bounce + Spread/Burst
 - Bounce + Timer
-- Bounce + Speed+/Size+
+- Bounce + combined source Speed+ Size+
 - nested Bounce payload runtime
 - Bounce recursion
 
@@ -1601,7 +1664,7 @@ Still deferred:
 
 - Chain+Spread/Burst
 - Chain+Trigger/Timer
-- Chain+Speed+/Size+ plus Multicast on one payload branch
+- Chain+combined Speed+ Size+ plus Multicast on one payload branch
 - Chain recursion or independent Chain continuation per multicast sibling
 - Homing on Multicast, Chain, Bounce, Trigger/Timer, nested payloads, or high fanout
 - Homing LOS retarget checks
@@ -1937,7 +2000,7 @@ What changed:
 
 - `Bounce -> projectile -> Trigger -> payload Multicast/Spread/Burst` now qualifies when the existing Bounce, Trigger, payload Multicast, and payload Pattern gates are enabled
 - Bounce events still detonate the source projectile at the bounce point, but fanout Trigger payloads now launch via the central orchestrator instead of being collapsed into the old single at-position payload detonation
-- source-level `Bounce + Multicast/Spread/Burst`, `Bounce + Timer`, direct `Bounce + Chain`, Bounce Speed+/Size+ source modifiers, Bounce+Homing, and arbitrary nested Bounce payload runtime remain deferred with stable reason codes
+- source-level `Bounce + Multicast/Spread/Burst`, `Bounce + Timer`, direct `Bounce + Chain`, combined source Speed+ Size+, Bounce+Homing, and arbitrary nested Bounce payload runtime remain deferred with stable reason codes
 - the feature matrix now reports the Bounce Trigger payload Multicast shape as `feature_gated` with the payload Multicast gate instead of `bounce_trigger_payload_deferred`
 - Bounce smoke coverage now includes source-only and Trigger simple payload probes, disabled-gate probes for Trigger Chain/Multicast/Pattern payloads, dry-run probes for Bounce Trigger payload Multicast/Burst/Spread, and synthetic post-bounce simple/Multicast probes that register bindings without launching visible source projectiles
 - `H` now preflights a synthetic Bounce Trigger->Chain no-target bounce route before the live launch, proving duplicate bounce suppression and non-fatal `no_valid_chain_target` stops
@@ -1980,7 +2043,7 @@ Still deferred:
 
 - Bounce + Timer
 - Bounce + Homing
-- Bounce + source Speed+/Size+
+- Bounce + combined source Speed+ Size+
 - Bounce + direct source Chain
 - Bounce + arbitrary nested payload runtime
 - Bounce + recursion
@@ -1992,7 +2055,7 @@ Smoke/UI contract notes:
 - `G` remains the Bounce hardening suite for source-only, Trigger simple, Trigger fanout, gate rejections, and unsupported-shape deferrals
 - `H` distinguishes synthetic no-target safety, mock Chain handoff payload launch, live bounce-event routing, and real-provider safe stops
 - `J` is the manual surface diagnostic for actor/contact, interior static, exterior static, and terrain/ground bounce callback checks
-- the feature matrix reports narrow Bounce Trigger fanout and Bounce Trigger Chain as feature-gated, while still reporting Bounce+Timer, Bounce+Homing, source Bounce+Speed+/Size+, direct source Bounce+Chain, and nested Bounce payloads as deferred
+- the feature matrix reports narrow Bounce Trigger fanout, Bounce Trigger Chain, and single source Bounce Speed+/Size+ simple launches as feature-gated, while still reporting Bounce+Timer, Bounce+Homing, combined source Bounce Speed+ Size+, direct source Bounce+Chain, and nested Bounce payloads as deferred
 
 ---
 
@@ -2062,18 +2125,23 @@ The dev launch harness can enable:
 - Homing v0 launch modifier runtime
 - Soft Homing v0 runtime and dev-only viability probe
 - chaos budget v0 high-fanout stress profile
+- IR Trigger runtime v0 dev migration
+- IR Timer runtime v0 dev migration
+- IR Bounce runtime v0 dev migration
+- IR Chain runtime v0 dev migration
+- IR Pierce runtime v0 dev migration
 
 Representative hotkeys from the current README/dev harness:
 
-The `Numpad 5` suite covers audit-only nested payload planning plus Chain audit/runtime, including Chain Speed+/Size+ payload modifier probes and bounded Chain+Multicast branch-observability smokes. The `Numpad 9` and `Numpad /` suites also cover nested final payload fanout v0. The `Numpad .` suite covers chaos budget high-fanout stress, including Chain+Multicast under the chaos cap. The `G` smoke covers Bounce v0 hardening, supported Trigger payload dry-run/post-bounce routes, gate-disabled rejections, and unsupported-shape deferrals. The `H` smoke covers Bounce Trigger->Chain no-target/mock handoff plus live bounce-event routing and real-provider safe stops. The `J` smoke covers manual Bounce surface/contact diagnostics. The `K` smoke covers Homing v0 launch-assist dry-run plus soft redirect runtime/probe checks. The `Y` dev/smoke hotkey opens the spellcrafting shell.
+The `Numpad 5` suite covers audit-only nested payload planning plus Chain audit/runtime, including Chain Speed+/Size+ payload modifier probes, bounded Chain+Multicast branch-observability smokes, and the IR Chain runtime dev migration. The `Numpad 9` and `Numpad /` suites also cover nested final payload fanout v0 plus the IR Trigger/Timer runtime dev migrations for direct supported payload shapes. `I` is the consolidated all-IR adapter migration smoke for Trigger, Timer, Bounce, and Chain. The `Numpad .` suite covers chaos budget high-fanout stress, including Chain+Multicast under the chaos cap. The `G` smoke covers Bounce v0 hardening, supported Trigger payload dry-run/post-bounce routes, IR Bounce simple-payload planning and fanout enqueueing, gate-disabled rejections, and unsupported-shape deferrals. The `H` smoke covers Bounce Trigger->Chain no-target/mock handoff plus live bounce-event routing and real-provider safe stops. The `P` smoke covers Pierce v0 source launch, SFP Pierce event routing, Trigger payload fanout, Trigger->Chain handoff, duplicate suppression, and deferred-shape rejections. Manual Pierce line tests should use the updated SFP Reference projectile-local file; Smoke101 proved `Pierce 3` pierces three actors and collides on the fourth. The `J` smoke covers manual Bounce surface/contact diagnostics. The `K` smoke covers Homing v0 launch-assist dry-run plus soft redirect runtime/probe checks. The `Y` dev/smoke hotkey opens the spellcrafting shell.
 
 - `Numpad 0` — performance stress spell
-- `Numpad +` — simple-helper launch smoke
+- `I` - consolidated all-IR adapter migration smoke
 - `Numpad 1` — Multicast x3 launch smoke
 - `Numpad 2` — Timer payload smoke
 - `Numpad 3` — simple Trigger payload smoke
 - `Numpad 4` — Multicast x3 Trigger cardinality smoke
-- `Numpad 5` — live 2.2c simple-dispatch bridge smoke plus nested/Chain audit, Chain runtime, and Chain Speed+/Size+ payload modifier probes
+- `Numpad 5` — live 2.2c simple-dispatch bridge smoke plus nested/Chain audit, Chain runtime, Chain Speed+/Size+ payload modifier probes, and single-modifier Chain Multicast policy probes
 - `Numpad 6` — live Multicast x3 primary-helper fanout smoke
 - `Numpad 7` — live Spread x3 primary aiming
 - `Numpad 8` — live Burst x3 primary aiming
@@ -2083,20 +2151,87 @@ The `Numpad 5` suite covers audit-only nested payload planning plus Chain audit/
 - `Numpad -` — live Size+ v0 helper-spec mutation smoke
 - `K` - live Homing v0 SFP 1.7 `forceVec` dry-run plus delayed soft redirect/retarget probe
 - `Numpad .` - chaos budget high-fanout stress smoke
-- `G` - Bounce v0 hardening smoke plus Bounce Trigger payload fanout dry-runs/post-bounce probes
+- `G` - Bounce v0 hardening smoke plus Bounce Trigger payload fanout dry-runs/post-bounce probes and IR Bounce runtime gate checks
 - `H` - Bounce Trigger->Chain no-target/mock handoff plus live event/payload probe
+- `P` - Pierce v0 source/Trigger fanout/Trigger->Chain smoke
+- `L` - manual Chain real-provider visual probe with per-shot candidate/LOS/handoff diagnostics
 - `J` - manual Bounce surface/contact diagnostic probe
 - `Y` - dev/smoke-gated spellcrafting shell
 
-Additional current coverage: `Numpad 5` now includes Chain+Multicast branch-observability smokes, `Numpad 9` and `Numpad /` assert Trigger/Timer branch metadata across fanout and nested final payloads, `Numpad .` includes Chain+Multicast high-fanout chaos checks, `G` checks Bounce source branch identity, Trigger simple/fanout bounce-route metadata, gate rejections, and unsupported-shape deferrals, `H` checks Bounce Trigger->Chain no-target safety, mock handoff payload launch, live bounce-event routing, and real-provider safe stops, `J` checks manual surface/contact callback diagnostics, and `K` includes the soft redirect runtime/probe path with bounded retarget diagnostics.
+Additional current coverage: `Numpad 5` now includes Chain+Multicast branch-observability smokes, single-modifier Chain Multicast policy smokes, plus IR Chain runtime planning/enqueue counters, `Numpad 9` and `Numpad /` assert Trigger/Timer branch metadata across fanout and nested final payloads, `Numpad /` asserts IR Timer runtime planning/enqueueing for simple, payload Multicast, and payload Spread/Burst shapes, `I` logs `SPELLFORGE_PAYLOAD_MODIFIER_POLICY_CONFORMANCE_OK`, `SPELLFORGE_SOURCE_MODIFIER_POLICY_CONFORMANCE_OK`, and `SPELLFORGE_IR_RUNTIME_ADAPTER_STATUS`, and Smoke90/Smoke91 assert all migrated adapter fallback/mismatch counts stay zero while supported/deferred adapter paths remain bounded. `Numpad .` includes Chain+Multicast high-fanout chaos checks, `G` checks Bounce source branch identity, source Speed+/Size+ policy composition, Trigger simple/fanout bounce-route metadata, IR Bounce planner/enqueue counters, gate rejections, and unsupported-shape deferrals, `H` checks Bounce Trigger->Chain no-target safety, mock handoff payload launch, live bounce-event routing, and real-provider safe stops, `P` checks Pierce source launch fields, source Speed+/Size+ policy composition, synthetic SFP Pierce contract routing, safe payload origin, Trigger payload fanout, Trigger->Chain handoff, duplicate suppression, and deferred-shape reasons, `L` logs `SPELLFORGE_CHAIN_REAL_PROVIDER_FOLLOWUP_STATUS` and `SPELLFORGE_CHAIN_REAL_PROVIDER_DIAGNOSTIC_STATUS` after a manual real-provider Chain shot, `J` checks manual surface/contact callback diagnostics, and `K` includes the soft redirect runtime/probe path with bounded retarget diagnostics. Smoke101 additionally proved the real SFP Pierce source line test after copying the updated SFP Reference file into the live SFP folder.
+
+## 2.2c.58 - Pierce v0 IR Runtime Adapter
+
+Spellforge now includes Pierce as the final launch modifier opcode, implemented against SFP 1.8 and the shared IR continuation/job planning pipeline.
+
+What changed:
+
+- added `spellforge_pierce` / `Pierce` metadata, parser support, UI catalog exposure, and Pierce caps (`MAX_PIERCE_COUNT = 3`, hard cap 5)
+- added SFP adapter launch forwarding for `piercing` and `pierceLimit`, plus `setSpellPiercing` capability wrapping
+- added `live_pierce.lua` to route `MagExp_OnProjectilePierce`, validate Spellforge userData/projectile identity, suppress duplicate actor/projectile/pierce-count events, and enqueue supported Trigger continuations through the IR runtime adapter
+- Pierce source launches carry compact SFP `userData` and launch metadata for `pierce_runtime`, `pierce_role`, `pierce_id`, `pierce_limit`, source prefix/postfix opcodes, Trigger payload slots, and branch identity
+- Trigger payload launches from Pierce events use a forward-safe payload origin (`PIERCE_PAYLOAD_EXIT_OFFSET = 48`) and carry the pierced actor as `current_hit_target_id` / `excludeTarget` where possible
+- runtime IR, the IR feature matrix, the continuation planner, and runtime job planner all represent Pierce source, Pierce Trigger fanout, Pierce Trigger Pattern, Pierce Trigger Chain, and deferred Pierce shapes
+- the `P` smoke covers source dry-run/launch, synthetic SFP Pierce event contract routing, simple/Multicast/Burst/Spread Trigger payload enqueueing, Trigger->Chain handoff, duplicate suppression, safe origin metadata, and stable deferred reasons
+- Smoke101 proved the live SFP source projectile semantics for `Pierce 3`: `pierce_count=1`, `2`, and `3` occurred on three distinct dremora, then the projectile collided normally with a fourth distinct dremora; no `SPELLFORGE_LIVE_PIERCE_LIMIT_STOP` or old exit-nudge marker appeared
+
+Still deferred:
+
+- source-level Pierce with Timer, Bounce, Homing, combined Speed+ Size+, direct Chain, source Multicast/Spread/Burst, arbitrary nested payload runtime, recursion, repeated same-actor Pierce ticks, post-launch steering combinations, per-projectile Lua brains, and per-frame actor scans
+
+Manual smoke:
+
+- press `P` for the automated Pierce v0 smoke suite
+- aim `Pierce 3 -> Fire Damage` through a line of actors; expected behavior is one source resolution on each of the first three unique actors, continued projectile flight through those actor contacts, then normal stop/detonation on the fourth actor or any geometry collision
+- use a no-AoE or very small-area source spell for future Pierce visual diagnostics when possible, because the final fireball explosion can make pass-through damage hard to distinguish by eye
+- aim `Pierce 3 -> Fire Damage -> Trigger -> Frost Damage`; expected behavior is Fire from SFP Pierce and Frost payload launch from a forward-offset exit point rather than the raw inside-actor hit point
+- aim `Pierce 3 -> Fire Damage -> Trigger -> Chain 3 -> Frost Damage` near at least two actors; Chain should treat the pierced actor as the current hit target and seek another valid target
+- expected markers include `SPELLFORGE_SFP_PIERCE_CONTRACT_OK`, `SPELLFORGE_LIVE_PIERCE_SOURCE_OK`, `SPELLFORGE_LIVE_PIERCE_EVENT`, `SPELLFORGE_IR_PIERCE_RUNTIME_ENQUEUED`, `SPELLFORGE_LIVE_PIERCE_TRIGGER_PAYLOAD_OK`, `SPELLFORGE_LIVE_PIERCE_DUPLICATE_SUPPRESSED`, `SPELLFORGE_PIERCE_PAYLOAD_ORIGIN_SAFE`, and `SPELLFORGE_PIERCE_DEFERRED`
+
+---
+
+## 2.2c.59 - Source Launch Modifier Policy v0
+
+Spellforge now has a shared source launch-modifier policy for the narrow simple source-launch shapes.
+
+What changed:
+
+- extended `global/launch_modifier_policy.lua` with source-entry inspection and source launch-spec mutation
+- direct simple source Speed+ and Size+ launches now apply shared source-policy metadata before launch
+- Bounce and Pierce source launches can compose one source Speed+ or one source Size+ through shared policy without event-adapter Speed+/Size+ semantics
+- source Size+ helper specs are mutated before helper records are materialized
+- source policy emits `SPELLFORGE_SOURCE_MODIFIER_POLICY_OK`, `SPELLFORGE_SOURCE_SPEED_PLUS_POLICY_APPLIED`, `SPELLFORGE_SOURCE_SIZE_PLUS_POLICY_APPLIED`, `SPELLFORGE_BOUNCE_SOURCE_MODIFIER_POLICY_OK`, `SPELLFORGE_PIERCE_SOURCE_MODIFIER_POLICY_OK`, and `SPELLFORGE_SOURCE_MODIFIER_POLICY_CONFORMANCE_OK`
+- the public IR feature matrix now marks single Bounce/Pierce source Speed+ or Size+ as feature-gated and keeps combined source Speed+ Size+ deferred with `source_modifier_combo_deferred`
+
+Supported source-policy v0 shapes:
+
+- `Speed+ -> simple target emitter`
+- `Size+ -> simple target emitter`
+- `Bounce N -> Speed+ -> simple target emitter`
+- `Bounce N -> Size+ -> simple target emitter`
+- `Pierce N -> Speed+ -> simple target emitter`
+- `Pierce N -> Size+ -> simple target emitter`
+
+Still deferred:
+
+- source Speed+ Size+ together
+- Bounce/Pierce + source Multicast/Spread/Burst
+- Bounce/Pierce + Homing
+- Bounce/Pierce + Timer
+- direct source Bounce/Pierce + Chain
+- arbitrary nested payload runtime, source recursion, post-launch steering, per-frame actor scans, and per-projectile Lua brains
 
 ---
 
 ## Recommended Next Roadmap
 
-### 1. Remaining payload Speed+/Size+ runtime policy
+### 0. Pierce diagnostic polish
 
-Decide whether non-Chain payload branches can safely inherit existing Speed+/Size+ mutation paths.
+Add a no-AoE or minimal-area Pierce smoke/manual test recipe so visual testing can distinguish pass-through source hits from final explosion splash damage. Keep the current `P` smoke and live line test as the runtime truth.
+
+### 1. Remaining launch modifier runtime policy
+
+Broaden one narrow shape at a time beyond the current payload/source policy. Combined Speed+ Size+ on one simple payload branch is supported through `launch_modifier_policy.lua`, single Speed+ or single Size+ is supported with bounded Chain payload Multicast, and single source Speed+ or Size+ is supported for Bounce/Pierce simple source launches. Combined Speed+ Size+ plus Multicast, Pattern, nested payload modifiers, Homing composition, and source modifier fanout/nesting remain deferred.
 
 ### 2. Broader nested payload runtime
 
@@ -2116,7 +2251,7 @@ Do not claim:
 - arbitrary payload Multicast works live beyond direct Trigger/Timer v0 groups
 - arbitrary payload Spread/Burst works live beyond direct Trigger/Timer payload Multicast groups
 - arbitrary nested Trigger/Timer works live beyond the depth-2 opposite-kind v1 shapes
-- arbitrary Chain works beyond the narrow direct/Trigger simple and Speed+/Size+ payload-modifier shapes
+- arbitrary Chain works beyond the narrow direct/Trigger simple, Speed+/Size+ simple payload-modifier, and single-modifier Chain Multicast shapes
 - Speed+ acceleration works
 - Size+ scales projectile mesh/hitbox/collision
 - the 25-helper stress fixture proves real delayed nested Timer gameplay
@@ -2130,6 +2265,6 @@ Current truth:
 - Direct Trigger/Timer payload Multicast and payload Spread/Burst v0 work only behind explicit dev flags.
 - Speed+ v1 works as bounded launch-time `data.speed` mutation.
 - Size+ v0 works as bounded helper effect `area` mutation.
-- Chain payload Speed+/Size+ works only for direct Chain and Trigger->Chain simple payload shapes.
+- Chain payload Speed+/Size+ works only for direct Chain and Trigger->Chain simple payload shapes, including combined Speed+ Size+ on one simple payload branch, plus direct and Trigger->Chain payload Multicast with one Speed+ or one Size+ modifier.
 - Homing v0 works only for the narrow primary `Homing -> simple target projectile` shape; the visible `K` soft probe launches straight first, uses delayed blended redirect nudges, and can run rare bounded retarget scans from the central manager.
 - Nested Trigger/Timer runtime remains bounded to the current depth-2 opposite-kind shapes.

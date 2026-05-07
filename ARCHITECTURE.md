@@ -186,6 +186,110 @@ No opcode should recurse synchronously.
 
 All fanout and nested behavior must enqueue bounded jobs.
 
+### 4.5 IR runtime adapter and launch modifier policy
+
+The shared IR runtime path is the long-term owner of event-resumed payload behavior
+and the shared source launch path owns source launch decoration.
+Runtime IR preserves `prefix_ops`, `modifier_chain`, `postfix_chain`, entries,
+scopes, payload bindings, and continuations so event opcodes can resume payloads
+without knowing the semantics of every modifier that may prefix that payload.
+
+`Trigger`, `Timer`, `Bounce`, `Pierce`, and `Chain` are event adapters. They may
+pass event facts such as origin, direction, hit position, current hit target,
+projectile identity, continuation identity, gates, and caps into the shared
+runtime path. They must not interpret `Speed+` or `Size+` themselves, compute
+their launch mutations, copy Chain-specific modifier logic, or add
+event-specific Speed+/Size+ branches.
+
+Payload launch-modifier semantics belong in
+`scripts/spellforge/global/launch_modifier_policy.lua`. That module owns:
+
+- inspection of payload entry `prefix_ops` and `modifier_chain`
+- inspection of source entry `prefix_ops` and `modifier_chain`
+- supported/deferred modifier combination decisions
+- stable rejection reasons for unsupported combinations
+- Speed+ launch-field mutation computation
+- Size+ helper-spec mutation before helper records are materialized
+- shared policy preflight for cached plans before event adapters enqueue jobs
+
+For IR-planned payload jobs, `scripts/spellforge/global/runtime_job_planner.lua`
+is the shared place that applies accepted launch-modifier mutations to runtime
+job specs. Legacy Chain compatibility code may preserve or copy policy-produced
+metadata while that migration is being completed, but it must not recompute
+modifier semantics. Event adapters should consume those job specs and their event
+context. They may pass gate and cap values into the shared policy, but they
+should not branch on modifier kind.
+
+For source launches, `launch_modifier_policy.lua` also owns supported/deferred
+source modifier decisions. Generic source launch/spec creation applies
+policy-produced source mutations before SFP launch fields are finalized. Bounce
+and Pierce adapters may add only their own event/source facts such as
+`bounceEnabled`, `bounceMax`, `bouncePower`, `detonateOnActorHit`, `piercing`,
+`pierceLimit`, and event identity. They must not compute or interpret Speed+/Size+
+fields.
+
+The policy may return a mutation set, not just a single modifier. Combined
+Speed+ Size+ on one simple payload branch is handled by applying the Speed+
+launch-field mutation and Size+ helper-spec mutation from the same policy result.
+Single Speed+ or single Size+ may also compose with bounded Chain payload
+Multicast when the Chain Multicast and matching modifier gates are enabled.
+Combined Speed+ Size+ plus Multicast remains deferred until proven separately.
+Source policy v0 supports single Speed+ or single Size+ on simple source launches,
+including the narrow `Bounce/Pierce -> Speed+/Size+ -> simple target emitter`
+composition. Combined source Speed+ Size+, source fanout/pattern composition,
+Homing, Timer, direct source Chain, nested runtime, and recursive source modifier
+stacks remain deferred until separately proven.
+
+Size+ is special only because helper specs must be mutated before helper records
+are materialized. That pre-materialization step must still route through the
+shared launch modifier policy, not through Trigger-, Timer-, Bounce-, Pierce-,
+Chain-, or source-event-specific code.
+
+All new policy support remains behind the normal live 2.2c gates and the
+relevant opcode/modifier gates. This policy must not add per-frame actor scans,
+per-projectile Spellforge Lua brains, unbounded actor scans, post-launch
+projectile mutation loops, or arbitrary recursive modifier stacking.
+
+#### Launch modifier policy review checklist
+
+A new change violates this architecture if it:
+
+- adds Speed+/Size+ mutation logic to `live_trigger.lua`, `live_timer.lua`,
+  `live_bounce.lua`, `live_pierce.lua`, or `live_chain.lua`
+- adds Speed+/Size+ mutation logic to a source event adapter instead of shared
+  launch policy/source launch code
+- adds event-specific support/deferred reasons such as
+  `bounce_trigger_speed_plus_supported`
+- copies Chain modifier inspection into another event adapter
+- branches in an event adapter on payload Speed+/Size+
+- branches in an event adapter on source Speed+/Size+
+- mutates helper specs outside `launch_modifier_policy.lua` for payload or source
+  Size+
+- applies Speed+/Size+ fields outside `runtime_job_planner.lua` or
+  `launch_modifier_policy.lua` for payload jobs, or outside
+  `launch_modifier_policy.lua` / generic source launch-spec application for
+  source launches
+- expands support by adding one-off Trigger/Timer/Bounce/Pierce/Chain modifier
+  branches instead of broadening the shared policy
+
+A valid change:
+
+- updates `launch_modifier_policy.lua` to inspect, accept, defer, or prepare a
+  payload or source modifier combination
+- updates `runtime_job_planner.lua` to apply policy-produced mutations to
+  IR-planned jobs
+- updates generic source launch/spec creation to apply policy-produced source
+  mutations before launch
+- lets event adapters pass only event context, gates, and caps into the shared
+  policy/runtime path
+- adds conformance smokes proving multiple event adapters consume the same policy
+  without event-specific modifier code
+
+Temporary legacy Chain compatibility code may preserve or copy policy-produced
+modifier metadata while the migration is in progress. It must not recompute
+Speed+/Size+ semantics, inspect modifiers independently, or become the template
+for other event adapters.
+
 ---
 
 ## 5. Script Boundary
@@ -486,7 +590,7 @@ This rule prevents trivial exponential blowups and makes player intent readable.
 
 ## 11. v1 Opcode Vocabulary
 
-v1 contains exactly eight Spellforge operators.
+v1 currently contains nine Spellforge operators.
 
 | Opcode | Kind | Range / Parameters | Binding | Notes |
 |---|---|---|---|---|
@@ -496,10 +600,11 @@ v1 contains exactly eight Spellforge operators.
 | Speed+ | Prefix | percent scalar | next emitter group | modifies projectile speed |
 | Size+ | Prefix | percent scalar | next emitter group | modifies area/VFX scale where supported |
 | Chain | Prefix | hops 1–5 | next emitter group | bounded target hopping |
+| Pierce | Prefix | pierces 1-3 normal, 5 hard | next emitter group | SFP-backed pass-through through unique actors |
 | Trigger | Postfix | none | previous emitter group | payload on resolution |
 | Timer | Postfix | 0.5–5.0s | previous emitter group | payload after delay |
 
-Any doc/code mentioning v1 `Damage+` or `Pierce` is stale unless those are explicitly reintroduced later.
+Any doc/code mentioning v1 `Damage+` is stale unless that opcode is explicitly reintroduced later.
 
 ---
 
