@@ -244,11 +244,9 @@ function base_effect_catalog.buildAvailableEffects(payload)
     if p.dev_full_catalog == true then
         source_mode = "dev_full_catalog"
         fallback_reason = nil
-    elseif p.known_effect_scan_status == "ok" and #known_keys > 0 then
+    elseif p.known_effect_scan_status == "ok" then
         source_mode = "player_known"
-        fallback_reason = nil
-    elseif p.known_effect_scan_status == "ok" and #known_keys == 0 then
-        fallback_reason = "known_effect_scan_empty"
+        fallback_reason = #known_keys == 0 and "known_effect_scan_empty" or nil
     end
 
     local result = {
@@ -269,6 +267,9 @@ function base_effect_catalog.buildAvailableEffects(payload)
         for _, id in ipairs(known_keys) do
             local template = static_by_id[id] or { id = id, display_name = displayNameFromId(id), school = "Unknown", category = "Known" }
             appendEntry(result, entryFromTemplate(template, source_mode, true, "player_known_spell", samples[id]))
+        end
+        if fallback_reason == "known_effect_scan_empty" then
+            result.capability_notes.known_effect_scan_empty = true
         end
     else
         local source = source_mode == "dev_full_catalog" and "dev_full_catalog" or "static_fallback"
