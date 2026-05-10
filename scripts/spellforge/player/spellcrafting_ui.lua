@@ -199,12 +199,6 @@ local function layoutMetrics()
     local preview_h = clamp(math.floor(main_h * 0.26), 100, 130)
     local editor_h = math.max(130, main_h - saved_h - preview_h - gap * 2)
 
-    local scrollbar_gutter = SCROLLBAR_WIDTH + 4
-    local palette_button_w = math.max(72, palette_w - 24)
-    local palette_list_button_w = math.max(60, palette_button_w - scrollbar_gutter)
-    local right_button_w = math.max(110, right_w - 34)
-    local right_list_button_w = math.max(96, right_button_w - scrollbar_gutter)
-
     return {
         screen = screen,
         layer = layer,
@@ -218,9 +212,7 @@ local function layoutMetrics()
         status_h = status_h,
         action_h = action_h,
         palette_w = palette_w,
-        palette_button_w = palette_button_w,
-        palette_list_button_w = palette_list_button_w,
-        scrollbar_gutter = scrollbar_gutter,
+        palette_button_w = math.max(72, palette_w - 24),
         effects_h = effects_h,
         operators_h = operators_h,
         effects_visible_rows = clamp(math.floor((effects_h - 116) / 24), 2, 8),
@@ -229,8 +221,7 @@ local function layoutMetrics()
         recipe_button_w = math.max(140, recipe_w - 56),
         recipe_list_h = math.max(140, main_h - 80),
         right_w = right_w,
-        right_button_w = right_button_w,
-        right_list_button_w = right_list_button_w,
+        right_button_w = math.max(110, right_w - 34),
         saved_h = saved_h,
         saved_visible_rows = clamp(math.floor((saved_h - 46) / 24), 3, 6),
         editor_h = editor_h,
@@ -862,88 +853,29 @@ local function setListStart(list_name, state_key, total, visible, next_start)
     render()
 end
 
-local SCROLLBAR_WIDTH = 14
-local SCROLLBAR_ARROW_H = 16
-local SCROLLBAR_THUMB_MIN = 14
-
-local function scrollbar(list_name, state_key, meta, opts)
-    local options = opts or {}
-    local total = tonumber(meta.total) or 0
-    local visible = math.max(1, tonumber(meta.visible) or 1)
-    local start = tonumber(meta.start) or 1
-    local max_start = math.max(1, total - visible + 1)
-    local clamped_start = clamp(start, 1, max_start)
-    local width = options.width or SCROLLBAR_WIDTH
-    local height = math.max(40, options.height or 100)
-    local arrow_h = math.min(SCROLLBAR_ARROW_H, math.max(10, math.floor((height - 12) / 4)))
-    local track_h = math.max(12, height - arrow_h * 2 - 2)
-    local thumb_min = math.min(SCROLLBAR_THUMB_MIN, math.max(6, math.floor(track_h / 3)))
-    local thumb_h = track_h
-    if total > visible and total > 0 then
-        thumb_h = math.max(thumb_min, math.floor(track_h * visible / total))
-    end
-    thumb_h = math.min(track_h, thumb_h)
-    local thumb_y = 0
-    if max_start > 1 then
-        thumb_y = math.floor((track_h - thumb_h) * (clamped_start - 1) / (max_start - 1))
-    end
-
-    local function trackClick(event)
-        if track_h <= thumb_h or max_start <= 1 then
-            return
-        end
-        local off_y = (event and event.offset and event.offset.y) or 0
-        local target_y = off_y - thumb_h * 0.5
-        local denom = math.max(1, track_h - thumb_h)
-        local fraction = math.max(0, math.min(1, target_y / denom))
-        local next_start = math.floor(fraction * (max_start - 1) + 0.5) + 1
-        setListStart(list_name, state_key, total, visible, next_start)
-    end
-
-    local thumb = {
-        template = template("boxSolid"),
-        props = {
-            size = v2(math.max(2, width - 2), thumb_h),
-        },
-    }
-
-    local track_children = {}
-    if thumb_y > 0 then
-        track_children[#track_children + 1] = spacer(0, thumb_y)
-    end
-    track_children[#track_children + 1] = thumb
-
-    local track = {
-        template = template("box"),
-        props = {
-            size = v2(width, track_h),
-        },
-        events = {
-            mouseClick = async:callback(trackClick),
-        },
-        content = openmw_ui.content {
-            column(track_children, { size = v2(width, track_h) }),
-        },
-    }
-
-    local up_disabled = clamped_start <= 1
-    local down_disabled = clamped_start >= max_start
-    local up_color = up_disabled and COLOR.muted or COLOR.accent
-    local down_color = down_disabled and COLOR.muted or COLOR.accent
-
-    local up_button = button("^", function()
-        setListStart(list_name, state_key, total, visible, clamped_start - 1)
-    end, { width = width, height = arrow_h, color = up_color, disabled = up_disabled })
-
-    local down_button = button("v", function()
-        setListStart(list_name, state_key, total, visible, clamped_start + 1)
-    end, { width = width, height = arrow_h, color = down_color, disabled = down_disabled })
-
+local function pagerControls(list_name, state_key, meta, button_w)
+    local total = meta.total or 0
+    local visible = math.max(1, meta.visible or 1)
+    local start = meta.start or 1
+    local finish = meta.finish or 0
+    local w = button_w or 16
     return column({
-        up_button,
-        track,
-        down_button,
-    }, { size = v2(width, height) })
+        textLayout(string.format("%s-%s of %s", tostring(finish > 0 and start or 0), tostring(finish), tostring(total)), { color = COLOR.muted }),
+        spacer(0, 2),
+        row({
+            button("|<", function() setListStart(list_name, state_key, total, visible, 1) end, { width = w, color = COLOR.muted }),
+            spacer(1, 0),
+            button("P-", function() setListStart(list_name, state_key, total, visible, start - visible) end, { width = 20, color = COLOR.muted }),
+            spacer(1, 0),
+            button("^", function() setListStart(list_name, state_key, total, visible, start - 1) end, { width = w, color = COLOR.muted }),
+            spacer(1, 0),
+            button("v", function() setListStart(list_name, state_key, total, visible, start + 1) end, { width = w, color = COLOR.muted }),
+            spacer(1, 0),
+            button("P+", function() setListStart(list_name, state_key, total, visible, start + visible) end, { width = 20, color = COLOR.muted }),
+            spacer(1, 0),
+            button(">|", function() setListStart(list_name, state_key, total, visible, total) end, { width = w, color = COLOR.muted }),
+        }),
+    })
 end
 
 local function setEffectFilter(value)
@@ -1301,77 +1233,55 @@ local function operatorPalette(m)
     local items = {}
     local entries = state.catalog and state.catalog.operators or {}
     local visible_entries, meta = listWindow(entries, "operators_scroll_index", m.operators_visible_rows)
-    local list_button_w = m.palette_list_button_w
     for _, entry in ipairs(visible_entries) do
         local label = entry.display_name or entry.opcode
         items[#items + 1] = button(label, function()
             addOperator(entry.opcode)
         end, {
-            width = list_button_w,
+            width = m.palette_button_w,
             color = colorForOpcode(entry.opcode),
         })
         items[#items + 1] = spacer(0, 2)
     end
     if #items == 0 then
         items[#items + 1] = paragraph("Catalog loading...", v2(math.max(76, m.palette_w - 28), 48), { color = COLOR.muted })
+    else
+        items[#items + 1] = spacer(0, 2)
+        items[#items + 1] = pagerControls("operators", "operators_scroll_index", meta, 16)
     end
-    local list_h = math.max(40, m.operators_h - 42)
-    local body_row = row({
-        column(items, { size = v2(list_button_w, list_h) }),
-        spacer(2, 0),
-        scrollbar("operators", "operators_scroll_index", meta, { height = list_h }),
-    })
-    return section("Operators", body_row, v2(m.palette_w, m.operators_h))
+    return section("Operators", column(items), v2(m.palette_w, m.operators_h))
 end
 
 local function effectPalette(m)
+    local items = {}
     local all_effects, available = availableEffects()
     local filtered = filteredBaseEffects()
     local visible_entries, meta = listWindow(filtered, "effects_scroll_index", m.effects_visible_rows)
     local source_label = sourceModeLabel(available and available.source_mode)
-    local list_button_w = m.palette_list_button_w
-
-    local header_items = {
-        textLayout(source_label, { color = COLOR.muted }),
-        spacer(0, 2),
-        textInput(state.effects_filter, setEffectFilter, { width = m.palette_button_w, color = COLOR.text }),
-        spacer(0, 2),
-    }
+    items[#items + 1] = textLayout(source_label, { color = COLOR.muted })
+    items[#items + 1] = spacer(0, 2)
+    items[#items + 1] = textInput(state.effects_filter, setEffectFilter, { width = m.palette_button_w, color = COLOR.text })
+    items[#items + 1] = spacer(0, 2)
     local category_label = state.effects_category_filter == "all" and "School: All" or shortText("School: " .. tostring(state.effects_category_filter), 18)
-    header_items[#header_items + 1] = button(category_label, cycleEffectCategory, { width = m.palette_button_w, color = COLOR.muted })
-    header_items[#header_items + 1] = spacer(0, 2)
-    header_items[#header_items + 1] = textLayout(string.format("%s of %s", tostring(#filtered), tostring(#all_effects)), { color = COLOR.muted })
-    header_items[#header_items + 1] = spacer(0, 3)
-
-    local list_items = {}
+    items[#items + 1] = button(category_label, cycleEffectCategory, { width = m.palette_button_w, color = COLOR.muted })
+    items[#items + 1] = spacer(0, 2)
+    items[#items + 1] = textLayout(string.format("Filtered %s / %s", tostring(#filtered), tostring(#all_effects)), { color = COLOR.muted })
+    items[#items + 1] = spacer(0, 3)
     for _, entry in ipairs(visible_entries) do
         local effect = catalogEffect(entry)
-        list_items[#list_items + 1] = button(shortText(catalogEffectLabel(entry), math.max(10, math.floor(list_button_w / 6))), function()
+        items[#items + 1] = button(shortText(catalogEffectLabel(entry), math.max(12, math.floor(m.palette_button_w / 6))), function()
             addEffect(effect)
         end, {
-            width = list_button_w,
+            width = m.palette_button_w,
             color = colorForEffectId(entry.id or (effect and effect.id)),
         })
-        list_items[#list_items + 1] = spacer(0, 2)
+        items[#items + 1] = spacer(0, 2)
     end
     if #visible_entries == 0 then
-        local empty_text = "No matching effects."
-        if #all_effects == 0 and available and available.source_mode == "player_known" then
-            empty_text = "No known effects. Learn spells to unlock effects."
-        end
-        list_items[#list_items + 1] = paragraph(empty_text, v2(math.max(76, list_button_w), 44), { color = COLOR.muted })
+        items[#items + 1] = paragraph("No matching effects.", v2(math.max(76, m.palette_w - 28), 34), { color = COLOR.muted })
     end
-
-    local list_h = math.max(60, m.effects_h - 116)
-    local body = column({
-        column(header_items),
-        row({
-            column(list_items, { size = v2(list_button_w, list_h) }),
-            spacer(2, 0),
-            scrollbar("effects", "effects_scroll_index", meta, { height = list_h }),
-        }),
-    })
-    return section("Effects", body, v2(m.palette_w, m.effects_h))
+    items[#items + 1] = pagerControls("effects", "effects_scroll_index", meta, 16)
+    return section("Effects", column(items), v2(m.palette_w, m.effects_h))
 end
 
 local function recipeStack(m)
@@ -1567,36 +1477,31 @@ local function selectedEditor(m)
 end
 
 local function savedRecipes(m)
+    local rows = {}
     local saved = ui_api.getSavedRecipes() or {}
     local visible_saved, meta = listWindow(saved, "saved_scroll_index", m.saved_visible_rows)
-    local list_button_w = m.right_list_button_w
-    local rows = {}
     for _, entry in ipairs(visible_saved) do
         local active = entry.id == state.selected_saved_id
-        local label = shortText(entry.title or entry.id, math.max(18, math.floor(list_button_w / 6)))
+        local label = shortText(entry.title or entry.id, math.max(20, math.floor(m.right_button_w / 6)))
         rows[#rows + 1] = button(label, function()
             loadSaved(entry)
         end, {
-            width = list_button_w,
+            width = m.right_button_w,
             color = active and COLOR.selected or COLOR.text,
             bullet = active and GLYPHS.cursor or GLYPHS.bullet,
         })
         rows[#rows + 1] = spacer(0, 2)
     end
-    if #saved == 0 then
-        return section("Saved Recipes", paragraph(
+    if #rows == 0 then
+        rows[#rows + 1] = paragraph(
             "No saved recipes yet. Click Save to keep the current one.",
             v2(math.max(110, m.right_w - 38), 44),
             { color = COLOR.muted }
-        ), v2(m.right_w, m.saved_h))
+        )
+    elseif #saved > (meta.visible or m.saved_visible_rows or 3) then
+        rows[#rows + 1] = pagerControls("saved", "saved_scroll_index", meta, 24)
     end
-    local list_h = math.max(40, m.saved_h - 46)
-    local body = row({
-        column(rows, { size = v2(list_button_w, list_h) }),
-        spacer(2, 0),
-        scrollbar("saved", "saved_scroll_index", meta, { height = list_h }),
-    })
-    return section("Saved Recipes", body, v2(m.right_w, m.saved_h))
+    return section("Saved Recipes", column(rows), v2(m.right_w, m.saved_h))
 end
 
 local function previewLines(preview)
@@ -1795,9 +1700,8 @@ render = function()
     state.root = openmw_ui.create(buildLayout(), { noWarnUnused = true })
 end
 
-local function ensureCatalog(opts)
-    local options = opts or {}
-    if state.catalog and not options.force_rescan then
+local function ensureCatalog()
+    if state.catalog then
         return
     end
     ui_api.requestCatalog(function(result)
@@ -1823,7 +1727,7 @@ local function ensureCatalog(opts)
             log.warn("SPELLFORGE_SPELLCRAFT_UI_CATALOG_FAILED")
         end
         render()
-    end, options)
+    end)
 end
 
 local function addUiMode()
@@ -1856,7 +1760,7 @@ function spellcrafting_ui.open()
     end
     state.visible = true
     addUiMode()
-    ensureCatalog({ force = true, force_rescan = true })
+    ensureCatalog()
     render()
     local m = state.last_layout
     log.info(string.format(
