@@ -13,8 +13,10 @@ local helper_records = require("scripts.spellforge.global.helper_records")
 local ir_runtime_adapter = require("scripts.spellforge.global.ir_runtime_adapter")
 local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
 local orchestrator = require("scripts.spellforge.global.orchestrator")
+local payload_multicast = require("scripts.spellforge.global.payload_multicast")
 local runtime_hits = require("scripts.spellforge.global.runtime_hits")
 local runtime_stats = require("scripts.spellforge.global.runtime_stats")
+local live_timer = require("scripts.spellforge.global.live_timer")
 
 local live_chain = {}
 
@@ -68,6 +70,11 @@ local function countOpcode(ops, opcode)
     return count, first
 end
 
+local function hasOpcode(ops, opcode)
+    local count = countOpcode(ops, opcode)
+    return count > 0
+end
+
 local function analyzePayloadPrefixOps(ops)
     local info = {
         chain_count = 0,
@@ -78,6 +85,9 @@ local function analyzePayloadPrefixOps(ops)
         size_op = nil,
         multicast_count = 0,
         multicast_op = nil,
+        pattern_count = 0,
+        pattern_kind = nil,
+        pattern_op = nil,
         unsupported_count = 0,
         unsupported_opcode = nil,
     }
@@ -94,6 +104,13 @@ local function analyzePayloadPrefixOps(ops)
         elseif op and op.opcode == "Multicast" then
             info.multicast_count = info.multicast_count + 1
             info.multicast_op = info.multicast_op or op
+        elseif op and (op.opcode == "Spread" or op.opcode == "Burst") then
+            info.pattern_count = info.pattern_count + 1
+            if info.pattern_kind ~= nil and info.pattern_kind ~= op.opcode then
+                info.pattern_ambiguous = true
+            end
+            info.pattern_kind = info.pattern_kind or op.opcode
+            info.pattern_op = info.pattern_op or op
         else
             info.unsupported_count = info.unsupported_count + 1
             info.unsupported_opcode = info.unsupported_opcode or (op and op.opcode)
@@ -165,10 +182,22 @@ local function irPlannerOptions(binding, options)
             or (options and options.allow_chain_multicast == true)
             or (options and options.force_chain_multicast_enabled == true)
             or (options and options.chain_multicast_enabled == true),
+        allow_payload_pattern = binding and binding.has_pattern_payload == true
+            or (options and options.allow_payload_pattern == true)
+            or (options and options.force_payload_pattern_enabled == true)
+            or (options and options.payload_pattern_enabled == true),
         max_hops = binding and binding.max_hops or (options and options.max_chain_hops),
         max_jobs = binding and binding.max_chain_jobs or (options and options.max_chain_jobs),
         max_chain_multicast_fanout = binding and binding.chain_multicast_fanout_count
             or (options and options.max_chain_multicast_fanout),
+        allow_chain_event_continuation = binding and binding.chain_side_continuation_kind ~= nil
+            or (options and options.allow_chain_event_continuation == true),
+        max_chain_event_continuation_jobs = binding and binding.chain_event_continuation_budget_cap
+            or (options and options.max_chain_event_continuation_jobs),
+        max_chain_trigger_side_payload_jobs = binding and binding.chain_event_continuation_budget_cap
+            or (options and options.max_chain_trigger_side_payload_jobs),
+        max_chain_timer_side_payload_jobs = binding and binding.chain_event_continuation_budget_cap
+            or (options and options.max_chain_timer_side_payload_jobs),
         max_live_launches_per_tick = binding and binding.max_live_launches_per_tick
             or (options and options.max_live_launches_per_tick),
         chaos_budget_profile = binding and binding.chaos_budget_profile or (options and options.chaos_budget_profile),
@@ -178,6 +207,17 @@ local function irPlannerOptions(binding, options)
         force_size_plus_enabled = gates.force_size_plus_enabled,
         force_size_plus_disabled = gates.force_size_plus_disabled,
         size_plus_enabled = gates.size_plus_enabled,
+        allow_payload_homing = options and options.allow_payload_homing == true,
+        allow_homing = options and options.allow_homing == true,
+        force_homing_enabled = options and options.force_homing_enabled,
+        force_homing_disabled = options and options.force_homing_disabled,
+        homing_enabled = (options and options.homing_enabled == true) or dev.liveHomingEnabled() == true,
+        max_homing_fanout_per_cast = options and options.max_homing_fanout_per_cast,
+        max_homing_target_scans_per_cast = options and options.max_homing_target_scans_per_cast,
+        max_soft_homing_registrations_per_cast = options and options.max_soft_homing_registrations_per_cast,
+        homing_target_id = options and options.homing_target_id,
+        homing_target_position = options and options.homing_target_position,
+        homing_actor_scan = options and options.homing_actor_scan,
     }
 end
 
@@ -555,9 +595,13 @@ local function compactJob(job_id)
         size_plus_capped = job and (job.size_plus_capped or (payload and payload.size_plus_capped)) or nil,
         size_plus_base_area = job and (job.size_plus_base_area or (payload and payload.size_plus_base_area)) or nil,
         size_plus_area = job and (job.size_plus_area or (payload and payload.size_plus_area)) or nil,
+        chain_side_continuation_kind = job and (job.chain_side_continuation_kind or (payload and payload.chain_side_continuation_kind)) or nil,
+        chain_side_continuation_id = job and (job.chain_side_continuation_id or (payload and payload.chain_side_continuation_id)) or nil,
+        chain_side_payload_count = job and (job.chain_side_payload_count or (payload and payload.chain_side_payload_count)) or nil,
         launch_accepted = job and job.launch_accepted == true or false,
         projectile_id = job and job.projectile_id or nil,
         projectile_id_source = job and job.projectile_id_source or nil,
+        launch_start_pos = job and (job.launch_start_pos or (payload and payload.start_pos)) or nil,
         launch_direction = job and job.launch_direction or nil,
         launch_user_data = job and job.launch_user_data or nil,
         error = job and job.error or nil,
@@ -621,10 +665,14 @@ local function makeProbeVirtualPayloadJob(job, job_id, projectile_id)
         size_plus_capped = source.size_plus_capped or payload.size_plus_capped,
         size_plus_base_area = source.size_plus_base_area or payload.size_plus_base_area,
         size_plus_area = source.size_plus_area or payload.size_plus_area,
+        chain_side_continuation_kind = source.chain_side_continuation_kind or payload.chain_side_continuation_kind,
+        chain_side_continuation_id = source.chain_side_continuation_id or payload.chain_side_continuation_id,
+        chain_side_payload_count = source.chain_side_payload_count or payload.chain_side_payload_count,
         launch_accepted = true,
         projectile_id = projectile_id,
         projectile_id_source = "probe_virtual",
-        launch_direction = payload.direction,
+        launch_start_pos = source.launch_start_pos or payload.start_pos,
+        launch_direction = source.launch_direction or payload.direction,
         launch_user_data = user_data,
         probe_virtual = true,
     }
@@ -695,13 +743,19 @@ local function inspectPayloadModifier(plan, audit, options)
         force_chain_multicast_enabled = options and options.force_chain_multicast_enabled,
         force_chain_multicast_disabled = options and options.force_chain_multicast_disabled,
         chain_multicast_enabled = options and options.chain_multicast_enabled == true,
+        allow_payload_pattern = options and (options.allow_payload_pattern == true or options.force_payload_pattern_enabled == true),
+        payload_pattern_enabled = options and options.payload_pattern_enabled == true,
+        force_payload_pattern_enabled = options and options.force_payload_pattern_enabled,
+        force_payload_pattern_disabled = options and options.force_payload_pattern_disabled,
         max_chain_multicast_fanout = options and options.max_chain_multicast_fanout or limits.MAX_CHAIN_MULTICAST_FANOUT,
+        max_chain_pattern_fanout = options and options.max_chain_pattern_fanout or limits.MAX_CHAIN_PATTERN_FANOUT,
         force_speed_plus_enabled = options and options.force_speed_plus_enabled,
         force_speed_plus_disabled = options and options.force_speed_plus_disabled,
         force_size_plus_enabled = options and options.force_size_plus_enabled,
         force_size_plus_disabled = options and options.force_size_plus_disabled,
         speed_plus_enabled = options and options.speed_plus_enabled == true,
         size_plus_enabled = options and options.size_plus_enabled == true,
+        allow_nested_payload_modifiers = options and options.allow_chain_event_continuation == true,
     })
     if policy.ok ~= true then
         return nil, policy.rejection_reason or "chain_payload_modifier_deferred"
@@ -718,11 +772,92 @@ local function inspectPayloadModifier(plan, audit, options)
         has_speed_plus_payload = has_speed_plus,
         has_size_plus_payload = has_size_plus,
         has_multicast_payload = prefix.multicast_count == 1,
+        has_pattern_payload = prefix.pattern_count == 1,
+        chain_pattern_kind = prefix.pattern_kind,
         chain_multicast_fanout_count = fanout_count,
         speed_plus_mutation = mutations.speed_plus,
         size_plus_mutation = mutations.size_plus,
         size_plus_apply_result = mutations.size_plus_apply_result,
     }, nil
+end
+
+local function sideContinuationKind(slot)
+    local has_trigger, trigger_op = countOpcode(slot and slot.postfix_ops or nil, "Trigger")
+    local has_timer, timer_op = countOpcode(slot and slot.postfix_ops or nil, "Timer")
+    if has_trigger > 0 and has_timer > 0 then
+        return nil, nil, "chain_nested_payload_deferred"
+    end
+    if has_trigger == 1 then
+        return "Trigger", trigger_op, nil
+    elseif has_timer == 1 then
+        return "Timer", timer_op, nil
+    elseif has_trigger > 1 or has_timer > 1 then
+        return nil, nil, "chain_nested_payload_deferred"
+    end
+    return nil, nil, nil
+end
+
+local function resolveSidePayloads(plan, payload_slot, side_kind, options)
+    if side_kind ~= "Trigger" and side_kind ~= "Timer" then
+        return nil, nil
+    end
+    local payload_result = payload_multicast.resolvePayloadHelpersForSource(plan, payload_slot, {
+        source_opcode = side_kind,
+        allow_payload_multicast = options.allow_payload_multicast == true
+            or options.force_payload_multicast_enabled == true
+            or options.payload_multicast_enabled == true,
+        allow_payload_pattern = options.allow_payload_pattern == true
+            or options.force_payload_pattern_enabled == true
+            or options.payload_pattern_enabled == true,
+        allow_payload_launch_modifiers = options.allow_payload_launch_modifiers == true
+            or options.force_speed_plus_enabled == true
+            or options.force_size_plus_enabled == true
+            or options.speed_plus_enabled == true
+            or options.size_plus_enabled == true,
+        force_speed_plus_enabled = options.force_speed_plus_enabled,
+        force_speed_plus_disabled = options.force_speed_plus_disabled,
+        speed_plus_enabled = options.speed_plus_enabled == true,
+        force_size_plus_enabled = options.force_size_plus_enabled,
+        force_size_plus_disabled = options.force_size_plus_disabled,
+        size_plus_enabled = options.size_plus_enabled == true,
+        max_depth = options.max_depth,
+        max_jobs = options.max_chain_side_payload_jobs or limits.MAX_NESTED_PAYLOAD_JOBS,
+        max_fanout = options.max_chain_side_payload_fanout or limits.MAX_NESTED_PAYLOAD_FANOUT,
+        max_projectiles = options.max_projectiles,
+        allow_unrelated_payloads = true,
+        source_context_validated = true,
+    })
+    if not payload_result.ok then
+        return nil, payload_result.rejection_reason or "chain_nested_payload_deferred"
+    end
+    for _, side_payload in ipairs(payload_result.payload_slots or {}) do
+        if hasOpcode(side_payload and side_payload.prefix_ops or nil, "Chain") then
+            return nil, "chain_event_payload_chain_deferred"
+        end
+        if hasOpcode(side_payload and side_payload.prefix_ops or nil, "Homing") then
+            return nil, "homing_chain_targeting_unsupported"
+        end
+    end
+    return payload_result, nil
+end
+
+local function sideBudgetReason(side_kind, max_hops, chain_fanout_count, side_payload_count, options)
+    local budget = (tonumber(max_hops) or 0)
+        * math.max(1, tonumber(chain_fanout_count) or 1)
+        * math.max(1, tonumber(side_payload_count) or 1)
+    local cap = tonumber(options.max_chain_event_continuation_jobs)
+        or (side_kind == "Trigger"
+            and tonumber(options.max_chain_trigger_side_payload_jobs or limits.MAX_CHAIN_TRIGGER_SIDE_PAYLOAD_JOBS_PER_CAST)
+            or tonumber(options.max_chain_timer_side_payload_jobs or limits.MAX_CHAIN_TIMER_SIDE_PAYLOAD_JOBS_PER_CAST))
+        or limits.MAX_CHAIN_EVENT_CONTINUATION_JOBS_PER_CAST
+    if budget > cap then
+        return side_kind == "Trigger"
+            and "chain_trigger_side_payload_budget_exceeded"
+            or "chain_timer_side_payload_budget_exceeded",
+            budget,
+            cap
+    end
+    return nil, budget, cap
 end
 
 function live_chain.preparePayloadModifiers(plan, opts)
@@ -733,7 +868,11 @@ function live_chain.preparePayloadModifiers(plan, opts)
         scan_radius = options.scan_radius,
         max_candidates = options.max_candidates or options.candidate_cap,
         allow_chain_multicast = chainMulticastEnabled(options),
+        allow_chain_pattern = options.allow_chain_pattern == true or options.allow_payload_pattern == true or options.force_payload_pattern_enabled == true,
+        allow_payload_pattern = options.allow_payload_pattern == true or options.force_payload_pattern_enabled == true,
+        allow_chain_event_continuation = options.allow_chain_event_continuation == true,
         max_chain_multicast_fanout = options.max_chain_multicast_fanout,
+        max_chain_pattern_fanout = options.max_chain_pattern_fanout,
     })
     if audit.chain_candidate ~= true then
         return nil, audit.rejection_reason or "unsupported_chain_shape", audit
@@ -751,6 +890,8 @@ function live_chain.preparePayloadModifiers(plan, opts)
     audit.has_speed_plus_payload = modifier.has_speed_plus_payload == true
     audit.has_size_plus_payload = modifier.has_size_plus_payload == true
     audit.has_multicast_payload = modifier.has_multicast_payload == true
+    audit.has_pattern_payload = modifier.has_pattern_payload == true
+    audit.chain_pattern_kind = modifier.chain_pattern_kind
     audit.chain_multicast_fanout_count = modifier.chain_multicast_fanout_count
     log.info(string.format(
         "SPELLFORGE_CHAIN_MODIFIER_POLICY_COMPAT_OK recipe_id=%s source_slot_id=%s payload_slot_id=%s payload_modifier_kind=%s",
@@ -770,7 +911,11 @@ function live_chain.selectV0Plan(plan, opts)
         scan_radius = options.scan_radius,
         max_candidates = options.max_candidates or options.candidate_cap,
         allow_chain_multicast = chainMulticastEnabled(options),
+        allow_chain_pattern = options.allow_chain_pattern == true or options.allow_payload_pattern == true or options.force_payload_pattern_enabled == true,
+        allow_payload_pattern = options.allow_payload_pattern == true or options.force_payload_pattern_enabled == true,
+        allow_chain_event_continuation = options.allow_chain_event_continuation == true,
         max_chain_multicast_fanout = options.max_chain_multicast_fanout,
+        max_chain_pattern_fanout = options.max_chain_pattern_fanout,
     })
     if audit.chain_candidate ~= true then
         return nil, audit.rejection_reason or "unsupported_chain_shape", audit
@@ -795,6 +940,27 @@ function live_chain.selectV0Plan(plan, opts)
         tostring(audit.payload_slot_id),
         tostring(modifier.payload_modifier_kind)
     ))
+    if modifier.has_pattern_payload == true then
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_PATTERN_POLICY_OK recipe_id=%s source_slot_id=%s payload_slot_id=%s pattern_kind=%s fanout_count=%s payload_modifier_kind=%s",
+            tostring(plan and plan.recipe_id),
+            tostring(audit.source_slot_id),
+            tostring(audit.payload_slot_id),
+            tostring(modifier.chain_pattern_kind),
+            tostring(modifier.chain_multicast_fanout_count or 1),
+            tostring(modifier.payload_modifier_kind)
+        ))
+    end
+    if modifier.payload_modifier_kind == "speed_plus_size_plus" and modifier.has_multicast_payload == true then
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_SPEED_SIZE_MULTICAST_POLICY_OK recipe_id=%s source_slot_id=%s payload_slot_id=%s fanout_count=%s pattern_kind=%s",
+            tostring(plan and plan.recipe_id),
+            tostring(audit.source_slot_id),
+            tostring(audit.payload_slot_id),
+            tostring(modifier.chain_multicast_fanout_count or 1),
+            tostring(modifier.chain_pattern_kind)
+        ))
+    end
 
     local slots_by_id = slotById(plan.emission_slots)
     local helpers_by_slot = helperBySlotId(plan.helper_records)
@@ -817,10 +983,30 @@ function live_chain.selectV0Plan(plan, opts)
     if prefix.chain_count ~= 1 or prefix.chain_op == nil then
         return nil, "chain_payload_prefix_missing", audit
     end
-    if hasOps(payload_slot.postfix_ops) or hasPayloadBindings(payload_slot.payload_bindings) then
-        return nil, "chain_trigger_timer_deferred", audit
+    local side_kind, side_op, side_reason = sideContinuationKind(payload_slot)
+    if side_reason then
+        return nil, side_reason, audit
     end
-    if hasOps(payload_helper.postfix_ops) or hasPayloadBindings(payload_helper.payload_bindings) then
+    local helper_side_kind, helper_side_op, helper_side_reason = sideContinuationKind(payload_helper)
+    if helper_side_reason then
+        return nil, helper_side_reason, audit
+    end
+    if side_kind ~= nil or helper_side_kind ~= nil
+        or hasPayloadBindings(payload_slot.payload_bindings)
+        or hasPayloadBindings(payload_helper.payload_bindings) then
+        if side_kind == nil or helper_side_kind ~= side_kind then
+            return nil, "chain_nested_payload_deferred", audit
+        end
+        if options.allow_chain_event_continuation ~= true then
+            return nil, "chain_trigger_timer_deferred", audit
+        end
+        if side_kind == "Trigger" and options.allow_chain_trigger_side_continuation == false then
+            return nil, "chain_trigger_timer_deferred", audit
+        end
+        if side_kind == "Timer" and options.allow_chain_timer_side_continuation == false then
+            return nil, "chain_trigger_timer_deferred", audit
+        end
+    elseif hasOps(payload_helper.postfix_ops) then
         return nil, "chain_payload_nested_deferred", audit
     end
     local helper_prefix = analyzePayloadPrefixOps(payload_helper.prefix_ops)
@@ -833,9 +1019,82 @@ function live_chain.selectV0Plan(plan, opts)
     if helper_prefix.multicast_count ~= prefix.multicast_count then
         return nil, "chain_multicast_payload_unsupported", audit
     end
+    if helper_prefix.pattern_count ~= prefix.pattern_count or helper_prefix.pattern_kind ~= prefix.pattern_kind then
+        return nil, "chain_pattern_disabled", audit
+    end
     if helper_prefix.unsupported_count > 0
         or #(payload_helper.prefix_ops or {}) ~= #(payload_slot.prefix_ops or {}) then
         return nil, "chain_payload_modifier_deferred", audit
+    end
+
+    local side_payloads = nil
+    local side_budget = nil
+    local side_budget_cap = nil
+    local timer_seconds = nil
+    local timer_delay_ticks = nil
+    if side_kind ~= nil then
+        local side_payload_reason = nil
+        side_payloads, side_payload_reason = resolveSidePayloads(plan, payload_slot, side_kind, options)
+        if not side_payloads then
+            return nil, side_payload_reason or "chain_nested_payload_deferred", audit
+        end
+        local side_budget_reason = nil
+        side_budget_reason, side_budget, side_budget_cap = sideBudgetReason(
+            side_kind,
+            audit.max_hops,
+            modifier.chain_multicast_fanout_count or 1,
+            side_payloads.payload_count or 1,
+            options
+        )
+        if side_budget_reason then
+            audit.chain_side_continuation_kind = side_kind
+            audit.chain_side_payload_count = side_payloads.payload_count or 1
+            audit.chain_event_continuation_budget = side_budget
+            audit.chain_event_continuation_budget_cap = side_budget_cap
+            return nil, side_budget_reason, audit
+        end
+        if side_kind == "Timer" then
+            local delay_reason = nil
+            timer_seconds, timer_delay_ticks, _, delay_reason = live_timer.delayFromOp(side_op or helper_side_op)
+            if not timer_seconds then
+                return nil, delay_reason or "timer_delay_invalid", audit
+            end
+        end
+        audit.chain_side_continuation_kind = side_kind
+        audit.chain_side_payload_count = side_payloads.payload_count or 1
+        audit.chain_event_continuation_budget = side_budget
+        audit.chain_event_continuation_budget_cap = side_budget_cap
+        runtime_stats.inc("chain_event_continuation_policy_ok")
+        runtime_stats.inc("chain_event_continuation_budget_ok")
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_EVENT_CONTINUATION_POLICY_OK recipe_id=%s source_slot_id=%s payload_slot_id=%s side_kind=%s side_payload_count=%s chain_fanout_count=%s max_hops=%s",
+            tostring(plan and plan.recipe_id),
+            tostring(audit.source_slot_id),
+            tostring(audit.payload_slot_id),
+            tostring(side_kind),
+            tostring(side_payloads.payload_count or 1),
+            tostring(modifier.chain_multicast_fanout_count or 1),
+            tostring(audit.max_hops)
+        ))
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_EVENT_CONTINUATION_BUDGET_OK recipe_id=%s source_slot_id=%s payload_slot_id=%s side_kind=%s budget=%s cap=%s",
+            tostring(plan and plan.recipe_id),
+            tostring(audit.source_slot_id),
+            tostring(audit.payload_slot_id),
+            tostring(side_kind),
+            tostring(side_budget),
+            tostring(side_budget_cap)
+        ))
+    end
+
+    local chain_payload_slot_ids = audit.payload_slot_ids
+    if type(chain_payload_slot_ids) ~= "table" or #chain_payload_slot_ids == 0 then
+        chain_payload_slot_ids = { audit.payload_slot_id }
+    end
+    local chain_payload_helper_engine_ids = {}
+    for index, slot_id in ipairs(chain_payload_slot_ids) do
+        local helper = helpers_by_slot[slot_id]
+        chain_payload_helper_engine_ids[index] = helper and helper.engine_id or nil
     end
 
     return {
@@ -848,17 +1107,48 @@ function live_chain.selectV0Plan(plan, opts)
         chaos_budget_profile = options.chaos_budget_profile,
         source_slot_id = audit.source_slot_id,
         payload_slot_id = audit.payload_slot_id,
+        payload_slot_ids = chain_payload_slot_ids,
         source_helper_engine_id = source_helper.engine_id,
         payload_helper_engine_id = payload_helper.engine_id,
+        payload_helper_engine_ids = chain_payload_helper_engine_ids,
         payload_effect_id = firstEffectId(payload_helper),
         payload_modifier_kind = modifier.payload_modifier_kind,
+        payload_multicast = modifier.has_multicast_payload == true,
+        payload_pattern = modifier.has_pattern_payload == true,
+        payload_pattern_kind = modifier.chain_pattern_kind,
         has_multicast_payload = modifier.has_multicast_payload == true,
+        has_pattern_payload = modifier.has_pattern_payload == true,
+        chain_pattern_kind = modifier.chain_pattern_kind,
         chain_multicast_fanout_count = modifier.chain_multicast_fanout_count or 1,
         has_speed_plus_payload = modifier.has_speed_plus_payload == true,
         has_size_plus_payload = modifier.has_size_plus_payload == true,
         speed_plus_mutation = modifier.speed_plus_mutation,
         size_plus_mutation = modifier.size_plus_mutation,
         size_plus_apply_result = modifier.size_plus_apply_result,
+        chain_side_continuation_kind = side_kind,
+        chain_side_continuation_id = side_kind and string.format(
+            "%s:%s:%s",
+            tostring(side_kind),
+            tostring(audit.source_slot_id),
+            tostring(audit.payload_slot_id)
+        ) or nil,
+        chain_side_payloads = side_payloads and side_payloads.payload_slots or nil,
+        chain_side_payload_slot_id = side_payloads and side_payloads.payload_slot_id or nil,
+        chain_side_payload_helper_engine_id = side_payloads and side_payloads.payload_helper_engine_id or nil,
+        chain_side_payload_slot_ids = side_payloads and side_payloads.payload_slot_ids or nil,
+        chain_side_payload_helper_engine_ids = side_payloads and side_payloads.payload_helper_engine_ids or nil,
+        chain_side_payload_count = side_payloads and side_payloads.payload_count or nil,
+        chain_side_payload_group_key = side_payloads and side_payloads.payload_group_key or nil,
+        chain_side_payload_multicast = side_payloads and side_payloads.is_payload_multicast == true or nil,
+        chain_side_payload_pattern = side_payloads and side_payloads.is_payload_pattern == true or nil,
+        chain_side_payload_pattern_kind = side_payloads and side_payloads.pattern_kind or nil,
+        chain_side_payload_pattern_op = side_payloads and side_payloads.pattern_op or nil,
+        chain_side_has_payload_modifier = side_payloads and side_payloads.has_payload_modifier == true or nil,
+        chain_side_payload_modifier_kinds = side_payloads and side_payloads.payload_modifier_kinds or nil,
+        chain_side_timer_seconds = timer_seconds,
+        chain_side_timer_delay_ticks = timer_delay_ticks,
+        chain_event_continuation_budget = side_budget,
+        chain_event_continuation_budget_cap = side_budget_cap,
         has_trigger_payload_context = audit.has_trigger_payload_context == true,
         source = {
             slot = source_slot,
@@ -1460,6 +1750,17 @@ function live_chain.handleResolvedHit(route, opts)
                 tostring(shortKey(key) or "<long>"),
                 tostring(shortKey(claim_key) or "<long>")
             ))
+            if route.user_data and route.user_data.branch_kind == "chain_pattern" then
+                log.info(string.format(
+                    "SPELLFORGE_CHAIN_PATTERN_SIBLING_NONCONTINUING_OK recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s continuation_group_id=%s",
+                    tostring(binding.recipe_id),
+                    tostring(binding.cast_id),
+                    tostring(binding.chain_id),
+                    tostring(branch_scope),
+                    tostring(previous_hop),
+                    tostring(route.user_data.chain_continuation_group_id)
+                ))
+            end
             return {
                 ok = true,
                 duplicate_suppressed = true,
@@ -1473,6 +1774,30 @@ function live_chain.handleResolvedHit(route, opts)
         end
         rememberDuplicateKey(key)
         rememberContinuationClaim(claim_key)
+        if route.user_data and route.user_data.branch_kind == "chain_pattern" then
+            log.info(string.format(
+                "SPELLFORGE_CHAIN_PATTERN_CONTINUATION_CLAIM_OK recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s continuation_group_id=%s",
+                tostring(binding.recipe_id),
+                tostring(binding.cast_id),
+                tostring(binding.chain_id),
+                tostring(branch_scope),
+                tostring(previous_hop),
+                tostring(route.user_data.chain_continuation_group_id)
+            ))
+        end
+        if binding.chain_side_continuation_kind ~= nil then
+            runtime_stats.inc("chain_event_continuation_claim_stable")
+            log.info(string.format(
+                "SPELLFORGE_CHAIN_EVENT_CONTINUATION_CLAIM_STABLE recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s side_kind=%s continuation_group_id=%s",
+                tostring(binding.recipe_id),
+                tostring(binding.cast_id),
+                tostring(binding.chain_id),
+                tostring(branch_scope),
+                tostring(previous_hop),
+                tostring(binding.chain_side_continuation_kind),
+                tostring(route.user_data and route.user_data.chain_continuation_group_id)
+            ))
+        end
     end
 
     local next_hop = previous_hop + 1
@@ -1589,6 +1914,8 @@ function live_chain.handleResolvedHit(route, opts)
     end
 
     local source_job_id = binding.source_job_id or (route.user_data and route.user_data.job_id)
+    local side_kind = binding.chain_side_continuation_kind
+    local payload_postfix_opcode = (side_kind == "Trigger" or side_kind == "Timer") and side_kind or "Chain"
     local idempotency_key = string.format(
         "%s:%s:%s:%s",
         tostring(binding.chain_id),
@@ -1617,8 +1944,12 @@ function live_chain.handleResolvedHit(route, opts)
         payload_depth = 1,
         source_slot_id = binding.source_slot_id,
         source_helper_engine_id = binding.source_helper_engine_id,
-        source_postfix_opcode = "Chain",
+        source_postfix_opcode = payload_postfix_opcode,
         payload_slot_id = binding.payload_slot_id,
+        has_trigger_payload = side_kind == "Trigger" or nil,
+        has_timer_payload = side_kind == "Timer" or nil,
+        trigger_source_slot_id = side_kind == "Trigger" and binding.payload_slot_id or nil,
+        timer_source_slot_id = side_kind == "Timer" and binding.payload_slot_id or nil,
         chain_runtime = true,
         chain_role = "payload",
         chain_id = binding.chain_id,
@@ -1626,8 +1957,11 @@ function live_chain.handleResolvedHit(route, opts)
         chain_max_hops = binding.max_hops,
         chain_targeting_mode = binding.targeting_mode or "no_immediate_repeat",
         chain_target_provider = provider_result and provider_result.provider or nil,
+        chain_side_continuation_kind = side_kind,
+        chain_side_continuation_id = binding.chain_side_continuation_id,
+        chain_side_payload_count = binding.chain_side_payload_count,
         branch_scope = branch_scope,
-        branch_kind = binding.has_multicast_payload and "chain_multicast" or "chain",
+        branch_kind = binding.has_pattern_payload and "chain_pattern" or binding.has_multicast_payload and "chain_multicast" or "chain",
         branch_count = binding.chain_multicast_fanout_count or 1,
         chain_continuation_group_id = string.format("%s:h%s:%s", tostring(binding.chain_id), tostring(next_hop), tostring(branch_scope)),
         current_hit_target_id = objectToken(current_target),
@@ -1642,12 +1976,16 @@ function live_chain.handleResolvedHit(route, opts)
             cast_id = binding.cast_id,
             source_slot_id = binding.source_slot_id,
             source_helper_engine_id = binding.source_helper_engine_id,
-            source_postfix_opcode = "Chain",
+            source_postfix_opcode = payload_postfix_opcode,
             root_source_slot_id = binding.root_source_slot_id or binding.source_slot_id,
             current_source_slot_id = binding.payload_slot_id,
             parent_slot_id = binding.source_slot_id,
             payload_depth = 1,
             payload_slot_id = binding.payload_slot_id,
+            has_trigger_payload = side_kind == "Trigger" or nil,
+            has_timer_payload = side_kind == "Timer" or nil,
+            trigger_source_slot_id = side_kind == "Trigger" and binding.payload_slot_id or nil,
+            timer_source_slot_id = side_kind == "Timer" and binding.payload_slot_id or nil,
             fanout_count = binding.chain_multicast_fanout_count or 1,
             emission_index = binding.payload_emission_index,
             group_index = binding.payload_group_index,
@@ -1658,8 +1996,11 @@ function live_chain.handleResolvedHit(route, opts)
             chain_max_hops = binding.max_hops,
             chain_targeting_mode = binding.targeting_mode or "no_immediate_repeat",
             chain_target_provider = provider_result and provider_result.provider or nil,
+            chain_side_continuation_kind = side_kind,
+            chain_side_continuation_id = binding.chain_side_continuation_id,
+            chain_side_payload_count = binding.chain_side_payload_count,
             branch_scope = branch_scope,
-            branch_kind = binding.has_multicast_payload and "chain_multicast" or "chain",
+            branch_kind = binding.has_pattern_payload and "chain_pattern" or binding.has_multicast_payload and "chain_multicast" or "chain",
             branch_count = binding.chain_multicast_fanout_count or 1,
             chain_continuation_group_id = string.format("%s:h%s:%s", tostring(binding.chain_id), tostring(next_hop), tostring(branch_scope)),
             current_hit_target_id = objectToken(current_target),
@@ -1734,6 +2075,7 @@ function live_chain.handleResolvedHit(route, opts)
     local jobs = {}
     local projectile_ids = {}
     local tick_results = {}
+    local chain_timer_side_schedules = {}
     local probe_virtual_jobs = {}
     local probe_virtual_fanout_after = tonumber(options.probe_virtual_fanout_after)
     local virtualized_count = 0
@@ -1778,6 +2120,22 @@ function live_chain.handleResolvedHit(route, opts)
             tostring(selected.id),
             tostring(continuation_group_id)
         ))
+        if binding.has_pattern_payload == true then
+            runtime_stats.inc("chain_pattern_hops")
+            log.info(string.format(
+                "SPELLFORGE_CHAIN_PATTERN_HOP_ENQUEUED recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s hop_index=%s max_hops=%s pattern_kind=%s fanout_count=%s selected_target_id=%s continuation_group_id=%s",
+                tostring(binding.recipe_id),
+                tostring(binding.cast_id),
+                tostring(binding.chain_id),
+                tostring(branch_scope),
+                tostring(next_hop),
+                tostring(binding.max_hops),
+                tostring(binding.chain_pattern_kind),
+                tostring(fanout_count),
+                tostring(selected.id),
+                tostring(continuation_group_id)
+            ))
+        end
     end
 
     for fanout_index = 1, fanout_count do
@@ -1800,11 +2158,18 @@ function live_chain.handleResolvedHit(route, opts)
         job_to_enqueue.fanout_count = fanout_count
         job_to_enqueue.branch_id = branch_id
         job_to_enqueue.branch_parent_id = branch_parent_id
-        job_to_enqueue.branch_kind = fanout_count > 1 and "chain_multicast" or "chain"
+        job_to_enqueue.branch_kind = binding.has_pattern_payload and "chain_pattern" or fanout_count > 1 and "chain_multicast" or "chain"
         job_to_enqueue.branch_index = fanout_index
         job_to_enqueue.branch_count = fanout_count
         job_to_enqueue.chain_continuation_group_id = continuation_group_id
         job_to_enqueue.launch_density_group_key = launch_density_group_key
+        if binding.has_pattern_payload == true then
+            job_to_enqueue.pattern_kind = job_to_enqueue.pattern_kind or binding.chain_pattern_kind
+            job_to_enqueue.pattern_index = job_to_enqueue.pattern_index or fanout_index
+            job_to_enqueue.pattern_count = job_to_enqueue.pattern_count or fanout_count
+            job_to_enqueue.pattern_direction_key = job_to_enqueue.pattern_direction_key
+                or string.format("dry:%s:%s", tostring(binding.chain_pattern_kind), tostring(fanout_index))
+        end
         if job_to_enqueue.payload then
             job_to_enqueue.payload.fanout_count = fanout_count
             job_to_enqueue.payload.branch_id = branch_id
@@ -1813,6 +2178,12 @@ function live_chain.handleResolvedHit(route, opts)
             job_to_enqueue.payload.branch_index = fanout_index
             job_to_enqueue.payload.branch_count = fanout_count
             job_to_enqueue.payload.chain_continuation_group_id = continuation_group_id
+            if binding.has_pattern_payload == true then
+                job_to_enqueue.payload.pattern_kind = job_to_enqueue.payload.pattern_kind or job_to_enqueue.pattern_kind
+                job_to_enqueue.payload.pattern_index = job_to_enqueue.payload.pattern_index or job_to_enqueue.pattern_index
+                job_to_enqueue.payload.pattern_count = job_to_enqueue.payload.pattern_count or job_to_enqueue.pattern_count
+                job_to_enqueue.payload.pattern_direction_key = job_to_enqueue.payload.pattern_direction_key or job_to_enqueue.pattern_direction_key
+            end
         end
 
         local probe_virtual = probe_virtual_fanout_after ~= nil and fanout_index > probe_virtual_fanout_after
@@ -1864,6 +2235,23 @@ function live_chain.handleResolvedHit(route, opts)
                 tostring(selected.id),
                 tostring(enqueued_job_id)
             ))
+            if binding.has_pattern_payload == true then
+                log.info(string.format(
+                    "SPELLFORGE_CHAIN_PATTERN_PAYLOAD_OK recipe_id=%s cast_id=%s chain_id=%s branch_scope=%s branch_id=%s branch_index=%s branch_count=%s pattern_kind=%s payload_slot_id=%s hop_index=%s selected_target_id=%s job_id=%s",
+                    tostring(binding.recipe_id),
+                    tostring(binding.cast_id),
+                    tostring(binding.chain_id),
+                    tostring(branch_scope),
+                    tostring(branch_id),
+                    tostring(fanout_index),
+                    tostring(fanout_count),
+                    tostring(binding.chain_pattern_kind),
+                    tostring(binding.payload_slot_id),
+                    tostring(next_hop),
+                    tostring(selected.id),
+                    tostring(enqueued_job_id)
+                ))
+            end
         end
 
         job_ids[#job_ids + 1] = enqueued_job_id
@@ -1977,8 +2365,93 @@ function live_chain.handleResolvedHit(route, opts)
             if fanout_count > 1 then
                 runtime_stats.inc("chain_multicast_payload_ok")
             end
+            if binding.has_pattern_payload == true then
+                runtime_stats.inc("chain_pattern_payload_ok")
+            end
             if job.projectile_id ~= nil then
                 projectile_ids[#projectile_ids + 1] = job.projectile_id
+            end
+            if side_kind == "Timer" then
+                local timer_resolution, timer_resolution_error = live_timer.computeResolution({
+                    start_pos = job.launch_start_pos or start_pos,
+                    direction = job.launch_direction or direction,
+                    hit_object = selected_object,
+                }, {
+                    timer_seconds = binding.chain_side_timer_seconds,
+                })
+                if not timer_resolution then
+                    failed_job = job
+                    job.error = timer_resolution_error or "chain timer side resolution failed"
+                    runtime_stats.inc("chain_timer_side_payload_schedule_failed")
+                    break
+                end
+                local timer_binding = {
+                    plan = binding.plan,
+                    recipe_id = binding.recipe_id,
+                    display_recipe_id = binding.display_recipe_id,
+                    cast_id = binding.cast_id,
+                    source_job_id = job.job_id,
+                    source_projectile_id = job.projectile_id,
+                    source_user_data = job.launch_user_data,
+                    source_slot_id = job.payload_slot_id or binding.payload_slot_id,
+                    source_helper_engine_id = job.helper_engine_id or binding.payload_helper_engine_id,
+                    source_prefix_opcode = "Chain",
+                    source_postfix_opcode = "Timer",
+                    payload_slot_id = binding.chain_side_payload_slot_id,
+                    payload_helper_engine_id = binding.chain_side_payload_helper_engine_id,
+                    payloads = binding.chain_side_payloads,
+                    payload_slot_ids = binding.chain_side_payload_slot_ids,
+                    payload_helper_engine_ids = binding.chain_side_payload_helper_engine_ids,
+                    payload_count = binding.chain_side_payload_count,
+                    payload_group_key = binding.chain_side_payload_group_key,
+                    payload_multicast = binding.chain_side_payload_multicast == true,
+                    payload_pattern = binding.chain_side_payload_pattern == true,
+                    payload_pattern_kind = binding.chain_side_payload_pattern_kind,
+                    payload_pattern_op = binding.chain_side_payload_pattern_op,
+                    max_payload_fanout = binding.chain_side_max_payload_fanout or limits.MAX_NESTED_PAYLOAD_FANOUT,
+                    max_projectiles = binding.max_projectiles,
+                    max_jobs_per_tick = binding.max_jobs_per_tick,
+                    max_live_launches_per_tick = binding.max_live_launches_per_tick,
+                    actor = route.attacker or binding.actor,
+                    hit_object = selected_object,
+                    resolution = timer_resolution,
+                    timer_seconds = binding.chain_side_timer_seconds,
+                    timer_delay_ticks = binding.chain_side_timer_delay_ticks,
+                    root_source_slot_id = binding.root_source_slot_id or binding.source_slot_id,
+                    current_source_slot_id = job.payload_slot_id or binding.payload_slot_id,
+                    parent_slot_id = binding.source_slot_id,
+                    source_depth = 1,
+                    chain_runtime = true,
+                    chain_role = "payload",
+                    chain_id = binding.chain_id,
+                    chain_hop_index = next_hop,
+                    chain_max_hops = binding.max_hops,
+                    chain_continuation_group_id = continuation_group_id,
+                    branch_scope = branch_scope,
+                    branch_id = job.branch_id,
+                    branch_parent_id = job.branch_parent_id,
+                    branch_kind = job.branch_kind,
+                    branch_index = job.branch_index,
+                    branch_count = job.branch_count,
+                }
+                local schedule = live_timer.schedulePayload(timer_binding, {
+                    source_projectile_id = job.projectile_id,
+                    source_user_data = job.launch_user_data,
+                    duplicate_key_suffix = string.format(
+                        "chain_side:%s:%s:%s:%s",
+                        tostring(binding.chain_id),
+                        tostring(next_hop),
+                        tostring(job.branch_id),
+                        tostring(job.projectile_id or job.job_id)
+                    ),
+                })
+                if not schedule or schedule.ok ~= true then
+                    failed_job = job
+                    job.error = schedule and schedule.error or "chain timer side schedule failed"
+                    runtime_stats.inc("chain_timer_side_payload_schedule_failed")
+                    break
+                end
+                chain_timer_side_schedules[#chain_timer_side_schedules + 1] = schedule
             end
             if modifier_kind ~= nil then
                 log.info(string.format(
@@ -2088,6 +2561,10 @@ function live_chain.handleResolvedHit(route, opts)
         ir_chain_runtime = ir_runtime_used == true,
         ir_chain_runtime_job_count = ir_runtime_used and #job_ids or 0,
         ir_chain_runtime_real_job_count = ir_runtime_used and #real_job_ids or 0,
+        chain_side_continuation_kind = side_kind,
+        chain_side_payload_count = binding.chain_side_payload_count,
+        chain_timer_side_schedule_count = #chain_timer_side_schedules,
+        chain_timer_side_schedules = chain_timer_side_schedules,
     }
 end
 

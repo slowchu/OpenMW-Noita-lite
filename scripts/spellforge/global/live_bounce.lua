@@ -124,14 +124,24 @@ local function bounceBranchParentId(binding)
 end
 
 local function sourceBranchInfo(binding)
+    if type(binding.branch_id) == "string" and binding.branch_id ~= "" then
+        return {
+            branch_scope = binding.branch_scope or binding.branch_id,
+            branch_parent_id = binding.branch_parent_id or binding.branch_id,
+            branch_id = binding.branch_id,
+            branch_kind = binding.branch_kind or "bounce_source",
+            branch_index = binding.branch_index or 1,
+            branch_count = binding.branch_count or 1,
+        }
+    end
     local parent_id = bounceBranchParentId(binding)
     return {
         branch_scope = bounceBranchScope(binding),
         branch_parent_id = parent_id,
         branch_id = parent_id .. ":source",
-        branch_kind = "bounce_source",
-        branch_index = 1,
-        branch_count = 1,
+        branch_kind = binding.branch_kind or "bounce_source",
+        branch_index = binding.branch_index or 1,
+        branch_count = binding.branch_count or 1,
     }
 end
 
@@ -384,11 +394,8 @@ function live_bounce.selectV0Plan(plan, opts)
             return rejectSelect(chain_payload_reason or "bounce_chain_deferred", "live_bounce_chain_reject")
         end
     end
-    if bounds.has_timer then
-        return rejectSelect("bounce_timer_deferred", "live_bounce_trigger_timer_reject")
-    end
     if bounds.has_homing then
-        return rejectSelect("bounce_homing_deferred", "live_bounce_homing_reject")
+        return rejectSelect("homing_bounce_physics_unsupported", "live_bounce_homing_reject")
     end
     if bounds.has_multicast or bounds.has_pattern then
         return rejectSelect("bounce_fanout_deferred", "live_bounce_fanout_reject")

@@ -32,6 +32,11 @@ local KEY_ENABLE_IR_TIMER_RUNTIME = "enable_ir_timer_runtime_v0"
 local KEY_ENABLE_IR_BOUNCE_RUNTIME = "enable_ir_bounce_runtime_v0"
 local KEY_ENABLE_IR_CHAIN_RUNTIME = "enable_ir_chain_runtime_v0"
 local KEY_ENABLE_IR_PIERCE_RUNTIME = "enable_ir_pierce_runtime_v0"
+local KEY_ENABLE_IR_RUNTIME_STRICT = "enable_ir_runtime_strict_v0"
+local KEY_ENABLE_LEGACY_TRIGGER_RUNTIME = "enable_legacy_trigger_runtime_v0"
+local KEY_ENABLE_LEGACY_TIMER_RUNTIME = "enable_legacy_timer_runtime_v0"
+local KEY_ENABLE_LEGACY_BOUNCE_RUNTIME = "enable_legacy_bounce_runtime_v0"
+local KEY_ENABLE_LEGACY_CHAIN_RUNTIME = "enable_legacy_chain_runtime_v0"
 
 local DEFAULT_ENABLE_SMOKE_TESTS = false
 local DEFAULT_ENABLE_DEV_HOTKEYS = false
@@ -62,6 +67,11 @@ local DEFAULT_ENABLE_IR_TIMER_RUNTIME = false
 local DEFAULT_ENABLE_IR_BOUNCE_RUNTIME = false
 local DEFAULT_ENABLE_IR_CHAIN_RUNTIME = false
 local DEFAULT_ENABLE_IR_PIERCE_RUNTIME = false
+local DEFAULT_ENABLE_IR_RUNTIME_STRICT = false
+local DEFAULT_ENABLE_LEGACY_TRIGGER_RUNTIME = false
+local DEFAULT_ENABLE_LEGACY_TIMER_RUNTIME = false
+local DEFAULT_ENABLE_LEGACY_BOUNCE_RUNTIME = false
+local DEFAULT_ENABLE_LEGACY_CHAIN_RUNTIME = false
 
 local function readBoolean(key, default_value)
     local value = section:get(key)
@@ -192,6 +202,26 @@ function dev.irPierceRuntimeEnabled()
         or dev.livePierceEnabled()
 end
 
+function dev.irRuntimeStrictEnabled()
+    return readBoolean(KEY_ENABLE_IR_RUNTIME_STRICT, DEFAULT_ENABLE_IR_RUNTIME_STRICT)
+end
+
+function dev.legacyTriggerRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_LEGACY_TRIGGER_RUNTIME, DEFAULT_ENABLE_LEGACY_TRIGGER_RUNTIME)
+end
+
+function dev.legacyTimerRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_LEGACY_TIMER_RUNTIME, DEFAULT_ENABLE_LEGACY_TIMER_RUNTIME)
+end
+
+function dev.legacyBounceRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_LEGACY_BOUNCE_RUNTIME, DEFAULT_ENABLE_LEGACY_BOUNCE_RUNTIME)
+end
+
+function dev.legacyChainRuntimeEnabled()
+    return readBoolean(KEY_ENABLE_LEGACY_CHAIN_RUNTIME, DEFAULT_ENABLE_LEGACY_CHAIN_RUNTIME)
+end
+
 function dev.smokeTestsSettingKey()
     return "SpellforgeDev.enable_smoke_tests"
 end
@@ -306,6 +336,26 @@ end
 
 function dev.irPierceRuntimeSettingKey()
     return "SpellforgeDev.enable_ir_pierce_runtime_v0"
+end
+
+function dev.irRuntimeStrictSettingKey()
+    return "SpellforgeDev.enable_ir_runtime_strict_v0"
+end
+
+function dev.legacyTriggerRuntimeSettingKey()
+    return "SpellforgeDev.enable_legacy_trigger_runtime_v0"
+end
+
+function dev.legacyTimerRuntimeSettingKey()
+    return "SpellforgeDev.enable_legacy_timer_runtime_v0"
+end
+
+function dev.legacyBounceRuntimeSettingKey()
+    return "SpellforgeDev.enable_legacy_bounce_runtime_v0"
+end
+
+function dev.legacyChainRuntimeSettingKey()
+    return "SpellforgeDev.enable_legacy_chain_runtime_v0"
 end
 
 return dev

@@ -88,8 +88,10 @@ local function payloadPrefixPolicy(plan, slot, helper, options)
     local pattern_op = nil
     local slot_speed_count = 0
     local slot_size_count = 0
+    local slot_homing_count = 0
     local helper_speed_count = 0
     local helper_size_count = 0
+    local helper_homing_count = 0
     for _, op in ipairs(slot.prefix_ops or {}) do
         local opcode = op and op.opcode
         if opcode == "Multicast" then
@@ -106,6 +108,8 @@ local function payloadPrefixPolicy(plan, slot, helper, options)
             slot_speed_count = slot_speed_count + 1
         elseif opcode == "Size+" then
             slot_size_count = slot_size_count + 1
+        elseif opcode == "Homing" then
+            slot_homing_count = slot_homing_count + 1
         else
             return nil, "unsupported_payload_prefix_" .. tostring(opcode)
         end
@@ -127,23 +131,27 @@ local function payloadPrefixPolicy(plan, slot, helper, options)
             helper_speed_count = helper_speed_count + 1
         elseif opcode == "Size+" then
             helper_size_count = helper_size_count + 1
+        elseif opcode == "Homing" then
+            helper_homing_count = helper_homing_count + 1
         else
             return nil, "unsupported_payload_prefix_" .. tostring(opcode)
         end
     end
 
-    if slot_speed_count ~= helper_speed_count or slot_size_count ~= helper_size_count then
+    if slot_speed_count ~= helper_speed_count
+        or slot_size_count ~= helper_size_count
+        or slot_homing_count ~= helper_homing_count then
         return nil, "payload_modifier_unsupported_prefix"
     end
     if slot_speed_count > 0 or slot_size_count > 0 then
         local policy = launch_modifier_policy.inspectPayloadEntry(plan, nil, slot, options)
         if policy.ok ~= true then
-            return nil, policy.rejection_reason or "payload_modifier_combo_deferred", pattern_kind, cloneOp(pattern_op), policy
+            return nil, policy.rejection_reason or "payload_modifier_combo_deferred", pattern_kind, cloneOp(pattern_op), policy, slot_homing_count > 0
         end
-        return saw_multicast, nil, pattern_kind, cloneOp(pattern_op), policy
+        return saw_multicast, nil, pattern_kind, cloneOp(pattern_op), policy, slot_homing_count > 0
     end
 
-    return saw_multicast, nil, pattern_kind, cloneOp(pattern_op), nil
+    return saw_multicast, nil, pattern_kind, cloneOp(pattern_op), nil, slot_homing_count > 0
 end
 
 local function auditAllowsPayloadMulticast(plan, fanout_count, options)
@@ -151,6 +159,21 @@ local function auditAllowsPayloadMulticast(plan, fanout_count, options)
     local max_fanout = tonumber(options.max_fanout) or limits.MAX_NESTED_PAYLOAD_FANOUT
     local max_jobs = tonumber(options.max_jobs) or limits.MAX_NESTED_PAYLOAD_JOBS
     local max_projectiles = tonumber(options.max_projectiles) or limits.MAX_PROJECTILES_PER_CAST
+    if options.source_context_validated == true then
+        if fanout_count > max_fanout then
+            recordBudgetCap("fanout")
+            return false, "payload_multicast_fanout_cap_exceeded"
+        end
+        if fanout_count > max_jobs then
+            recordBudgetCap("job")
+            return false, "payload_multicast_job_cap_exceeded"
+        end
+        if fanout_count > max_projectiles then
+            recordBudgetCap("projectile")
+            return false, "payload_multicast_projectile_cap_exceeded"
+        end
+        return true
+    end
     local audit = nested_payload_audit.inspectPlan(plan, {
         max_depth = options.max_depth or limits.MAX_NESTED_PAYLOAD_DEPTH,
         max_jobs = max_jobs,
@@ -186,7 +209,11 @@ local function auditAllowsPayloadMulticast(plan, fanout_count, options)
         if not launch_modifiers_allowed then
             return false, "payload_modifier_combo_deferred", audit
         end
-        if audit.max_payload_depth ~= 1 or audit.nested_payload_count > 0 then
+        if options.allow_nested_final_fanout == true then
+            if audit.max_payload_depth > (limits.MAX_LIVE_NESTED_CONTINUATION_DEPTH or 2) then
+                return false, "nested_depth_exceeded", audit
+            end
+        elseif audit.max_payload_depth ~= 1 or audit.nested_payload_count > 0 then
             return false, "payload_modifier_nested_deferred", audit
         end
     end
@@ -231,6 +258,7 @@ function payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, opt
     local pattern_kind = nil
     local pattern_op = nil
     local saw_payload_modifier = false
+    local saw_payload_homing = false
     local payload_modifier_kinds = {}
     local saw_unrelated_payload = false
 
@@ -266,13 +294,15 @@ function payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, opt
                     return reject("nested_payload_runtime_deferred")
                 end
 
-                local prefix_multicast, prefix_reason, prefix_pattern_kind, prefix_pattern_op, prefix_policy = payloadPrefixPolicy(plan, slot, helper, options)
+                local prefix_multicast, prefix_reason, prefix_pattern_kind, prefix_pattern_op, prefix_policy, prefix_homing = payloadPrefixPolicy(plan, slot, helper, options)
                 if prefix_reason then
                     return reject(prefix_reason, {
                         detected_payload_pattern = prefix_reason == "payload_pattern_ambiguous",
                         detected_payload_modifier = prefix_policy ~= nil,
+                        detected_payload_homing = prefix_homing == true,
                     })
                 end
+                saw_payload_homing = saw_payload_homing or prefix_homing == true
                 if prefix_policy and prefix_policy.mutations and prefix_policy.mutations.payload_modifier_kind ~= nil then
                     saw_payload_modifier = true
                     payload_modifier_kinds[#payload_modifier_kinds + 1] = prefix_policy.mutations.payload_modifier_kind
@@ -362,7 +392,9 @@ function payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, opt
                 audit = audit,
             })
         end
-    elseif saw_unrelated_payload and options.allow_nested_final_fanout ~= true then
+    elseif saw_unrelated_payload
+        and options.allow_nested_final_fanout ~= true
+        and options.allow_unrelated_payloads ~= true then
         -- A simple v0 source must not hide extra payload structure elsewhere.
         return reject("nested_payload_runtime_deferred")
     end
@@ -395,9 +427,11 @@ function payload_multicast.resolvePayloadHelpersForSource(plan, source_slot, opt
         detected_payload_multicast = is_payload_multicast,
         detected_payload_pattern = is_payload_pattern,
         detected_payload_modifier = saw_payload_modifier,
+        detected_payload_homing = saw_payload_homing,
         is_payload_multicast = is_payload_multicast,
         is_payload_pattern = is_payload_pattern,
         has_payload_modifier = saw_payload_modifier,
+        has_payload_homing = saw_payload_homing,
         payload_modifier_kinds = payload_modifier_kinds,
         pattern_kind = pattern_kind,
         pattern_op = pattern_op,

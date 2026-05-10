@@ -44,6 +44,16 @@ local function hasOps(ops)
     return type(ops) == "table" and #ops > 0
 end
 
+local function sourcePrefixAllowed(ops, options)
+    if not hasOps(ops) then
+        return true
+    end
+    if options and options.allow_source_homing == true and #ops == 1 and ops[1] and ops[1].opcode == "Homing" then
+        return true
+    end
+    return false
+end
+
 local function hasPayloadBindings(value)
     return type(value) == "table" and #value > 0
 end
@@ -106,7 +116,7 @@ function live_trigger.selectV0Plan(plan, opts)
     if type(group) ~= "table" then
         return rejectSelect("missing_group")
     end
-    if hasOps(group.prefix_ops) then
+    if not sourcePrefixAllowed(group.prefix_ops, options) then
         return rejectSelect("source_has_prefix_ops")
     end
     if not postfixIsOnlyTrigger(group) then
@@ -142,7 +152,7 @@ function live_trigger.selectV0Plan(plan, opts)
     if source_slot.trigger_source_slot_id ~= nil or source_slot.timer_source_slot_id ~= nil then
         return rejectSelect("source_slot_has_payload_source")
     end
-    if hasOps(source_slot.prefix_ops) then
+    if not sourcePrefixAllowed(source_slot.prefix_ops, options) then
         return rejectSelect("source_slot_has_prefix_ops")
     end
     if not postfixIsOnlyTrigger(source_slot) then
@@ -258,6 +268,7 @@ function live_trigger.selectV0Plan(plan, opts)
         payload_pattern_op = payload_result.pattern_op,
         payload_modifier_kinds = payload_result.payload_modifier_kinds,
         has_payload_modifier = payload_result.has_payload_modifier == true,
+        has_payload_homing = payload_result.has_payload_homing == true,
         payload_multicast_fanout_count = payload_result.fanout_count,
         max_payload_fanout = tonumber(options.max_fanout) or limits.MAX_NESTED_PAYLOAD_FANOUT,
         max_projectiles = tonumber(options.max_projectiles) or limits.MAX_PROJECTILES_PER_CAST,
@@ -272,6 +283,7 @@ function live_trigger.decorateSourceJob(job, binding)
     if type(job) ~= "table" or type(binding) ~= "table" then
         return
     end
+    job.source_prefix_opcode = binding.source_prefix_opcode or job.source_prefix_opcode
     job.source_postfix_opcode = "Trigger"
     job.root_source_slot_id = binding.root_source_slot_id or binding.source_slot_id
     job.current_source_slot_id = binding.current_source_slot_id or binding.source_slot_id
@@ -290,6 +302,7 @@ function live_trigger.decorateSourceJob(job, binding)
     job.nested_final_fanout_kind = binding.nested_final_fanout_kind
     job.payload_count = tonumber(binding.payload_count) or 1
     job.payload = job.payload or {}
+    job.payload.source_prefix_opcode = binding.source_prefix_opcode or job.payload.source_prefix_opcode
     job.payload.source_slot_id = binding.source_slot_id
     job.payload.source_helper_engine_id = binding.source_helper_engine_id
     job.payload.source_postfix_opcode = "Trigger"
@@ -474,6 +487,26 @@ local function irPlannerOptions(binding, options)
         max_live_launches_per_tick = binding.max_live_launches_per_tick
             or (options and options.max_live_launches_per_tick),
         chaos_budget_profile = binding.chaos_budget_profile or (options and options.chaos_budget_profile),
+        allow_source_homing = options and options.allow_source_homing == true,
+        allow_payload_homing = (binding and binding.has_payload_homing == true)
+            or (options and options.allow_payload_homing == true),
+        allow_homing = options and options.allow_homing == true,
+        force_homing_enabled = options and options.force_homing_enabled,
+        force_homing_disabled = options and options.force_homing_disabled,
+        homing_enabled = (options and options.homing_enabled == true) or dev.liveHomingEnabled() == true,
+        max_homing_fanout_per_cast = options and options.max_homing_fanout_per_cast,
+        max_homing_target_scans_per_cast = options and options.max_homing_target_scans_per_cast,
+        max_soft_homing_registrations_per_cast = options and options.max_soft_homing_registrations_per_cast,
+        homing_target_id = options and options.homing_target_id,
+        homing_target_position = options and options.homing_target_position,
+        homing_actor_scan = options and options.homing_actor_scan,
+        allow_nested_trigger_timer = options and options.allow_nested_trigger_timer == true,
+        allow_nested_final_fanout = options and options.allow_nested_final_fanout == true,
+        allow_nested_payload_modifiers = options and options.allow_nested_payload_modifiers == true,
+        allow_nested_payload_homing = options and options.allow_nested_payload_homing == true,
+        max_live_nested_continuation_depth = options and options.max_live_nested_continuation_depth,
+        max_nested_continuation_jobs_per_cast = options and options.max_nested_continuation_jobs_per_cast,
+        max_nested_final_payload_jobs_per_cast = options and options.max_nested_final_payload_jobs_per_cast,
     }
 end
 
@@ -632,6 +665,13 @@ local function enrichIrTriggerPayload(planned_job, binding, route, payload, inde
     payload_launch.nested_final_fanout_kind = binding.nested_final_fanout_kind
     payload_launch.final_fanout_count = binding.nested_final_fanout == true and count or nil
     payload_launch.final_fanout_index = binding.nested_final_fanout == true and index or nil
+    payload_launch.chain_runtime = binding.chain_runtime or (route.user_data and route.user_data.chain_runtime)
+    payload_launch.chain_role = binding.chain_role or (route.user_data and route.user_data.chain_role)
+    payload_launch.chain_id = binding.chain_id or (route.user_data and route.user_data.chain_id)
+    payload_launch.chain_hop_index = binding.chain_hop_index or (route.user_data and route.user_data.chain_hop_index)
+    payload_launch.chain_max_hops = binding.chain_max_hops or (route.user_data and route.user_data.chain_max_hops)
+    payload_launch.chain_continuation_group_id = binding.chain_continuation_group_id
+        or (route.user_data and route.user_data.chain_continuation_group_id)
     copyBranchFields(payload_launch, branch)
 
     local job = shallowCopy(planned_job)
@@ -665,6 +705,12 @@ local function enrichIrTriggerPayload(planned_job, binding, route, payload, inde
     job.nested_final_fanout_kind = binding.nested_final_fanout_kind
     job.final_fanout_count = binding.nested_final_fanout == true and count or nil
     job.final_fanout_index = binding.nested_final_fanout == true and index or nil
+    job.chain_runtime = payload_launch.chain_runtime
+    job.chain_role = payload_launch.chain_role
+    job.chain_id = payload_launch.chain_id
+    job.chain_hop_index = payload_launch.chain_hop_index
+    job.chain_max_hops = payload_launch.chain_max_hops
+    job.chain_continuation_group_id = payload_launch.chain_continuation_group_id
     job.source_slot_id = binding.source_slot_id
     job.source_helper_engine_id = binding.source_helper_engine_id
     job.source_postfix_opcode = "Trigger"
@@ -698,6 +744,13 @@ local function enqueueIrTriggerRuntime(route, options, binding, payloads, payloa
         parent_job_id = binding.source_job_id or (route.user_data and route.user_data.job_id),
         branch_scope = branchScope(binding, route),
         branch_parent_id = branchParentId(binding, route),
+        chain_runtime = binding.chain_runtime or (route.user_data and route.user_data.chain_runtime),
+        chain_role = binding.chain_role or (route.user_data and route.user_data.chain_role),
+        chain_id = binding.chain_id or (route.user_data and route.user_data.chain_id),
+        chain_hop_index = binding.chain_hop_index or (route.user_data and route.user_data.chain_hop_index),
+        chain_max_hops = binding.chain_max_hops or (route.user_data and route.user_data.chain_max_hops),
+        chain_continuation_group_id = binding.chain_continuation_group_id
+            or (route.user_data and route.user_data.chain_continuation_group_id),
     }
     local planned = ir_runtime_adapter.planEvent(binding, plan, event, planner_options)
     if planned.ok ~= true then
@@ -945,6 +998,13 @@ function live_trigger.handleResolvedHit(route, opts)
                 nested_final_fanout_kind = binding.nested_final_fanout_kind,
                 final_fanout_count = binding.nested_final_fanout == true and #payloads or nil,
                 final_fanout_index = binding.nested_final_fanout == true and index or nil,
+                chain_runtime = binding.chain_runtime or (route.user_data and route.user_data.chain_runtime),
+                chain_role = binding.chain_role or (route.user_data and route.user_data.chain_role),
+                chain_id = binding.chain_id or (route.user_data and route.user_data.chain_id),
+                chain_hop_index = binding.chain_hop_index or (route.user_data and route.user_data.chain_hop_index),
+                chain_max_hops = binding.chain_max_hops or (route.user_data and route.user_data.chain_max_hops),
+                chain_continuation_group_id = binding.chain_continuation_group_id
+                    or (route.user_data and route.user_data.chain_continuation_group_id),
             }
             copyBranchFields(payload_launch, branch)
             local enqueue = orchestrator.enqueue({
@@ -978,6 +1038,12 @@ function live_trigger.handleResolvedHit(route, opts)
                 nested_final_fanout_kind = binding.nested_final_fanout_kind,
                 final_fanout_count = binding.nested_final_fanout == true and #payloads or nil,
                 final_fanout_index = binding.nested_final_fanout == true and index or nil,
+                chain_runtime = payload_launch.chain_runtime,
+                chain_role = payload_launch.chain_role,
+                chain_id = payload_launch.chain_id,
+                chain_hop_index = payload_launch.chain_hop_index,
+                chain_max_hops = payload_launch.chain_max_hops,
+                chain_continuation_group_id = payload_launch.chain_continuation_group_id,
                 source_slot_id = binding.source_slot_id,
                 source_helper_engine_id = binding.source_helper_engine_id,
                 source_postfix_opcode = "Trigger",
@@ -988,7 +1054,7 @@ function live_trigger.handleResolvedHit(route, opts)
                 branch_kind = branch.branch_kind,
                 branch_index = branch.branch_index,
                 branch_count = branch.branch_count,
-                chain_continuation_group_id = branch.chain_continuation_group_id,
+                chain_continuation_group_id = payload_launch.chain_continuation_group_id or branch.chain_continuation_group_id,
                 payload = payload_launch,
             })
             if not enqueue.ok then
@@ -1084,8 +1150,8 @@ function live_trigger.handleResolvedHit(route, opts)
             break
         end
         local tick_options = {
-            max_jobs_per_tick = tonumber(binding.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK,
-            max_live_launches_per_tick = tonumber(binding.max_live_launches_per_tick) or limits.MAX_LIVE_LAUNCHES_PER_TICK,
+            max_jobs_per_tick = tonumber(options.max_jobs_per_tick or binding.max_jobs_per_tick) or limits.MAX_JOBS_PER_TICK,
+            max_live_launches_per_tick = tonumber(options.max_live_launches_per_tick or binding.max_live_launches_per_tick) or limits.MAX_LIVE_LAUNCHES_PER_TICK,
         }
         if options.simulate_update_ticks == true then
             tick_options.dt_seconds = tonumber(options.simulated_dt_seconds) or 0

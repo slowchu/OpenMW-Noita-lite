@@ -49,9 +49,8 @@ local function deferredRecipe()
         recipe = {
             effects = {
                 { id = "spellforge_bounce", params = { bounces = 5 } },
+                { id = "spellforge_homing" },
                 { id = "firedamage", range = 2, magnitudeMin = 1, magnitudeMax = 1, area = 0, duration = 1 },
-                { id = "spellforge_timer", params = { seconds = 1.0 } },
-                { id = "frostdamage", range = 2, magnitudeMin = 8, magnitudeMax = 8, area = 0, duration = 1 },
             },
         },
     }
@@ -105,7 +104,7 @@ local function deferredCompileGuardStep()
         local matrix = preview.feature_matrix or {}
         assertLine(result and result.ok == true, "7 deferred preview saved recipe succeeds")
         assertLine(matrix.live_runtime_status == "deferred", "7 deferred preview marks runtime deferred")
-        assertLine(containsValue(matrix.deferred_reasons, "bounce_timer_deferred"), "7 deferred preview gives Bounce Timer reason")
+        assertLine(containsValue(matrix.deferred_reasons, "homing_bounce_physics_unsupported"), "7 deferred preview gives Bounce Homing reason")
 
         local compile_callback_seen = false
         local compile_request = ui.requestCompileSavedRecipe(SMOKE_DEFERRED_ID, function(compile_result)

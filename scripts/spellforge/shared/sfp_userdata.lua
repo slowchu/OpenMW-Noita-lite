@@ -111,6 +111,9 @@ function sfp_userdata.buildHelperUserData(args)
     setScalar(out, "chain_max_hops", input.chain_max_hops)
     setScalar(out, "chain_targeting_mode", input.chain_targeting_mode)
     setScalar(out, "chain_target_provider", input.chain_target_provider)
+    setScalar(out, "chain_side_continuation_kind", input.chain_side_continuation_kind)
+    setScalar(out, "chain_side_continuation_id", input.chain_side_continuation_id)
+    setScalar(out, "chain_side_payload_count", input.chain_side_payload_count)
     setScalar(out, "branch_scope", input.branch_scope)
     setScalar(out, "branch_id", input.branch_id)
     setScalar(out, "branch_parent_id", input.branch_parent_id)
@@ -250,6 +253,9 @@ function sfp_userdata.compactSpellforgeUserData(user_data)
         "chain_max_hops",
         "chain_targeting_mode",
         "chain_target_provider",
+        "chain_side_continuation_kind",
+        "chain_side_continuation_id",
+        "chain_side_payload_count",
         "branch_scope",
         "branch_id",
         "branch_parent_id",

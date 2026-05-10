@@ -156,7 +156,10 @@ local function scanGroups(groups, summary, depth, payload_stack)
             addFeature(summary, "chain_multicast", depth)
             addSet(summary.combos, "chain_multicast")
         end
-        if has_pattern and depth > 0 then
+        if has_chain and has_pattern then
+            addSet(summary.combos, "chain_pattern")
+        end
+        if has_pattern and (depth > 0 or has_chain) then
             addFeature(summary, "payload_pattern", depth)
         end
         if has_multicast and depth > 0 then
@@ -226,105 +229,90 @@ local function scanGroups(groups, summary, depth, payload_stack)
             end
         end
 
-        if has_chain and has_pattern then
-            addSet(summary.deferred_reasons, "chain_pattern_deferred")
+        if has_chain and has_pattern and not has_multicast then
+            addSet(summary.deferred_reasons, "chain_pattern_disabled")
         end
-        if has_chain and (has_trigger or has_timer) then
-            addSet(summary.deferred_reasons, "chain_trigger_timer_deferred")
+        if has_chain and has_trigger then
+            addSet(summary.combos, "chain_trigger_side_payload")
         end
-        if has_chain and has_speed and has_size and has_multicast then
-            addSet(summary.deferred_reasons, "chain_modifier_combo_deferred")
+        if has_chain and has_timer then
+            addSet(summary.combos, "chain_timer_side_payload")
         end
-        if depth == 0 and has_speed and has_size and not has_chain then
-            addSet(summary.deferred_reasons, "source_modifier_combo_deferred")
+        if has_chain
+            and (has_trigger or has_timer)
+            and groupsHavePrefixOpcode(payload_groups, "Chain") then
+            addSet(summary.deferred_reasons, "chain_event_payload_chain_deferred")
+        end
+        if depth == 0
+            and (has_speed or has_size)
+            and not has_chain
+            and not has_bounce
+            and not has_pierce then
+            if has_trigger or has_timer or has_payload_effects then
+                addSet(summary.deferred_reasons, "source_modifier_nested_deferred")
+            elseif has_pattern and not has_multicast then
+                addSet(summary.deferred_reasons, "source_modifier_pattern_deferred")
+            end
         end
         if has_chain and hasSet(payload_stack, "Chain") then
             addSet(summary.deferred_reasons, "chain_recursion_deferred")
         end
-        if has_chain and depth >= 2 then
-            addSet(summary.deferred_reasons, "chain_nested_payload_deferred")
-        end
         if depth > 0 and (has_speed or has_size) and not has_chain then
-            if has_pattern then
-                addSet(summary.deferred_reasons, "payload_modifier_pattern_deferred")
-            elseif has_homing then
-                addSet(summary.deferred_reasons, "payload_modifier_homing_deferred")
-            elseif has_trigger or has_timer then
+            if has_trigger or has_timer then
                 addSet(summary.deferred_reasons, "payload_modifier_nested_deferred")
-            elseif has_speed and has_size and has_multicast then
-                addSet(summary.deferred_reasons, "payload_modifier_combo_deferred")
+            elseif has_pattern and not has_multicast then
+                addSet(summary.deferred_reasons, "payload_modifier_pattern_deferred")
             end
         end
 
-        if has_bounce and has_timer then
-            addSet(summary.deferred_reasons, "bounce_timer_deferred")
-        end
-        if has_bounce and (has_multicast or has_pattern) then
-            addSet(summary.deferred_reasons, "bounce_fanout_deferred")
-        end
         if has_bounce and has_chain then
             addSet(summary.deferred_reasons, "bounce_chain_deferred")
         end
         if has_bounce and (has_speed or has_size) then
-            if has_speed and has_size then
+            if has_speed and has_size and not (has_multicast or has_pattern) then
                 addSet(summary.deferred_reasons, "source_modifier_combo_deferred")
-            elseif has_multicast or has_pattern then
-                addSet(summary.deferred_reasons, "source_modifier_pattern_deferred")
-            elseif has_homing then
-                addSet(summary.deferred_reasons, "source_modifier_homing_deferred")
             elseif has_chain then
                 addSet(summary.deferred_reasons, "source_modifier_chain_deferred")
-            elseif has_trigger or has_timer or has_payload_effects then
+            elseif has_timer then
+                addSet(summary.deferred_reasons, "source_modifier_nested_deferred")
+            elseif has_trigger then
                 addSet(summary.deferred_reasons, "source_modifier_nested_deferred")
             end
         end
         if has_bounce and has_homing then
-            addSet(summary.deferred_reasons, "bounce_homing_deferred")
+            addSet(summary.deferred_reasons, "homing_bounce_physics_unsupported")
         end
 
-        if has_pierce and has_timer then
-            addSet(summary.deferred_reasons, "pierce_timer_deferred")
-        end
         if has_pierce and has_bounce then
             addSet(summary.deferred_reasons, "pierce_bounce_deferred")
-        end
-        if has_pierce and (has_multicast or has_pattern) then
-            addSet(summary.deferred_reasons, "pierce_fanout_deferred")
         end
         if has_pierce and has_chain then
             addSet(summary.deferred_reasons, "pierce_chain_deferred")
         end
         if has_pierce and (has_speed or has_size) then
-            if has_speed and has_size then
+            if has_speed and has_size and not (has_multicast or has_pattern) then
                 addSet(summary.deferred_reasons, "source_modifier_combo_deferred")
-            elseif has_multicast or has_pattern then
-                addSet(summary.deferred_reasons, "source_modifier_pattern_deferred")
-            elseif has_homing then
-                addSet(summary.deferred_reasons, "source_modifier_homing_deferred")
             elseif has_chain then
                 addSet(summary.deferred_reasons, "source_modifier_chain_deferred")
-            elseif has_trigger or has_timer or has_payload_effects then
+            elseif has_timer then
+                addSet(summary.deferred_reasons, "source_modifier_nested_deferred")
+            elseif has_trigger then
                 addSet(summary.deferred_reasons, "source_modifier_nested_deferred")
             end
         end
         if has_pierce and has_homing then
-            addSet(summary.deferred_reasons, "pierce_homing_deferred")
+            addSet(summary.deferred_reasons, "homing_pierce_physics_unsupported")
         end
         if has_pierce and (depth > 0 or hasSet(payload_stack, "Pierce")) then
             addSet(summary.deferred_reasons, "pierce_nested_payload_deferred")
         end
 
-        if has_homing and (
-            has_chain
-            or has_multicast
-            or has_pattern
-            or has_speed
-            or has_size
-            or has_trigger
-            or has_timer
-            or depth > 0
-        ) then
-            addSet(summary.deferred_reasons, "homing_composition_deferred")
+        if has_homing and has_chain then
+            addSet(summary.deferred_reasons, "homing_chain_targeting_unsupported")
+        end
+        if has_homing and (depth > (limits.MAX_LIVE_NESTED_CONTINUATION_DEPTH or 2)
+            or (depth > 0 and (has_trigger or has_timer))) then
+            addSet(summary.deferred_reasons, "homing_nested_runtime_deferred")
         end
 
         local payload_opcode = firstPostfixOpcode(group)
@@ -332,8 +320,8 @@ local function scanGroups(groups, summary, depth, payload_stack)
             summary.has_payload = true
             local child_stack = copySet(payload_stack)
             if payload_opcode then
-                if hasSet(payload_stack, payload_opcode) then
-                    addSet(summary.deferred_reasons, "same_kind_nested_trigger_timer_deferred")
+                if depth >= (limits.MAX_LIVE_NESTED_CONTINUATION_DEPTH or 2) then
+                    addSet(summary.deferred_reasons, "nested_depth_exceeded")
                 end
                 addSet(child_stack, payload_opcode)
             end
@@ -374,6 +362,12 @@ local function buildSummary(plan)
 
     scanGroups(plan and plan.groups or {}, summary, 0, {})
 
+    if summary.active.nested_trigger_timer == true
+        and (summary.contexts.payload.speed_plus == true
+            or summary.contexts.payload.size_plus == true) then
+        addSet(summary.deferred_reasons, "payload_modifier_nested_deferred")
+    end
+
     if summary.active.bounce and summary.active.chain and not summary.combos.bounce_trigger_chain then
         addSet(summary.deferred_reasons, "bounce_chain_deferred")
     end
@@ -381,8 +375,8 @@ local function buildSummary(plan)
         addSet(summary.deferred_reasons, "pierce_chain_deferred")
     end
 
-    if summary.max_payload_depth > limits.MAX_NESTED_PAYLOAD_DEPTH then
-        addSet(summary.deferred_reasons, "nested_payload_depth_cap_deferred")
+    if summary.max_payload_depth > (limits.MAX_LIVE_NESTED_CONTINUATION_DEPTH or limits.MAX_NESTED_PAYLOAD_DEPTH) then
+        addSet(summary.deferred_reasons, "nested_depth_exceeded")
     end
 
     return summary
@@ -438,6 +432,7 @@ function feature_matrix.legacyAnalyze(plan, opts)
         active_features[i] = buildFeatureEntry(feature_id, summary)
     end
 
+    local reason_report = defs.classifyReasons(deferred_reasons)
     local support_status = #deferred_reasons > 0 and "deferred" or "feature_gated"
     local required_flags = collectRequiredFlags(active_feature_ids)
 
@@ -457,6 +452,13 @@ function feature_matrix.legacyAnalyze(plan, opts)
         },
         combos = sortedKeys(summary.combos),
         deferred_reasons = deferred_reasons,
+        reason_classifications = reason_report.by_class,
+        reason_classification_counts = reason_report.counts,
+        unsupported_reasons = reason_report.unsupported_by_design,
+        future_deferred_reasons = reason_report.future_deferred,
+        cap_budget_reasons = reason_report.cap_or_budget_rejected,
+        gate_disabled_reasons = reason_report.gate_disabled,
+        internal_error_reasons = reason_report.internal_error,
         required_flags = required_flags,
         optional_flags = { FLAG_SOFT_HOMING },
         limits = {
@@ -467,6 +469,19 @@ function feature_matrix.legacyAnalyze(plan, opts)
             max_bounce_count = limits.MAX_BOUNCE_COUNT,
             max_pierce_count = limits.MAX_PIERCE_COUNT,
             max_nested_payload_depth = limits.MAX_NESTED_PAYLOAD_DEPTH,
+            max_live_nested_continuation_depth = limits.MAX_LIVE_NESTED_CONTINUATION_DEPTH,
+            max_nested_continuation_jobs_per_cast = limits.MAX_NESTED_CONTINUATION_JOBS_PER_CAST,
+            max_nested_final_payload_jobs_per_cast = limits.MAX_NESTED_FINAL_PAYLOAD_JOBS_PER_CAST,
+            max_event_source_resumes_per_cast = limits.MAX_EVENT_SOURCE_RESUMES_PER_CAST,
+            max_event_source_timer_jobs_per_cast = limits.MAX_EVENT_SOURCE_TIMER_JOBS_PER_CAST,
+            max_bounce_payload_jobs_per_cast = limits.MAX_BOUNCE_PAYLOAD_JOBS_PER_CAST,
+            max_pierce_payload_jobs_per_cast = limits.MAX_PIERCE_PAYLOAD_JOBS_PER_CAST,
+            max_chain_event_continuation_jobs_per_cast = limits.MAX_CHAIN_EVENT_CONTINUATION_JOBS_PER_CAST,
+            max_chain_trigger_side_payload_jobs_per_cast = limits.MAX_CHAIN_TRIGGER_SIDE_PAYLOAD_JOBS_PER_CAST,
+            max_chain_timer_side_payload_jobs_per_cast = limits.MAX_CHAIN_TIMER_SIDE_PAYLOAD_JOBS_PER_CAST,
+            max_homing_fanout_per_cast = limits.MAX_HOMING_FANOUT_PER_CAST,
+            max_homing_target_scans_per_cast = limits.MAX_HOMING_TARGET_SCANS_PER_CAST,
+            max_soft_homing_registrations_per_cast = limits.MAX_SOFT_HOMING_REGISTRATIONS_PER_CAST,
         },
         notes = options.notes,
     }

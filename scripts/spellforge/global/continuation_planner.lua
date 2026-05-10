@@ -1,5 +1,6 @@
 local limits = require("scripts.spellforge.shared.limits")
 local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
+local homing_launch_policy = require("scripts.spellforge.global.homing_launch_policy")
 
 local continuation_planner = {}
 
@@ -148,6 +149,7 @@ local function payloadFeatures(entries)
         pattern_kind = nil,
         chain = false,
         pierce = false,
+        homing = false,
         speed_plus = false,
         size_plus = false,
         nested_postfix = false,
@@ -173,6 +175,9 @@ local function payloadFeatures(entries)
         end
         if hasOpcode(entry.prefix_ops, "Pierce") then
             features.pierce = true
+        end
+        if hasOpcode(entry.prefix_ops, "Homing") then
+            features.homing = true
         end
         if hasOpcode(entry.prefix_ops, "Speed+") then
             features.speed_plus = true
@@ -255,17 +260,18 @@ local function reject(plan, ir, event, source_entry, continuation, reason)
             pattern_kind = nil,
             chain = false,
             pierce = false,
+            homing = false,
         },
         planned_jobs = {},
         rejection_reason = reason,
     }
 end
 
-local function buildJobs(source_entry, payload_entries, event, job_kind, branch_kind)
+local function buildJobs(source_entry, payload_entries, event, job_kind, branch_kind, job_extra)
     local jobs = {}
     local count = #payload_entries
     for index, entry in ipairs(payload_entries) do
-        jobs[index] = {
+        local job = {
             job_kind = job_kind,
             slot_id = entry.slot_id,
             helper_engine_id = helperId(entry),
@@ -277,6 +283,10 @@ local function buildJobs(source_entry, payload_entries, event, job_kind, branch_
             branch_count = count,
             bounce_index = event and event.bounce_index or nil,
         }
+        for key, value in pairs(job_extra or {}) do
+            job[key] = value
+        end
+        jobs[index] = job
     end
     return jobs
 end
@@ -304,6 +314,7 @@ local function success(plan, ir, event, source_entry, continuation, payload_entr
             pattern_kind = features and features.pattern_kind or nil,
             chain = features and features.chain == true or false,
             pierce = features and features.pierce == true or false,
+            homing = features and features.homing == true or false,
         },
         payload_multicast = features and features.multicast == true or false,
         payload_pattern = features and features.pattern == true or false,
@@ -332,6 +343,28 @@ local function validatePayloadSet(plan, ir, entries, features, options)
     end
     if features.pierce then
         return "pierce_recursion_deferred"
+    end
+    if features.homing then
+        if features.chain then
+            return "homing_chain_targeting_unsupported"
+        end
+        for _, entry in ipairs(entries or {}) do
+            local policy = homing_launch_policy.inspectPayloadEntry(plan, ir, entry, {
+                allow_payload_homing = options.allow_payload_homing == true,
+                allow_nested_payload_homing = options.allow_nested_payload_homing == true,
+                allow_homing = options.allow_homing == true,
+                force_homing_enabled = options.force_homing_enabled,
+                force_homing_disabled = options.force_homing_disabled,
+                homing_enabled = options.homing_enabled == true,
+                fanout_count = #entries,
+                max_homing_fanout_per_cast = options.max_homing_fanout_per_cast,
+                max_homing_target_scans_per_cast = options.max_homing_target_scans_per_cast,
+                quiet = options.quiet_homing_policy == true,
+            })
+            if policy.ok ~= true then
+                return policy.rejection_reason or "homing_nested_runtime_deferred"
+            end
+        end
     end
     if features.speed_plus or features.size_plus then
         local policy_options = options
@@ -374,6 +407,144 @@ local function postfixOnly(entry, opcode)
     return type(ops) == "table" and #ops == 1 and ops[1] and ops[1].opcode == opcode
 end
 
+local function postfixKind(entry)
+    if postfixOnly(entry, "Trigger") then
+        return "Trigger"
+    elseif postfixOnly(entry, "Timer") then
+        return "Timer"
+    end
+    return nil
+end
+
+local function maxLiveNestedDepth(options)
+    return tonumber(options and options.max_live_nested_continuation_depth)
+        or tonumber(limits.MAX_LIVE_NESTED_CONTINUATION_DEPTH)
+        or 2
+end
+
+local function maxNestedContinuationJobs(options)
+    return tonumber(options and options.max_nested_continuation_jobs_per_cast)
+        or tonumber(options and options.max_nested_payload_jobs)
+        or tonumber(limits.MAX_NESTED_CONTINUATION_JOBS_PER_CAST)
+        or tonumber(limits.MAX_NESTED_PAYLOAD_JOBS)
+        or 32
+end
+
+local function maxNestedFinalPayloadJobs(options)
+    return tonumber(options and options.max_nested_final_payload_jobs_per_cast)
+        or tonumber(options and options.max_nested_payload_jobs)
+        or tonumber(limits.MAX_NESTED_FINAL_PAYLOAD_JOBS_PER_CAST)
+        or tonumber(limits.MAX_NESTED_PAYLOAD_JOBS)
+        or 32
+end
+
+local function validateNestedContinuation(plan, ir, source_entry, continuation, payload_entries, features, options, root_kind)
+    if options.allow_nested_trigger_timer ~= true then
+        return false, "nested_payload_runtime_deferred", nil
+    end
+    if #payload_entries ~= 1 then
+        return false, "nested_continuation_budget_exceeded", nil
+    end
+    if features.chain then
+        return false, "chain_nested_payload_deferred", nil
+    elseif features.pierce then
+        return false, "pierce_recursion_deferred", nil
+    elseif features.homing then
+        return false, "homing_nested_runtime_deferred", nil
+    elseif features.speed_plus or features.size_plus then
+        return false, "payload_modifier_nested_deferred", nil
+    end
+
+    local intermediate_entry = payload_entries[1]
+    local nested_kind = postfixKind(intermediate_entry)
+    if nested_kind ~= "Trigger" and nested_kind ~= "Timer" then
+        return false, "nested_payload_runtime_deferred", nil
+    end
+
+    local max_depth = maxLiveNestedDepth(options)
+    local intermediate_depth = tonumber(intermediate_entry.payload_depth)
+        or ((source_entry and tonumber(source_entry.payload_depth) or 0) + 1)
+    if intermediate_depth >= max_depth then
+        return false, "nested_depth_exceeded", nil
+    end
+
+    local final_continuation = continuationBySourceKind(ir, intermediate_entry.slot_id, nested_kind)
+    if not final_continuation then
+        return false, "nested_payload_runtime_deferred", nil
+    end
+    local final_entries = entriesForContinuation(ir, final_continuation)
+    local final_features = payloadFeatures(final_entries)
+    if #final_entries == 0 then
+        return false, "payload_missing", nil
+    end
+    if final_features.nested_postfix then
+        return false, "nested_depth_exceeded", nil
+    end
+
+    local max_final_depth = 0
+    for _, entry in ipairs(final_entries) do
+        local depth = tonumber(entry and entry.payload_depth) or (intermediate_depth + 1)
+        if depth > max_final_depth then
+            max_final_depth = depth
+        end
+        if depth > max_depth then
+            return false, "nested_depth_exceeded", nil
+        end
+        if countOpcode(entry and entry.prefix_ops or {}, "Chain") > 1 then
+            return false, "nested_chain_recursion_deferred", nil
+        end
+        if countOpcode(entry and entry.prefix_ops or {}, "Homing") > 1 then
+            return false, "nested_homing_recursion_deferred", nil
+        end
+    end
+
+    local final_options = {}
+    for key, value in pairs(options or {}) do
+        final_options[key] = value
+    end
+    final_options.allow_nested_payload_modifiers = true
+    final_options.allow_nested_payload_homing = true
+
+    local final_reason = validatePayloadSet(plan, ir, final_entries, final_features, final_options)
+    if final_reason == "nested_payload_runtime_deferred" then
+        final_reason = "nested_depth_exceeded"
+    end
+    if final_reason then
+        return false, final_reason, nil
+    end
+
+    local nested_job_budget = #payload_entries
+    if nested_job_budget > maxNestedContinuationJobs(final_options) then
+        return false, "nested_continuation_budget_exceeded", nil
+    end
+    if #final_entries > maxNestedFinalPayloadJobs(final_options) then
+        return false, "nested_final_payload_budget_exceeded", nil
+    end
+
+    local root_slot_id = source_entry and source_entry.slot_id or nil
+    return true, nil, {
+        nested_trigger_timer = true,
+        nested_continuation_kind = string.lower(tostring(root_kind)) .. "_" .. string.lower(tostring(nested_kind)),
+        nested_depth = intermediate_depth,
+        nested_root_slot_id = root_slot_id,
+        nested_parent_slot_id = root_slot_id,
+        nested_parent_continuation_id = continuation and continuation.continuation_id or nil,
+        nested_continuation_id = final_continuation.continuation_id,
+        nested_final_payload_count = #final_entries,
+        nested_final_payload_slot_ids = payloadSlotIds(final_entries),
+        nested_final_payload_helper_engine_ids = payloadHelperEngineIds(final_entries),
+        nested_final_payload_features = {
+            multicast = final_features.multicast == true,
+            pattern = final_features.pattern == true,
+            pattern_kind = final_features.pattern_kind,
+            chain = final_features.chain == true,
+            homing = final_features.homing == true,
+            speed_plus = final_features.speed_plus == true,
+            size_plus = final_features.size_plus == true,
+        },
+    }
+end
+
 local function findRootPostfixContinuation(ir, kind)
     for _, continuation in ipairs(ir and ir.continuations or {}) do
         if continuation.kind == kind then
@@ -398,24 +569,65 @@ local function planPostfixEvent(plan, ir, event, kind, opts)
     if not source_entry then
         return reject(plan, ir, event, nil, nil, kind == "Trigger" and "missing_trigger_source_slot" or "missing_timer_source_slot")
     end
-    if hasOpcode(source_entry.prefix_ops, "Homing") then
-        return reject(plan, ir, event, source_entry, continuation, "homing_composition_deferred")
-    end
     if not continuation then
         return reject(plan, ir, event, source_entry, nil, kind == "Trigger" and "source_not_trigger" or "source_not_timer")
+    end
+    if hasOpcode(source_entry.prefix_ops, "Homing") then
+        local source_homing = homing_launch_policy.inspectSourceEntry(plan, ir, source_entry, {
+            allow_source_homing = options.allow_source_homing == true,
+            allow_homing = options.allow_homing == true,
+            force_homing_enabled = options.force_homing_enabled,
+            force_homing_disabled = options.force_homing_disabled,
+            homing_enabled = options.homing_enabled == true,
+            max_homing_fanout_per_cast = options.max_homing_fanout_per_cast,
+            max_homing_target_scans_per_cast = options.max_homing_target_scans_per_cast,
+            quiet = options.quiet_homing_policy == true,
+        })
+        if source_homing.ok ~= true then
+            return reject(plan, ir, event, source_entry, continuation, source_homing.rejection_reason or "homing_nested_runtime_deferred")
+        end
     end
 
     local payload_entries = entriesForContinuation(ir, continuation)
     local features = payloadFeatures(payload_entries)
     local payload_reason = validatePayloadSet(plan, ir, payload_entries, features, options)
+    local nested_extra = nil
     if payload_reason then
-        if payload_reason == "nested_payload_runtime_deferred"
-            and options.allow_nested_trigger_timer == true
-            and #payload_entries == 1
-            and features.chain ~= true
-            and ((kind == "Trigger" and postfixOnly(payload_entries[1], "Timer"))
-                or (kind == "Timer" and postfixOnly(payload_entries[1], "Trigger"))) then
+        if payload_reason == "nested_payload_runtime_deferred" then
+            local nested_ok, nested_reason, nested_metadata = validateNestedContinuation(
+                plan,
+                ir,
+                source_entry,
+                continuation,
+                payload_entries,
+                features,
+                options,
+                kind
+            )
+            if nested_ok then
+                nested_extra = nested_metadata
+                payload_reason = nil
+            else
+                payload_reason = nested_reason or payload_reason
+            end
+        end
+    end
+    if payload_reason == nil and features.nested_postfix and nested_extra == nil then
+        local nested_ok, nested_reason, nested_metadata = validateNestedContinuation(
+            plan,
+            ir,
+            source_entry,
+            continuation,
+            payload_entries,
+            features,
+            options,
+            kind
+        )
+        if nested_ok then
+            nested_extra = nested_metadata
             payload_reason = nil
+        else
+            payload_reason = nested_reason or "nested_payload_runtime_deferred"
         end
     end
     if payload_reason then
@@ -436,8 +648,18 @@ local function planPostfixEvent(plan, ir, event, kind, opts)
         branch_kind = string.lower(kind) .. "_nested_continuation"
     end
 
-    return success(plan, ir, event, source_entry, continuation, payload_entries, features, buildJobs(source_entry, payload_entries, event, job_kind, branch_kind), {
+    return success(plan, ir, event, source_entry, continuation, payload_entries, features, buildJobs(source_entry, payload_entries, event, job_kind, branch_kind, nested_extra), {
         nested_trigger_timer = features.nested_postfix == true,
+        nested_continuation_kind = nested_extra and nested_extra.nested_continuation_kind or nil,
+        nested_depth = nested_extra and nested_extra.nested_depth or nil,
+        nested_root_slot_id = nested_extra and nested_extra.nested_root_slot_id or nil,
+        nested_parent_slot_id = nested_extra and nested_extra.nested_parent_slot_id or nil,
+        nested_parent_continuation_id = nested_extra and nested_extra.nested_parent_continuation_id or nil,
+        nested_continuation_id = nested_extra and nested_extra.nested_continuation_id or nil,
+        nested_final_payload_count = nested_extra and nested_extra.nested_final_payload_count or nil,
+        nested_final_payload_slot_ids = nested_extra and nested_extra.nested_final_payload_slot_ids or nil,
+        nested_final_payload_helper_engine_ids = nested_extra and nested_extra.nested_final_payload_helper_engine_ids or nil,
+        nested_final_payload_features = nested_extra and nested_extra.nested_final_payload_features or nil,
         chain_shape = features.chain and "trigger_payload_chain" or nil,
     })
 end
@@ -469,15 +691,29 @@ local function sourceModifierPolicyOptions(options, source_kind)
     return opts
 end
 
+local function sourceHasEventSourceFanout(entry, opcode)
+    local prefix = entry and entry.prefix_ops or {}
+    return countOpcode(prefix, opcode) == 1
+        and (hasOpcode(prefix, "Multicast")
+            or hasOpcode(prefix, "Spread")
+            or hasOpcode(prefix, "Burst"))
+end
+
 local function validateSourceLaunchModifier(plan, ir, source_entry, options, source_kind)
     if not sourceHasLaunchModifier(source_entry) then
         return nil
+    end
+    local policy_options = sourceModifierPolicyOptions(options, source_kind)
+    local source_opcode = source_kind == "bounce" and "Bounce" or source_kind == "pierce" and "Pierce" or nil
+    if source_opcode and sourceHasEventSourceFanout(source_entry, source_opcode) then
+        policy_options.allow_event_source_fanout = true
+        policy_options.allow_event_source_modifier_combo = true
     end
     local policy = launch_modifier_policy.inspectSourceEntry(
         plan,
         ir,
         source_entry,
-        sourceModifierPolicyOptions(options, source_kind)
+        policy_options
     )
     if policy.ok ~= true then
         return policy.rejection_reason or "source_modifier_unsupported_prefix"
@@ -516,21 +752,18 @@ local function validateBounceSource(plan, ir, event, source_entry, bounce_contin
         return "bounce_chain_deferred"
     end
     if hasOpcode(source_entry.prefix_ops, "Homing") then
-        return "bounce_homing_deferred"
+        return "homing_bounce_physics_unsupported"
     end
-    if hasOpcode(source_entry.prefix_ops, "Multicast")
-        or hasOpcode(source_entry.prefix_ops, "Spread")
-        or hasOpcode(source_entry.prefix_ops, "Burst") then
-        return "bounce_fanout_deferred"
-    end
-    if not sourceHasLaunchModifier(source_entry) and not sourceHasOnlyBounce(source_entry) then
+    if not sourceHasLaunchModifier(source_entry)
+        and not sourceHasOnlyBounce(source_entry)
+        and not sourceHasEventSourceFanout(source_entry, "Bounce") then
         return "bounce_prefix_combo_deferred"
     end
     if hasOpcode(source_entry.postfix_ops, "Timer") then
         return "bounce_timer_deferred"
     end
     if hasOpcode(source_entry.postfix_ops, "Homing") then
-        return "bounce_homing_deferred"
+        return "homing_bounce_physics_unsupported"
     end
     if hasOpcode(source_entry.postfix_ops, "Trigger") and not postfixOnly(source_entry, "Trigger") then
         return "bounce_postfix_deferred"
@@ -653,21 +886,18 @@ local function validatePierceSource(plan, ir, event, source_entry, pierce_contin
         return "pierce_chain_deferred"
     end
     if hasOpcode(source_entry.prefix_ops, "Homing") then
-        return "pierce_homing_deferred"
+        return "homing_pierce_physics_unsupported"
     end
-    if hasOpcode(source_entry.prefix_ops, "Multicast")
-        or hasOpcode(source_entry.prefix_ops, "Spread")
-        or hasOpcode(source_entry.prefix_ops, "Burst") then
-        return "pierce_fanout_deferred"
-    end
-    if not sourceHasLaunchModifier(source_entry) and not sourceHasOnlyPierce(source_entry) then
+    if not sourceHasLaunchModifier(source_entry)
+        and not sourceHasOnlyPierce(source_entry)
+        and not sourceHasEventSourceFanout(source_entry, "Pierce") then
         return "pierce_modifier_deferred"
     end
     if hasOpcode(source_entry.postfix_ops, "Timer") then
         return "pierce_timer_deferred"
     end
     if hasOpcode(source_entry.postfix_ops, "Homing") then
-        return "pierce_homing_deferred"
+        return "homing_pierce_physics_unsupported"
     end
     if hasOpcode(source_entry.postfix_ops, "Trigger") and not postfixOnly(source_entry, "Trigger") then
         return "pierce_nested_payload_deferred"
@@ -802,17 +1032,88 @@ end
 
 local function chainPayloadEntries(ir, first_entry, chain_entries, options)
     local has_multicast = hasOpcode(first_entry.prefix_ops, "Multicast") or #chain_entries > 1
+    local has_pattern = hasOpcode(first_entry.prefix_ops, "Spread") or hasOpcode(first_entry.prefix_ops, "Burst")
     if not has_multicast then
         return { first_entry }, nil
     end
     if not chainMulticastEnabled(options) then
         return nil, "chain_multicast_disabled"
     end
-    local cap = tonumber(options.max_chain_multicast_fanout) or limits.MAX_CHAIN_MULTICAST_FANOUT
+    local cap = has_pattern
+        and (tonumber(options.max_chain_pattern_fanout)
+            or tonumber(options.max_chain_multicast_fanout)
+            or limits.MAX_CHAIN_PATTERN_FANOUT)
+        or (tonumber(options.max_chain_multicast_fanout) or limits.MAX_CHAIN_MULTICAST_FANOUT)
     if #chain_entries > cap then
-        return nil, "chain_multicast_fanout_cap_exceeded"
+        return nil, has_pattern and "chain_pattern_fanout_cap_exceeded" or "chain_multicast_fanout_cap_exceeded"
     end
     return chain_entries, nil
+end
+
+local function chainSideContinuationKind(entry)
+    local has_trigger = hasOpcode(entry and entry.postfix_ops or nil, "Trigger")
+    local has_timer = hasOpcode(entry and entry.postfix_ops or nil, "Timer")
+    if has_trigger and has_timer then
+        return nil, "chain_nested_payload_deferred"
+    end
+    if has_trigger then
+        return "Trigger", nil
+    end
+    if has_timer then
+        return "Timer", nil
+    end
+    return nil, nil
+end
+
+local function validateChainSideContinuation(plan, ir, first_entry, side_kind, requested_hops, chain_fanout_count, options)
+    if side_kind == nil then
+        return nil, nil
+    end
+    if options.allow_chain_event_continuation ~= true then
+        return nil, "chain_trigger_timer_deferred"
+    end
+    local side_continuation = continuationBySourceKind(ir, first_entry.slot_id, side_kind)
+    if not side_continuation then
+        return nil, "chain_nested_payload_deferred"
+    end
+    local side_payload_entries = entriesForContinuation(ir, side_continuation)
+    local side_features = payloadFeatures(side_payload_entries)
+    if side_features.chain then
+        return nil, "chain_event_payload_chain_deferred"
+    end
+    if side_features.nested_postfix then
+        return nil, "chain_nested_payload_deferred"
+    end
+    local side_reason = validatePayloadSet(plan, ir, side_payload_entries, side_features, options)
+    if side_reason then
+        return nil, side_reason
+    end
+    local side_payload_count = #side_payload_entries
+    local budget = (tonumber(requested_hops) or 0)
+        * math.max(1, tonumber(chain_fanout_count) or 1)
+        * math.max(1, side_payload_count)
+    local cap = tonumber(options.max_chain_event_continuation_jobs)
+        or (side_kind == "Trigger"
+            and tonumber(options.max_chain_trigger_side_payload_jobs or limits.MAX_CHAIN_TRIGGER_SIDE_PAYLOAD_JOBS_PER_CAST)
+            or tonumber(options.max_chain_timer_side_payload_jobs or limits.MAX_CHAIN_TIMER_SIDE_PAYLOAD_JOBS_PER_CAST))
+        or limits.MAX_CHAIN_EVENT_CONTINUATION_JOBS_PER_CAST
+    if budget > cap then
+        return nil, side_kind == "Trigger"
+            and "chain_trigger_side_payload_budget_exceeded"
+            or "chain_timer_side_payload_budget_exceeded"
+    end
+    return {
+        kind = side_kind,
+        continuation = side_continuation,
+        continuation_id = side_continuation.continuation_id,
+        payload_entries = side_payload_entries,
+        payload_count = side_payload_count,
+        payload_slot_ids = payloadSlotIds(side_payload_entries),
+        payload_helper_engine_ids = payloadHelperEngineIds(side_payload_entries),
+        payload_features = side_features,
+        budget = budget,
+        budget_cap = cap,
+    }, nil
 end
 
 local function planChainEvent(plan, ir, event, opts)
@@ -830,12 +1131,15 @@ local function planChainEvent(plan, ir, event, opts)
     if #chain_entries > 1 and not hasOpcode(first_entry.prefix_ops, "Multicast") then
         return reject(plan, ir, event, first_entry, chain_continuation, "chain_recursion_deferred")
     end
-    if hasOpcode(first_entry.prefix_ops, "Spread") or hasOpcode(first_entry.prefix_ops, "Burst") then
-        return reject(plan, ir, event, first_entry, chain_continuation, "chain_pattern_deferred")
+    local side_kind, side_kind_reason = chainSideContinuationKind(first_entry)
+    if side_kind_reason then
+        return reject(plan, ir, event, first_entry, chain_continuation, side_kind_reason)
     end
-    if hasOpcode(first_entry.postfix_ops, "Trigger")
-        or hasOpcode(first_entry.postfix_ops, "Timer")
-        or hasPayloadBindings(first_entry) then
+    if (side_kind ~= nil or hasPayloadBindings(first_entry))
+        and side_kind == nil then
+        return reject(plan, ir, event, first_entry, chain_continuation, "chain_trigger_timer_deferred")
+    end
+    if side_kind ~= nil and options.allow_chain_event_continuation ~= true then
         return reject(plan, ir, event, first_entry, chain_continuation, "chain_trigger_timer_deferred")
     end
     if first_entry.payload_depth and first_entry.payload_depth >= 2 then
@@ -868,6 +1172,17 @@ local function planChainEvent(plan, ir, event, opts)
     end
     local features = payloadFeatures(payload_entries)
     features.chain = true
+    if features.pattern_ambiguous then
+        return reject(plan, ir, event, source_entry, chain_continuation, "chain_pattern_disabled")
+    end
+    if features.pattern then
+        if not features.multicast then
+            return reject(plan, ir, event, source_entry, chain_continuation, "chain_pattern_disabled")
+        end
+        if not payloadPatternEnabled(options) then
+            return reject(plan, ir, event, source_entry, chain_continuation, "chain_pattern_disabled")
+        end
+    end
     if features.speed_plus or features.size_plus then
         for _, entry in ipairs(payload_entries or {}) do
             local policy = launch_modifier_policy.inspectPayloadEntry(plan, ir, entry, {
@@ -878,6 +1193,7 @@ local function planChainEvent(plan, ir, event, opts)
                 force_chain_multicast_disabled = options.force_chain_multicast_disabled,
                 chain_multicast_enabled = options.chain_multicast_enabled == true,
                 max_chain_multicast_fanout = options.max_chain_multicast_fanout,
+                allow_nested_payload_modifiers = side_kind ~= nil and options.allow_chain_event_continuation == true,
                 force_speed_plus_enabled = options.force_speed_plus_enabled,
                 force_speed_plus_disabled = options.force_speed_plus_disabled,
                 speed_plus_enabled = options.speed_plus_enabled == true,
@@ -891,17 +1207,49 @@ local function planChainEvent(plan, ir, event, opts)
         end
     end
     local jobs_per_hop = #payload_entries
-    local max_jobs = tonumber(options.max_jobs) or limits.MAX_CHAIN_JOBS_PER_CAST
+    local max_jobs = tonumber(options.max_jobs)
+        or (features.pattern and limits.MAX_CHAIN_PATTERN_JOBS_PER_CAST_DEFAULT)
+        or limits.MAX_CHAIN_JOBS_PER_CAST
     if requested_hops * jobs_per_hop > max_jobs then
-        return reject(plan, ir, event, source_entry, chain_continuation, "chain_job_cap_exceeded")
+        return reject(plan, ir, event, source_entry, chain_continuation, features.pattern and "chain_pattern_jobs_cap_exceeded" or "chain_job_cap_exceeded")
+    end
+    local side_info, side_reason = validateChainSideContinuation(
+        plan,
+        ir,
+        first_entry,
+        side_kind,
+        requested_hops,
+        #payload_entries,
+        options
+    )
+    if side_reason then
+        return reject(plan, ir, event, source_entry, chain_continuation, side_reason)
     end
 
-    return success(plan, ir, event, source_entry, chain_continuation, payload_entries, features, buildJobs(source_entry, payload_entries, event, "chain_payload_hop", "chain_payload"), {
+    local branch_kind = features.pattern and "chain_payload_pattern"
+        or features.multicast and "chain_payload_multicast"
+        or "chain_payload"
+    if side_info and side_info.kind == "Trigger" then
+        branch_kind = branch_kind .. "_trigger"
+    elseif side_info and side_info.kind == "Timer" then
+        branch_kind = branch_kind .. "_timer"
+    end
+    return success(plan, ir, event, source_entry, chain_continuation, payload_entries, features, buildJobs(source_entry, payload_entries, event, "chain_payload_hop", branch_kind), {
         chain_shape = chain_shape,
         requested_hops = requested_hops,
         max_hops = math.min(requested_hops, max_hops),
         has_multicast_payload = features.multicast == true,
+        has_pattern_payload = features.pattern == true,
+        chain_pattern_kind = features.pattern_kind,
         chain_multicast_fanout_count = #payload_entries,
+        chain_event_continuation = side_info ~= nil,
+        chain_side_continuation_kind = side_info and side_info.kind or nil,
+        chain_side_continuation_id = side_info and side_info.continuation_id or nil,
+        chain_side_payload_count = side_info and side_info.payload_count or nil,
+        chain_side_payload_slot_ids = side_info and side_info.payload_slot_ids or nil,
+        chain_side_payload_helper_engine_ids = side_info and side_info.payload_helper_engine_ids or nil,
+        chain_event_continuation_budget = side_info and side_info.budget or nil,
+        chain_event_continuation_budget_cap = side_info and side_info.budget_cap or nil,
     })
 end
 

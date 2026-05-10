@@ -284,7 +284,10 @@ function chain_targeting.inspectPlan(plan, opts)
     local hop_cap = tonumber(options.max_hops or limits.MAX_CHAIN_AUDIT_HOPS or limits.MAX_CHAIN_HOPS) or 1
     local max_jobs = tonumber(options.max_jobs or limits.MAX_CHAIN_JOBS_PER_CAST) or hop_cap
     local allow_chain_multicast = options.allow_chain_multicast == true
+    local allow_chain_pattern = options.allow_chain_pattern == true or options.allow_payload_pattern == true
+    local allow_chain_event_continuation = options.allow_chain_event_continuation == true
     local chain_multicast_fanout_cap = tonumber(options.max_chain_multicast_fanout or limits.MAX_CHAIN_MULTICAST_FANOUT) or 1
+    local chain_pattern_fanout_cap = tonumber(options.max_chain_pattern_fanout or options.max_chain_multicast_fanout or limits.MAX_CHAIN_PATTERN_FANOUT) or chain_multicast_fanout_cap
     local reasons = {}
     local result = {
         ok = false,
@@ -330,9 +333,13 @@ function chain_targeting.inspectPlan(plan, opts)
         chain_multicast_runtime_candidate = false,
         chain_multicast_fanout_count = 1,
         chain_multicast_fanout_cap = chain_multicast_fanout_cap,
+        chain_pattern_fanout_cap = chain_pattern_fanout_cap,
         payload_slot_ids = nil,
         has_pattern_payload = false,
         has_trigger_timer_payload = false,
+        chain_side_continuation_kind = nil,
+        chain_side_payload_count = 0,
+        chain_event_continuation_budget = 0,
         has_chain_recursion = false,
         payload_modifier_kind = nil,
         chain_runtime_candidate = false,
@@ -388,7 +395,9 @@ function chain_targeting.inspectPlan(plan, opts)
             if hasOpcode(slot.prefix_ops, "Spread") or hasOpcode(slot.prefix_ops, "Burst") then
                 result.has_chain_with_pattern = true
                 result.has_pattern_payload = true
-                addReason(reasons, "chain_pattern_deferred")
+                if not hasOpcode(slot.prefix_ops, "Multicast") or not allow_chain_pattern then
+                    addReason(reasons, "chain_pattern_disabled")
+                end
             end
             if hasOpcode(slot.prefix_ops, "Speed+") then
                 result.has_speed_plus_payload = true
@@ -404,10 +413,21 @@ function chain_targeting.inspectPlan(plan, opts)
             elseif result.has_size_plus_payload then
                 result.payload_modifier_kind = "size_plus"
             end
-            if hasOpcode(slot.postfix_ops, "Trigger") or hasOpcode(slot.postfix_ops, "Timer") or hasPayloadBindings(slot.payload_bindings) then
+            local has_trigger_postfix = hasOpcode(slot.postfix_ops, "Trigger")
+            local has_timer_postfix = hasOpcode(slot.postfix_ops, "Timer")
+            if has_trigger_postfix or has_timer_postfix or hasPayloadBindings(slot.payload_bindings) then
                 result.has_chain_with_trigger_timer = true
                 result.has_trigger_timer_payload = true
-                addReason(reasons, "chain_trigger_timer_deferred")
+                if has_trigger_postfix and has_timer_postfix then
+                    addReason(reasons, "chain_nested_payload_deferred")
+                elseif has_trigger_postfix or has_timer_postfix then
+                    result.chain_side_continuation_kind = has_trigger_postfix and "Trigger" or "Timer"
+                    if not allow_chain_event_continuation then
+                        addReason(reasons, "chain_trigger_timer_deferred")
+                    end
+                else
+                    addReason(reasons, "chain_trigger_timer_deferred")
+                end
             end
 
             local requested, hop_err = normalizeHopCount(chain_op, hop_cap)
@@ -456,9 +476,10 @@ function chain_targeting.inspectPlan(plan, opts)
         end
     end
 
+    local active_fanout_cap = result.has_chain_with_pattern and chain_pattern_fanout_cap or chain_multicast_fanout_cap
     if result.has_chain_with_multicast == true
-        and result.chain_multicast_fanout_count > chain_multicast_fanout_cap then
-        addReason(reasons, "chain_multicast_fanout_cap_exceeded")
+        and result.chain_multicast_fanout_count > active_fanout_cap then
+        addReason(reasons, result.has_chain_with_pattern and "chain_pattern_fanout_cap_exceeded" or "chain_multicast_fanout_cap_exceeded")
     end
 
     if (total_chain_ops > 1 or #chain_slots > 1) and not chain_multicast_fanout_slots then
@@ -472,6 +493,19 @@ function chain_targeting.inspectPlan(plan, opts)
     elseif logical_chain_slot_count == 1 then
         local chain_slot = chain_slots[1].slot
         result.payload_slot_id = chain_slot.slot_id
+        if result.chain_side_continuation_kind ~= nil then
+            for _, slot in ipairs(ordered) do
+                if slot
+                    and slot.kind == "payload_emission"
+                    and slot.parent_slot_id == chain_slot.slot_id
+                    and slot.source_postfix_opcode == result.chain_side_continuation_kind then
+                    result.chain_side_payload_count = result.chain_side_payload_count + 1
+                end
+            end
+            if result.chain_side_payload_count == 0 then
+                addReason(reasons, "chain_nested_payload_deferred")
+            end
+        end
 
         if isPrimary(chain_slot) then
             local source_slot = primaryBefore(ordered, chain_slot)
@@ -510,9 +544,32 @@ function chain_targeting.inspectPlan(plan, opts)
     local jobs_per_hop = result.has_chain_with_multicast == true and (tonumber(result.chain_multicast_fanout_count) or 1) or 1
     result.would_enqueue_jobs = (tonumber(result.max_hops) or 0) * jobs_per_hop
     result.would_launch_payloads = result.would_enqueue_jobs
-    result.exceeds_job_cap = result.would_enqueue_jobs > max_jobs
+    local side_budget_exceeded = false
+    if result.chain_side_continuation_kind ~= nil then
+        local side_jobs_per_hop = jobs_per_hop * math.max(1, tonumber(result.chain_side_payload_count) or 1)
+        local side_budget = (tonumber(result.max_hops) or 0) * side_jobs_per_hop
+        result.chain_event_continuation_budget = side_budget
+        local side_cap = tonumber(options.max_chain_event_continuation_jobs)
+            or (result.chain_side_continuation_kind == "Trigger"
+                and tonumber(options.max_chain_trigger_side_payload_jobs or limits.MAX_CHAIN_TRIGGER_SIDE_PAYLOAD_JOBS_PER_CAST)
+                or tonumber(options.max_chain_timer_side_payload_jobs or limits.MAX_CHAIN_TIMER_SIDE_PAYLOAD_JOBS_PER_CAST))
+            or limits.MAX_CHAIN_EVENT_CONTINUATION_JOBS_PER_CAST
+        if side_budget > side_cap then
+            side_budget_exceeded = true
+            addReason(
+                reasons,
+                result.chain_side_continuation_kind == "Trigger"
+                    and "chain_trigger_side_payload_budget_exceeded"
+                    or "chain_timer_side_payload_budget_exceeded"
+            )
+        end
+    end
+    if result.has_chain_with_pattern == true and options.max_jobs == nil then
+        max_jobs = tonumber(limits.MAX_CHAIN_PATTERN_JOBS_PER_CAST_DEFAULT) or max_jobs
+    end
+    result.exceeds_job_cap = result.would_enqueue_jobs > max_jobs or side_budget_exceeded
     if result.exceeds_job_cap then
-        addReason(reasons, "chain_job_cap_exceeded")
+        addReason(reasons, result.has_chain_with_pattern and "chain_pattern_jobs_cap_exceeded" or "chain_job_cap_exceeded")
     end
 
     result.chain_candidate = result.has_chain == true
@@ -525,8 +582,9 @@ function chain_targeting.inspectPlan(plan, opts)
         and result.has_nested_chain == false
         and result.has_chain_in_nested_payload == false
         and (result.has_chain_with_multicast == false or allow_chain_multicast)
-        and result.has_chain_with_pattern == false
-        and result.has_chain_with_trigger_timer == false
+        and (result.has_chain_with_pattern == false or (allow_chain_pattern and result.has_chain_with_multicast))
+        and (result.has_chain_with_trigger_timer == false
+            or (allow_chain_event_continuation and result.chain_side_continuation_kind ~= nil))
         and result.exceeds_hop_cap == false
         and result.exceeds_job_cap == false
         and (result.has_chain_with_multicast == false or result.chain_multicast_fanout_count <= chain_multicast_fanout_cap)
@@ -920,6 +978,10 @@ function chain_targeting.auditChainDryRun(plan, initial_hit_context, candidate_p
     if result.ok then
         runtime_stats.inc("chain_audit_ok")
         runtime_stats.inc("chain_audit_future_candidate")
+        if result.chain_side_continuation_kind ~= nil then
+            runtime_stats.inc("chain_event_continuation_policy_ok")
+            runtime_stats.inc("chain_event_continuation_budget_ok")
+        end
     else
         runtime_stats.inc("chain_audit_rejected")
     end

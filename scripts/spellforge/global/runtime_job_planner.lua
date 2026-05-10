@@ -1,5 +1,6 @@
 local limits = require("scripts.spellforge.shared.limits")
 local launch_modifier_policy = require("scripts.spellforge.global.launch_modifier_policy")
+local homing_launch_policy = require("scripts.spellforge.global.homing_launch_policy")
 
 local runtime_job_planner = {}
 
@@ -334,6 +335,12 @@ local function payloadMetadata(job)
         source_helper_engine_id = job.source_helper_engine_id,
         source_prefix_opcode = job.source_prefix_opcode,
         source_postfix_opcode = job.source_postfix_opcode,
+        actor = job.actor,
+        start_pos = job.start_pos,
+        direction = job.direction,
+        hit_object = job.hit_object,
+        homing_target_id = job.homing_target_id,
+        homing_target_position = job.homing_target_position,
         payload_slot_id = job.payload_slot_id,
         trigger_source_slot_id = job.trigger_source_slot_id,
         trigger_payload_slot_id = job.trigger_payload_slot_id,
@@ -367,6 +374,16 @@ local function payloadMetadata(job)
         chain_hop_index = job.chain_hop_index,
         chain_max_hops = job.chain_max_hops,
         chain_continuation_group_id = job.chain_continuation_group_id,
+        chain_side_continuation_kind = job.chain_side_continuation_kind,
+        chain_side_continuation_id = job.chain_side_continuation_id,
+        chain_side_payload_count = job.chain_side_payload_count,
+        nested_depth = job.nested_depth,
+        nested_root_slot_id = job.nested_root_slot_id,
+        nested_parent_slot_id = job.nested_parent_slot_id,
+        nested_parent_continuation_id = job.nested_parent_continuation_id,
+        nested_continuation_id = job.nested_continuation_id,
+        nested_continuation_kind = job.nested_continuation_kind,
+        nested_final_payload_count = job.nested_final_payload_count,
         branch_scope = job.branch_scope,
         branch_id = job.branch_id,
         branch_parent_id = job.branch_parent_id,
@@ -397,6 +414,20 @@ local function payloadMetadata(job)
         size_plus_capped = job.size_plus_capped,
         size_plus_base_area = job.size_plus_base_area,
         size_plus_area = job.size_plus_area,
+        forceVec = job.forceVec,
+        homing = job.homing,
+        homing_mode = job.homing_mode,
+        homing_force = job.homing_force,
+        homing_field = job.homing_field,
+        homing_target_id = job.homing_target_id,
+        homing_target_provider = job.homing_target_provider,
+        homing_target_kind = job.homing_target_kind,
+        homing_candidate_count = job.homing_candidate_count,
+        homing_actor_candidate_count = job.homing_actor_candidate_count,
+        homing_creature_candidate_count = job.homing_creature_candidate_count,
+        homing_npc_candidate_count = job.homing_npc_candidate_count,
+        homing_force_key = job.homing_force_key,
+        homing_direction_key = job.homing_direction_key,
     }
 end
 
@@ -408,8 +439,20 @@ local function buildJob(plan, ir, continuation_plan, event, opts, planned, index
     local cast_id = eventCastId(event, opts)
     local branch_kind = planned and planned.branch_kind or "continuation_payload"
     local scope = branchScope(continuation_plan, event)
+    local branch_index = planned and planned.branch_index or index
+    local planned_slot_id = planned and (planned.payload_slot_id or planned.slot_id)
+    local branch_id = branchId(scope, branch_kind, branch_index, planned_slot_id)
+    local planned_depth = tonumber(planned and planned.depth) or tonumber(payload_entry and payload_entry.payload_depth) or 0
+    local nested_depth = tonumber(planned and planned.nested_depth)
+        or planned_depth
+        or tonumber(event and event.nested_depth)
     local source_prefix_opcode = sourcePrefix(continuation_plan, event, source_entry)
     local source_postfix_opcode = sourcePostfix(continuation_plan, event, source_entry)
+    local chain_side_kind = continuation_plan and continuation_plan.chain_side_continuation_kind or nil
+    local is_chain_payload_hop = planned and planned.job_kind == "chain_payload_hop"
+    if is_chain_payload_hop and (chain_side_kind == "Trigger" or chain_side_kind == "Timer") then
+        source_postfix_opcode = chain_side_kind
+    end
     local pattern = patternInfo(continuation_plan, planned, payload_entry, index, count)
     local bounce = nil
     if source_prefix_opcode == "Bounce"
@@ -443,13 +486,47 @@ local function buildJob(plan, ir, continuation_plan, event, opts, planned, index
             tostring(event and event.event_kind or continuation_plan.event_kind or "event"),
             tostring(continuation_plan.continuation_id or "continuation"),
             tostring(planned and planned.payload_slot_id or planned and planned.slot_id or "slot"),
+            tostring(nested_depth or ""),
+            tostring(branch_id or ""),
             tostring(event and event.current_hit_target_id or event and event.actor_id or ""),
             tostring(event and event.pierce_count or ""),
             tostring(index),
         }, ":"),
         source_job_id = event and event.source_job_id or nil,
         parent_job_id = firstNonNil(event and event.parent_job_id, event and event.source_job_id),
-        depth = tonumber(planned and planned.depth) or tonumber(payload_entry and payload_entry.payload_depth) or 0,
+        depth = planned_depth,
+        nested_depth = nested_depth,
+        nested_root_slot_id = firstNonNil(
+            event and event.nested_root_slot_id,
+            planned and planned.nested_root_slot_id,
+            continuation_plan and continuation_plan.nested_root_slot_id,
+            continuation_plan and continuation_plan.source_slot_id
+        ),
+        nested_parent_slot_id = firstNonNil(
+            event and event.nested_parent_slot_id,
+            planned and planned.nested_parent_slot_id,
+            continuation_plan and continuation_plan.nested_parent_slot_id,
+            continuation_plan and continuation_plan.source_slot_id
+        ),
+        nested_parent_continuation_id = firstNonNil(
+            event and event.nested_parent_continuation_id,
+            planned and planned.nested_parent_continuation_id,
+            continuation_plan and continuation_plan.nested_parent_continuation_id
+        ),
+        nested_continuation_id = firstNonNil(
+            event and event.nested_continuation_id,
+            planned and planned.nested_continuation_id,
+            continuation_plan and continuation_plan.nested_continuation_id
+        ),
+        nested_continuation_kind = firstNonNil(
+            event and event.nested_continuation_kind,
+            planned and planned.nested_continuation_kind,
+            continuation_plan and continuation_plan.nested_continuation_kind
+        ),
+        nested_final_payload_count = firstNonNil(
+            planned and planned.nested_final_payload_count,
+            continuation_plan and continuation_plan.nested_final_payload_count
+        ),
         cast_id = cast_id,
         emission_index = payload_entry and payload_entry.emission_index or nil,
         group_index = payload_entry and payload_entry.group_index or nil,
@@ -462,28 +539,36 @@ local function buildJob(plan, ir, continuation_plan, event, opts, planned, index
         source_postfix_opcode = source_postfix_opcode,
         payload_slot_id = planned and (planned.payload_slot_id or planned.slot_id) or nil,
         branch_scope = scope,
-        branch_id = branchId(scope, branch_kind, planned and planned.branch_index or index, planned and (planned.payload_slot_id or planned.slot_id)),
+        branch_id = branch_id,
         branch_parent_id = branchParentId(continuation_plan, event),
         branch_kind = branch_kind,
-        branch_index = planned and planned.branch_index or index,
+        branch_index = branch_index,
         branch_count = planned and planned.branch_count or count,
         pattern_kind = pattern.pattern_kind,
         pattern_index = pattern.pattern_index,
         pattern_count = pattern.pattern_count,
         pattern_direction_key = pattern.pattern_direction_key,
+        actor = firstNonNil(event and event.actor, event and event.sender, opts and opts.actor, opts and opts.sender),
+        start_pos = firstNonNil(event and event.start_pos, event and event.origin, event and event.hit_pos, opts and opts.start_pos),
+        direction = firstNonNil(event and event.direction, opts and opts.direction),
+        hit_object = firstNonNil(event and event.hit_object, opts and opts.hit_object),
+        homing_target_id = firstNonNil(event and event.homing_target_id, opts and opts.homing_target_id),
+        homing_target_position = firstNonNil(event and event.homing_target_position, opts and opts.homing_target_position),
     }
 
     if source_postfix_opcode == "Trigger" then
-        job.trigger_source_slot_id = continuation_plan.source_slot_id
+        job.trigger_source_slot_id = is_chain_payload_hop and job.payload_slot_id or continuation_plan.source_slot_id
         job.trigger_payload_slot_id = job.payload_slot_id
+        job.has_trigger_payload = is_chain_payload_hop or nil
     elseif source_postfix_opcode == "Timer" or (event and event.event_kind == "timer_matured") then
-        job.timer_source_slot_id = continuation_plan.source_slot_id
+        job.timer_source_slot_id = is_chain_payload_hop and job.payload_slot_id or continuation_plan.source_slot_id
         job.timer_payload_slot_id = job.payload_slot_id
         job.timer_id = firstNonNil(event and event.timer_id, "timer:" .. tostring(cast_id) .. ":" .. tostring(continuation_plan.source_slot_id))
         job.timer_delay_ticks = timer_ticks
         job.timer_delay_seconds = timer_seconds
         job.timer_due_tick = event and event.timer_due_tick or nil
         job.timer_due_seconds = event and event.timer_due_seconds or nil
+        job.has_timer_payload = is_chain_payload_hop or nil
     end
 
     if bounce then
@@ -526,6 +611,9 @@ local function buildJob(plan, ir, continuation_plan, event, opts, planned, index
         job.chain_max_hops = chain.chain_max_hops
         job.chain_targeting_mode = chain.chain_targeting_mode
         job.chain_continuation_group_id = firstNonNil(event and event.chain_continuation_group_id, scope)
+        job.chain_side_continuation_kind = chain_side_kind
+        job.chain_side_continuation_id = continuation_plan and continuation_plan.chain_side_continuation_id or nil
+        job.chain_side_payload_count = continuation_plan and continuation_plan.chain_side_payload_count or nil
     end
 
     job.payload = payloadMetadata(job)
@@ -534,6 +622,15 @@ local function buildJob(plan, ir, continuation_plan, event, opts, planned, index
         job.payload_modifier_rejection_reason = policy.rejection_reason
         if type(job.payload) == "table" then
             job.payload.payload_modifier_rejection_reason = policy.rejection_reason
+        end
+    else
+        job.payload = payloadMetadata(job)
+    end
+    local homing = homing_launch_policy.applyToJob(plan, ir, payload_entry, job, event, opts)
+    if homing.ok ~= true then
+        job.payload_homing_rejection_reason = homing.rejection_reason
+        if type(job.payload) == "table" then
+            job.payload.payload_homing_rejection_reason = homing.rejection_reason
         end
     else
         job.payload = payloadMetadata(job)

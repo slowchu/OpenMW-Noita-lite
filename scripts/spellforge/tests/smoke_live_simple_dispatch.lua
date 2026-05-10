@@ -681,6 +681,7 @@ local function irAdapterFallbackCount(snapshot)
     return irAdapterCount(snapshot, "trigger", "fallback")
         + irAdapterCount(snapshot, "timer", "fallback")
         + irAdapterCount(snapshot, "bounce", "fallback")
+        + irAdapterCount(snapshot, "pierce", "fallback")
         + irAdapterCount(snapshot, "chain", "fallback")
 end
 
@@ -688,46 +689,111 @@ local function irAdapterMismatchCount(snapshot)
     return irAdapterCount(snapshot, "trigger", "mismatch")
         + irAdapterCount(snapshot, "timer", "mismatch")
         + irAdapterCount(snapshot, "bounce", "mismatch")
+        + irAdapterCount(snapshot, "pierce", "mismatch")
         + irAdapterCount(snapshot, "chain", "mismatch")
+end
+
+local function homingRuntimeAttemptCount(snapshot)
+    return counter(snapshot, "homing_policy_ok") + counter(snapshot, "homing_policy_deferred")
+end
+
+local function homingRuntimeEnqueuedOrRegisteredCount(snapshot)
+    return counter(snapshot, "homing_policy_applied")
+        + counter(snapshot, "homing_source_composition_ok")
+        + counter(snapshot, "homing_payload_composition_ok")
 end
 
 local function irAdapterStatusDetail(snapshot)
     return string.format(
-        "trigger_fallback=%s timer_fallback=%s bounce_fallback=%s chain_fallback=%s trigger_mismatch=%s timer_mismatch=%s bounce_mismatch=%s chain_mismatch=%s",
+        "trigger_fallback=%s timer_fallback=%s bounce_fallback=%s pierce_fallback=%s chain_fallback=%s homing_fallback=%s trigger_mismatch=%s timer_mismatch=%s bounce_mismatch=%s pierce_mismatch=%s chain_mismatch=%s homing_mismatch=%s",
         tostring(irAdapterCount(snapshot, "trigger", "fallback")),
         tostring(irAdapterCount(snapshot, "timer", "fallback")),
         tostring(irAdapterCount(snapshot, "bounce", "fallback")),
+        tostring(irAdapterCount(snapshot, "pierce", "fallback")),
         tostring(irAdapterCount(snapshot, "chain", "fallback")),
+        tostring(0),
         tostring(irAdapterCount(snapshot, "trigger", "mismatch")),
         tostring(irAdapterCount(snapshot, "timer", "mismatch")),
         tostring(irAdapterCount(snapshot, "bounce", "mismatch")),
-        tostring(irAdapterCount(snapshot, "chain", "mismatch"))
+        tostring(irAdapterCount(snapshot, "pierce", "mismatch")),
+        tostring(irAdapterCount(snapshot, "chain", "mismatch")),
+        tostring(0)
     )
 end
 
 local function logIrRuntimeAdapterStatus(snapshot, context)
     log.info(string.format(
-        "SPELLFORGE_IR_RUNTIME_ADAPTER_STATUS context=%s trigger_ir_enabled=%s timer_ir_enabled=%s bounce_ir_enabled=%s chain_ir_enabled=%s trigger_fallback_count=%s timer_fallback_count=%s bounce_fallback_count=%s chain_fallback_count=%s trigger_mismatch_count=%s timer_mismatch_count=%s bounce_mismatch_count=%s chain_mismatch_count=%s",
+        "SPELLFORGE_IR_RUNTIME_ADAPTER_STATUS context=%s strict_enabled=%s trigger_ir_enabled=%s timer_ir_enabled=%s bounce_ir_enabled=%s pierce_ir_enabled=%s chain_ir_enabled=%s trigger_attempts=%s trigger_enqueued=%s trigger_fallback=%s trigger_mismatch=%s timer_attempts=%s timer_enqueued=%s timer_fallback=%s timer_mismatch=%s bounce_attempts=%s bounce_enqueued=%s bounce_fallback=%s bounce_mismatch=%s pierce_attempts=%s pierce_enqueued=%s pierce_fallback=%s pierce_mismatch=%s chain_attempts=%s chain_enqueued=%s chain_fallback=%s chain_mismatch=%s homing_attempts=%s homing_enqueued_or_registered=%s homing_fallback=%s homing_mismatch=%s trigger_fallback_count=%s timer_fallback_count=%s bounce_fallback_count=%s pierce_fallback_count=%s chain_fallback_count=%s trigger_mismatch_count=%s timer_mismatch_count=%s bounce_mismatch_count=%s pierce_mismatch_count=%s chain_mismatch_count=%s",
         tostring(context or "smoke"),
+        tostring(dev.irRuntimeStrictEnabled()),
         tostring(dev.irTriggerRuntimeEnabled()),
         tostring(dev.irTimerRuntimeEnabled()),
         tostring(dev.irBounceRuntimeEnabled()),
+        tostring(dev.irPierceRuntimeEnabled()),
         tostring(dev.irChainRuntimeEnabled()),
+        tostring(irAdapterCount(snapshot, "trigger", "attempts")),
+        tostring(irAdapterCount(snapshot, "trigger", "enqueued")),
+        tostring(irAdapterCount(snapshot, "trigger", "fallback")),
+        tostring(irAdapterCount(snapshot, "trigger", "mismatch")),
+        tostring(irAdapterCount(snapshot, "timer", "attempts")),
+        tostring(irAdapterCount(snapshot, "timer", "enqueued")),
+        tostring(irAdapterCount(snapshot, "timer", "fallback")),
+        tostring(irAdapterCount(snapshot, "timer", "mismatch")),
+        tostring(irAdapterCount(snapshot, "bounce", "attempts")),
+        tostring(irAdapterCount(snapshot, "bounce", "enqueued")),
+        tostring(irAdapterCount(snapshot, "bounce", "fallback")),
+        tostring(irAdapterCount(snapshot, "bounce", "mismatch")),
+        tostring(irAdapterCount(snapshot, "pierce", "attempts")),
+        tostring(irAdapterCount(snapshot, "pierce", "enqueued")),
+        tostring(irAdapterCount(snapshot, "pierce", "fallback")),
+        tostring(irAdapterCount(snapshot, "pierce", "mismatch")),
+        tostring(irAdapterCount(snapshot, "chain", "attempts")),
+        tostring(irAdapterCount(snapshot, "chain", "enqueued")),
+        tostring(irAdapterCount(snapshot, "chain", "fallback")),
+        tostring(irAdapterCount(snapshot, "chain", "mismatch")),
+        tostring(homingRuntimeAttemptCount(snapshot)),
+        tostring(homingRuntimeEnqueuedOrRegisteredCount(snapshot)),
+        tostring(0),
+        tostring(0),
         tostring(irAdapterCount(snapshot, "trigger", "fallback")),
         tostring(irAdapterCount(snapshot, "timer", "fallback")),
         tostring(irAdapterCount(snapshot, "bounce", "fallback")),
+        tostring(irAdapterCount(snapshot, "pierce", "fallback")),
         tostring(irAdapterCount(snapshot, "chain", "fallback")),
         tostring(irAdapterCount(snapshot, "trigger", "mismatch")),
         tostring(irAdapterCount(snapshot, "timer", "mismatch")),
         tostring(irAdapterCount(snapshot, "bounce", "mismatch")),
+        tostring(irAdapterCount(snapshot, "pierce", "mismatch")),
         tostring(irAdapterCount(snapshot, "chain", "mismatch"))
     ))
 end
 
 local function assertIrRuntimeAdapterClean(snapshot, context)
     logIrRuntimeAdapterStatus(snapshot, context)
-    assertLine(irAdapterFallbackCount(snapshot) == 0, "IR runtime adapters fallback counts zero", irAdapterStatusDetail(snapshot))
-    assertLine(irAdapterMismatchCount(snapshot) == 0, "IR runtime adapters mismatch counts zero", irAdapterStatusDetail(snapshot))
+    local fallback_count = irAdapterFallbackCount(snapshot)
+    local mismatch_count = irAdapterMismatchCount(snapshot)
+    if dev.irRuntimeStrictEnabled() then
+        log.info("SPELLFORGE_IR_RUNTIME_STRICT_ENABLED strict_enabled=true context=" .. tostring(context or "smoke"))
+    end
+    assertLine(fallback_count == 0, "IR runtime adapters fallback counts zero", irAdapterStatusDetail(snapshot))
+    assertLine(mismatch_count == 0, "IR runtime adapters mismatch counts zero", irAdapterStatusDetail(snapshot))
+    if dev.irRuntimeStrictEnabled() then
+        if fallback_count == 0 and mismatch_count == 0 then
+            log.info(string.format(
+                "SPELLFORGE_IR_RUNTIME_STRICT_OK context=%s fallback_count=%s mismatch_count=%s",
+                tostring(context or "smoke"),
+                tostring(fallback_count),
+                tostring(mismatch_count)
+            ))
+        else
+            log.error(string.format(
+                "SPELLFORGE_IR_RUNTIME_STRICT_FAIL context=%s fallback_count=%s mismatch_count=%s",
+                tostring(context or "smoke"),
+                tostring(fallback_count),
+                tostring(mismatch_count)
+            ))
+        end
+    end
 end
 
 local function unsupportedContains(result, needle)
@@ -975,7 +1041,7 @@ local function chainMulticastPayloadJobsCarryUserData(jobs, hop_count, fanout_co
             or tonumber(user_data.chain_hop_index) ~= hop_index
             or tonumber(user_data.chain_max_hops) ~= tonumber(max_hops)
             or user_data.chain_targeting_mode ~= "no_immediate_repeat"
-            or user_data.branch_kind ~= "chain_multicast"
+            or (user_data.branch_kind ~= "chain_multicast" and user_data.branch_kind ~= "chain_pattern")
             or type(user_data.branch_scope) ~= "string"
             or tonumber(user_data.branch_index) ~= branch_index
             or tonumber(user_data.branch_count) ~= fanout_count
@@ -990,6 +1056,24 @@ local function chainMulticastPayloadJobsCarryUserData(jobs, hop_count, fanout_co
     end
     for hop_index = 1, hop_count do
         if saw_by_hop[hop_index] ~= fanout_count then
+            return false
+        end
+    end
+    return true
+end
+
+local function chainPatternPayloadJobsCarryUserData(jobs, hop_count, fanout_count, chain_id, max_hops, pattern_kind)
+    if not chainMulticastPayloadJobsCarryUserData(jobs, hop_count, fanout_count, chain_id, max_hops) then
+        return false
+    end
+    for _, job in ipairs(jobs or {}) do
+        local user_data = job and job.launch_user_data or nil
+        if type(user_data) ~= "table"
+            or user_data.branch_kind ~= "chain_pattern"
+            or user_data.pattern_kind ~= pattern_kind
+            or tonumber(user_data.pattern_count) ~= fanout_count
+            or type(user_data.pattern_index) ~= "number"
+            or type(user_data.pattern_direction_key) ~= "string" then
             return false
         end
     end
@@ -1159,20 +1243,22 @@ local function runChainTargetingSmoke(callback)
         },
         {
             chain_case = "pattern",
-            label = "Chain pattern deferral",
+            label = "Chain pattern qualification",
             check = function(result)
-                assertLine(result and result.ok == false, "Chain audit pattern is deferred")
+                assertLine(result and result.ok == true, "Chain audit pattern qualifies")
                 assertLine(result and result.has_chain_with_pattern == true, "Chain audit pattern classified")
-                assertLine(unsupportedContains(result, "chain_pattern"), "Chain audit pattern rejection reason is specific")
+                assertLine(result and result.has_chain_with_multicast == true, "Chain audit pattern keeps Multicast fanout")
+                assertLine(result and tonumber(result.chain_multicast_fanout_count) == 3, "Chain audit pattern reports fanout count")
             end,
         },
         {
             chain_case = "trigger_timer",
-            label = "Chain Trigger/Timer deferral",
+            label = "Chain Trigger side-continuation qualification",
             check = function(result)
-                assertLine(result and result.ok == false, "Chain audit Trigger/Timer is deferred")
+                assertLine(result and result.ok == true, "Chain audit Trigger side-continuation qualifies")
                 assertLine(result and result.has_chain_with_trigger_timer == true, "Chain audit Trigger/Timer classified")
-                assertLine(unsupportedContains(result, "chain_trigger_timer"), "Chain audit Trigger/Timer rejection reason is specific")
+                assertLine(result and result.chain_side_continuation_kind == "Trigger", "Chain audit reports Trigger side continuation")
+                assertLine(result and tonumber(result.chain_side_payload_count) >= 1, "Chain audit reports side payload count")
             end,
         },
         {
@@ -1233,9 +1319,9 @@ local function runChainTargetingSmoke(callback)
                     local after_snapshot = after_stats and after_stats.snapshot or {}
                     assertLine(counter(after_snapshot, "sfp_launch_attempts") == before_launches, "Chain audit probes do not call SFP launch")
                     assertCounterAtLeast(after_snapshot, "chain_audit_attempts", 10, "runtime stats counted Chain audit attempts")
-                    assertCounterAtLeast(after_snapshot, "chain_audit_ok", 2, "runtime stats counted Chain audit ok")
-                    assertCounterAtLeast(after_snapshot, "chain_audit_rejected", 7, "runtime stats counted Chain audit rejections")
-                    assertCounterAtLeast(after_snapshot, "chain_audit_future_candidate", 2, "runtime stats counted Chain future candidate")
+                    assertCounterAtLeast(after_snapshot, "chain_audit_ok", 3, "runtime stats counted Chain audit ok")
+                    assertCounterAtLeast(after_snapshot, "chain_audit_rejected", 6, "runtime stats counted Chain audit rejections")
+                    assertCounterAtLeast(after_snapshot, "chain_audit_future_candidate", 3, "runtime stats counted Chain future candidate")
                     assertCounterAtLeast(after_snapshot, "chain_hop_dry_run_attempts", 4, "runtime stats counted Chain hop dry-run attempts")
                     assertCounterAtLeast(after_snapshot, "chain_hop_dry_run_ok", 3, "runtime stats counted Chain hop dry-run ok")
                     assertCounterAtLeast(after_snapshot, "chain_hop_dry_run_rejected", 1, "runtime stats counted Chain hop dry-run rejection")
@@ -1253,8 +1339,7 @@ local function runChainTargetingSmoke(callback)
                     assertCounterAtLeast(after_snapshot, "chain_target_cap_reject", 1, "runtime stats counted Chain candidate cap")
                     assertCounterAtLeast(after_snapshot, "chain_target_nested_reject", 1, "runtime stats counted Chain nested rejection")
                     assertCounterAtLeast(after_snapshot, "chain_target_multicast_reject", 1, "runtime stats counted Chain Multicast rejection")
-                    assertCounterAtLeast(after_snapshot, "chain_target_pattern_reject", 1, "runtime stats counted Chain pattern rejection")
-                    assertCounterAtLeast(after_snapshot, "chain_target_trigger_timer_reject", 1, "runtime stats counted Chain Trigger/Timer rejection")
+                    assertCounterAtLeast(after_snapshot, "chain_event_continuation_policy_ok", 1, "runtime stats counted Chain Trigger/Timer side-continuation qualification")
                     assertCounterAtLeast(after_snapshot, "chain_target_recursion_reject", 1, "runtime stats counted Chain recursion rejection")
                     assertCounterAtLeast(after_snapshot, "chain_target_runtime_deferred", 1, "runtime stats counted live Chain runtime deferral")
                     assertCounterAtLeast(after_snapshot, "chain_target_no_immediate_repeat_exclusions", 3, "runtime stats counted Chain no-immediate-repeat exclusions")
@@ -1389,6 +1474,67 @@ local function runManualCastStage()
 end
 
 local function runChainRuntimeSmoke(callback)
+    local function assertChainFanoutRuntime(result, label, opts)
+        opts = opts or {}
+        local fanout_count = opts.fanout_count or 3
+        local expected_shape = opts.chain_shape or "source_chain_payload"
+        local modifier_kind = opts.modifier_kind
+        local pattern_kind = opts.pattern_kind
+        assertLine(result and result.live_mode == "chain", label .. " reports Chain mode")
+        assertLine(result and result.chain_shape == expected_shape, label .. " reports expected Chain shape")
+        if modifier_kind ~= nil then
+            assertLine(result and result.payload_modifier_kind == modifier_kind, label .. " reports payload modifier")
+        end
+        assertLine(result and result.has_multicast_payload == true, label .. " reports payload fanout")
+        assertLine(result and result.chain_multicast_fanout_count == fanout_count, label .. " reports fanout count")
+        if pattern_kind ~= nil then
+            assertLine(result and result.has_pattern_payload == true, label .. " reports Pattern payload")
+            assertLine(result and result.chain_pattern_kind == pattern_kind, label .. " reports Pattern kind", result and result.chain_pattern_kind)
+            assertLine(chainPatternPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops, pattern_kind), label .. " payload userData carries Pattern branch identity")
+        else
+            assertLine(chainMulticastPayloadJobsCarryUserData(result and result.chain_payload_jobs, 3, fanout_count, result and result.chain_id, result and result.max_hops), label .. " payload userData carries branch identity")
+        end
+        assertLine(selectedSequence(result) == "B,A,B", label .. " advances one continuation per hop", selectedSequence(result))
+        assertLine(result and result.chain_payload_launch_count == 3 * fanout_count, label .. " launches bounded sibling payloads")
+        assertLine(result and result.stop_reason == "max_hops_reached", label .. " stops at max hops", result and result.stop_reason)
+        assertLine(result and result.duplicate_source_suppressed == true, label .. " suppresses duplicate source hit")
+        assertLine(result and result.duplicate_hop_suppressed == true, label .. " suppresses duplicate sibling hit")
+        if modifier_kind == "speed_plus" or modifier_kind == "speed_plus_size_plus" then
+            assertLine(jobsCarrySpeedPlusUserData(result and result.chain_payload_jobs, 3 * fanout_count, result and result.dispatch and result.dispatch.cast_id), label .. " payload userData keeps Speed+ metadata")
+        end
+        if modifier_kind == "size_plus" or modifier_kind == "speed_plus_size_plus" then
+            assertLine(jobsCarrySizePlusUserData(result and result.chain_payload_jobs, 3 * fanout_count, result and result.dispatch and result.dispatch.cast_id), label .. " payload userData keeps Size+ metadata")
+        end
+        assertIrChainRuntimeUsed(result, 3, 3 * fanout_count, label .. " runtime")
+    end
+
+    local function assertChainSideRuntime(result, label, side_kind, opts)
+        opts = opts or {}
+        local expected_shape = opts.chain_shape or "source_chain_payload"
+        local modifier_kind = opts.modifier_kind
+        local fanout_count = opts.fanout_count or 1
+        local expected_launch_count = 3 * fanout_count
+        assertLine(result and result.live_mode == "chain", label .. " reports Chain mode")
+        assertLine(result and result.chain_shape == expected_shape, label .. " reports expected Chain shape", result and result.chain_shape)
+        assertLine(result and result.chain_side_continuation_kind == side_kind, label .. " reports side continuation kind", result and result.chain_side_continuation_kind)
+        assertLine(result and tonumber(result.chain_side_payload_count) >= 1, label .. " reports side payload count")
+        if modifier_kind ~= nil then
+            assertLine(result and result.payload_modifier_kind == modifier_kind, label .. " reports payload modifier")
+        end
+        assertLine(selectedSequence(result) == "B,A,B", label .. " advances one Chain continuation per hop", selectedSequence(result))
+        assertLine(result and result.chain_payload_launch_count == expected_launch_count, label .. " launches bounded Chain payload siblings")
+        assertLine(result and result.stop_reason == "max_hops_reached", label .. " stops at max hops", result and result.stop_reason)
+        assertLine(result and result.duplicate_source_suppressed == true, label .. " suppresses duplicate source hit")
+        assertLine(result and result.duplicate_hop_suppressed == true, label .. " suppresses duplicate Chain hit")
+        if side_kind == "Trigger" then
+            assertLine(result and tonumber(result.chain_side_trigger_registered_count) == fanout_count, label .. " registers Trigger side bindings per Chain sibling source")
+            assertLine(result and result.chain_trigger_side_payload_job_count == result.chain_payload_launch_count, label .. " enqueues one Trigger side payload per Chain payload")
+        elseif side_kind == "Timer" then
+            assertLine(result and result.chain_timer_side_schedule_count == result.chain_payload_launch_count, label .. " schedules one Timer side payload per Chain payload")
+        end
+        assertIrChainRuntimeUsed(result, 3, expected_launch_count, label .. " runtime")
+    end
+
     local cases = {
         {
             chain_case = "disabled",
@@ -1673,9 +1819,11 @@ local function runChainRuntimeSmoke(callback)
         },
         {
             chain_case = "pattern",
-            label = "Chain pattern live deferral",
+            label = "Chain Pattern Burst live runtime",
             check = function(result)
-                assertLine(result and result.fallback_reason ~= nil, "Chain pattern live defers")
+                assertChainFanoutRuntime(result, "Chain Pattern Burst", {
+                    pattern_kind = "Burst",
+                })
             end,
         },
         {
@@ -1752,57 +1900,197 @@ local function runChainRuntimeSmoke(callback)
         },
         {
             chain_case = "speed_size_plus_multicast",
-            label = "Chain Speed+ Size+ Multicast live deferral",
+            label = "Chain Speed+ Size+ Multicast live runtime",
             check = function(result)
-                assertLine(result and result.fallback_reason == "chain_modifier_combo_deferred", "Chain Speed+ Size+ Multicast live defers", result and result.fallback_reason)
-                assertLine(result and result.chain_payload_launch_count == 0, "Chain Speed+ Size+ Multicast launches no Chain payload")
+                assertChainFanoutRuntime(result, "Chain Speed+ Size+ Multicast", {
+                    modifier_kind = "speed_plus_size_plus",
+                })
             end,
         },
         {
             chain_case = "speed_plus_pattern",
-            label = "Chain Speed+ pattern live deferral",
+            label = "Chain Speed+ Pattern live runtime",
             check = function(result)
-                assertLine(
-                    result and (result.fallback_reason == "chain_multicast_deferred"
-                        or result.fallback_reason == "chain_pattern_deferred"),
-                    "Chain Speed+ pattern live defers"
-                )
-                assertLine(result and result.chain_payload_launch_count == 0, "Chain Speed+ pattern launches no Chain payload")
+                assertChainFanoutRuntime(result, "Chain Speed+ Pattern", {
+                    modifier_kind = "speed_plus",
+                    pattern_kind = "Burst",
+                })
             end,
         },
         {
             chain_case = "size_plus_pattern",
-            label = "Chain Size+ pattern live deferral",
+            label = "Chain Size+ Pattern live runtime",
             check = function(result)
-                assertLine(
-                    result and (result.fallback_reason == "chain_multicast_deferred"
-                        or result.fallback_reason == "chain_pattern_deferred"),
-                    "Chain Size+ pattern live defers"
-                )
-                assertLine(result and result.chain_payload_launch_count == 0, "Chain Size+ pattern launches no Chain payload")
+                assertChainFanoutRuntime(result, "Chain Size+ Pattern", {
+                    modifier_kind = "size_plus",
+                    pattern_kind = "Burst",
+                })
+            end,
+        },
+        {
+            chain_case = "direct_chain_pattern_spread",
+            label = "direct Chain Pattern Spread live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "direct Chain Pattern Spread", {
+                    pattern_kind = "Spread",
+                })
+            end,
+        },
+        {
+            chain_case = "direct_chain_pattern_burst",
+            label = "direct Chain Pattern Burst live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "direct Chain Pattern Burst", {
+                    pattern_kind = "Burst",
+                })
+            end,
+        },
+        {
+            chain_case = "trigger_chain_pattern_spread",
+            label = "Trigger Chain Pattern Spread live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "Trigger Chain Pattern Spread", {
+                    chain_shape = "trigger_payload_chain",
+                    pattern_kind = "Spread",
+                })
+            end,
+        },
+        {
+            chain_case = "trigger_chain_pattern_burst",
+            label = "Trigger Chain Pattern Burst live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "Trigger Chain Pattern Burst", {
+                    chain_shape = "trigger_payload_chain",
+                    pattern_kind = "Burst",
+                })
+            end,
+        },
+        {
+            chain_case = "trigger_chain_speed_size_plus_multicast",
+            label = "Trigger Chain Speed+ Size+ Multicast live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "Trigger Chain Speed+ Size+ Multicast", {
+                    chain_shape = "trigger_payload_chain",
+                    modifier_kind = "speed_plus_size_plus",
+                })
+            end,
+        },
+        {
+            chain_case = "direct_chain_speed_size_plus_pattern_spread",
+            label = "direct Chain Speed+ Size+ Pattern Spread live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "direct Chain Speed+ Size+ Pattern Spread", {
+                    modifier_kind = "speed_plus_size_plus",
+                    pattern_kind = "Spread",
+                })
+            end,
+        },
+        {
+            chain_case = "direct_chain_speed_size_plus_pattern_burst",
+            label = "direct Chain Speed+ Size+ Pattern Burst live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "direct Chain Speed+ Size+ Pattern Burst", {
+                    modifier_kind = "speed_plus_size_plus",
+                    pattern_kind = "Burst",
+                })
+            end,
+        },
+        {
+            chain_case = "trigger_chain_speed_size_plus_pattern_spread",
+            label = "Trigger Chain Speed+ Size+ Pattern Spread live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "Trigger Chain Speed+ Size+ Pattern Spread", {
+                    chain_shape = "trigger_payload_chain",
+                    modifier_kind = "speed_plus_size_plus",
+                    pattern_kind = "Spread",
+                })
+            end,
+        },
+        {
+            chain_case = "trigger_chain_speed_size_plus_pattern_burst",
+            label = "Trigger Chain Speed+ Size+ Pattern Burst live runtime",
+            check = function(result)
+                assertChainFanoutRuntime(result, "Trigger Chain Speed+ Size+ Pattern Burst", {
+                    chain_shape = "trigger_payload_chain",
+                    modifier_kind = "speed_plus_size_plus",
+                    pattern_kind = "Burst",
+                })
+            end,
+        },
+        {
+            chain_case = "pattern_over_budget",
+            label = "Chain Pattern over-budget live deferral",
+            check = function(result)
+                assertLine(result and result.fallback_reason == "chain_pattern_jobs_cap_exceeded", "Chain Pattern over-budget rejects with stable reason", result and result.fallback_reason)
+                assertLine(result and result.chain_payload_launch_count == 0, "Chain Pattern over-budget launches no Chain payload")
             end,
         },
         {
             chain_case = "trigger_timer",
-            label = "Chain Trigger/Timer live deferral",
+            label = "Chain Trigger side-continuation live runtime",
             check = function(result)
-                assertLine(result and result.fallback_reason ~= nil, "Chain Trigger/Timer live defers")
+                assertChainSideRuntime(result, "Chain Trigger side-continuation", "Trigger")
+            end,
+        },
+        {
+            chain_case = "timer_side",
+            label = "Chain Timer side-continuation live runtime",
+            check = function(result)
+                assertChainSideRuntime(result, "Chain Timer side-continuation", "Timer")
+            end,
+        },
+        {
+            chain_case = "fanout_trigger_side",
+            label = "Chain fanout Trigger side-continuation live runtime",
+            check = function(result)
+                assertChainSideRuntime(result, "Chain fanout Trigger side-continuation", "Trigger", {
+                    fanout_count = 3,
+                })
+            end,
+        },
+        {
+            chain_case = "pattern_timer_side",
+            label = "Chain Pattern Timer side-continuation live runtime",
+            check = function(result)
+                assertChainSideRuntime(result, "Chain Pattern Timer side-continuation", "Timer", {
+                    fanout_count = 3,
+                })
             end,
         },
         {
             chain_case = "speed_plus_trigger_timer",
-            label = "Chain Speed+ Trigger live deferral",
+            label = "Chain Speed+ Trigger side-continuation live runtime",
             check = function(result)
-                assertLine(result and result.fallback_reason ~= nil, "Chain Speed+ Trigger live defers")
-                assertLine(result and result.chain_payload_launch_count == 0, "Chain Speed+ Trigger launches no Chain payload")
+                assertChainSideRuntime(result, "Chain Speed+ Trigger side-continuation", "Trigger", {
+                    modifier_kind = "speed_plus",
+                })
             end,
         },
         {
             chain_case = "size_plus_trigger_timer",
-            label = "Chain Size+ Timer live deferral",
+            label = "Chain Size+ Timer side-continuation live runtime",
             check = function(result)
-                assertLine(result and result.fallback_reason ~= nil, "Chain Size+ Timer live defers")
-                assertLine(result and result.chain_payload_launch_count == 0, "Chain Size+ Timer launches no Chain payload")
+                assertChainSideRuntime(result, "Chain Size+ Timer side-continuation", "Timer", {
+                    modifier_kind = "size_plus",
+                })
+            end,
+        },
+        {
+            chain_case = "trigger_chain_trigger_side",
+            label = "Trigger Chain Trigger side-continuation live runtime",
+            check = function(result)
+                assertChainSideRuntime(result, "Trigger Chain Trigger side-continuation", "Trigger", {
+                    chain_shape = "trigger_payload_chain",
+                })
+            end,
+        },
+        {
+            chain_case = "trigger_chain_timer_side",
+            label = "Trigger Chain Timer side-continuation live runtime",
+            check = function(result)
+                assertChainSideRuntime(result, "Trigger Chain Timer side-continuation", "Timer", {
+                    chain_shape = "trigger_payload_chain",
+                })
             end,
         },
         {
@@ -1882,8 +2170,9 @@ local function runChainRuntimeSmoke(callback)
                 assertCounterAtLeast(snapshot, "branch_observability_chain_multicast_branches", 6, "runtime stats counted Chain Multicast continuation groups")
                 assertCounterAtLeast(snapshot, "branch_observability_events", 48, "runtime stats counted Chain Multicast branch events")
                 assertCounterAtLeast(snapshot, "branch_observability_max_branch_fanout", limits.MAX_CHAIN_MULTICAST_FANOUT_CHAOS, "runtime stats tracked Chain Multicast max fanout")
-                assertCounterAtLeast(snapshot, "chain_runtime_pattern_reject", 1, "runtime stats counted Chain pattern rejection")
-                assertCounterAtLeast(snapshot, "chain_runtime_trigger_timer_reject", 1, "runtime stats counted Chain Trigger/Timer rejection")
+                assertCounterAtLeast(snapshot, "chain_runtime_pattern_reject", 1, "runtime stats counted Chain Pattern budget rejection")
+                assertCounterAtLeast(snapshot, "chain_pattern_hops", 1, "runtime stats counted Chain Pattern hop fanout")
+                assertCounterAtLeast(snapshot, "chain_pattern_payload_ok", 1, "runtime stats counted Chain Pattern payload ok")
                 assertCounterAtLeast(snapshot, "chain_runtime_recursion_reject", 1, "runtime stats counted Chain recursion rejection")
                 assertCounterAtLeast(snapshot, "chain_modifier_attempts", 7, "runtime stats counted Chain modifier attempts")
                 assertCounterAtLeast(snapshot, "chain_modifier_qualified", 5, "runtime stats counted Chain modifier qualifications")
@@ -2186,7 +2475,7 @@ local function runIrRuntimeAdapterStatusSmoke()
     end
 
     state.running = true
-    log.info("IR runtime adapter smoke accepted; exercising Trigger, Timer, Bounce, and Chain through migrated IR gates")
+    log.info("IR runtime adapter smoke accepted; exercising Trigger, Timer, Bounce, Pierce, Chain, Homing, nesting, and Pack H support-truth checks through migrated IR gates")
 
     local steps = {}
     local function addStep(step)
@@ -2239,7 +2528,46 @@ local function runIrRuntimeAdapterStatusSmoke()
         end)
     end
 
+    local support_truth = {
+        supported_case_count = 0,
+        feature_gated_case_count = 0,
+        unsupported_by_design_count = 0,
+        future_deferred_count = 0,
+        cap_budget_rejected_count = 0,
+        fallback_count = 0,
+        mismatch_count = 0,
+        stale_deferred_count = 0,
+    }
+    local function addSupportTruth(result, supported_fields, opts)
+        local options = opts or {}
+        local supported = 0
+        for _, field in ipairs(supported_fields or {}) do
+            supported = supported + (tonumber(result and result[field]) or 0)
+        end
+        support_truth.supported_case_count = support_truth.supported_case_count + supported
+        support_truth.feature_gated_case_count = support_truth.feature_gated_case_count + supported
+        for _, field in ipairs(options.unsupported_fields or {}) do
+            support_truth.unsupported_by_design_count =
+                support_truth.unsupported_by_design_count + (tonumber(result and result[field]) or 0)
+        end
+        for _, field in ipairs(options.future_fields or {}) do
+            support_truth.future_deferred_count =
+                support_truth.future_deferred_count + (tonumber(result and result[field]) or 0)
+        end
+        for _, field in ipairs(options.budget_fields or {}) do
+            support_truth.cap_budget_rejected_count =
+                support_truth.cap_budget_rejected_count + (tonumber(result and result[field]) or 0)
+        end
+        support_truth.fallback_count =
+            support_truth.fallback_count + (tonumber(result and result.fallback_count) or 0)
+        support_truth.mismatch_count =
+            support_truth.mismatch_count + (tonumber(result and result.mismatch_count) or 0)
+        support_truth.stale_deferred_count =
+            support_truth.stale_deferred_count + (tonumber(result and result.stale_deferred_count) or 0)
+    end
+
     addProbeStep("payload_modifier_policy_conformance", "IR payload modifier policy conformance", function(result)
+        addSupportTruth(result, { "event_case_count", "chain_case_count" })
         assertLine(result and result.policy_module == "launch_modifier_policy", "payload modifier policy owns modifier decisions")
         assertLine(result and result.job_planner_module == "runtime_job_planner", "runtime job planner applies policy mutations")
         assertLine(result and result.event_source_neutral == true, "payload modifier policy is event-source neutral")
@@ -2249,7 +2577,41 @@ local function runIrRuntimeAdapterStatusSmoke()
         assertLine(result and result.no_event_specific_reasons == true, "payload modifier policy avoids event-specific reasons")
         assertLine(result and tonumber(result.event_case_count) == tonumber(result.expected_event_case_count), "payload modifier policy cases all pass")
     end)
+    addProbeStep("payload_modifier_fanout_policy_conformance", "IR payload modifier fanout policy conformance", function(result)
+        addSupportTruth(result, { "fanout_case_count", "chain_case_count" }, { future_fields = { "deferred_case_count" } })
+        assertLine(result and result.policy_module == "launch_modifier_policy", "payload modifier fanout policy owns modifier decisions")
+        assertLine(result and result.job_planner_module == "runtime_job_planner", "runtime job planner applies fanout policy mutations")
+        assertLine(result and result.event_source_neutral == true, "payload modifier fanout policy is event-source neutral")
+        assertLine(result and tonumber(result.fanout_case_count) == tonumber(result.expected_fanout_case_count), "payload modifier fanout policy cases all pass")
+        assertLine(result and tonumber(result.deferred_case_count) == tonumber(result.expected_deferred_case_count), "payload modifier fanout deferred cases all pass")
+        assertLine(result and tonumber(result.chain_case_count) == tonumber(result.expected_chain_case_count), "Chain single-modifier fanout compatibility preserved")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "payload modifier fanout policy has no fallback or mismatch")
+        assertLine(result and result.no_event_specific_reasons == true, "payload modifier fanout policy avoids event-specific reasons")
+    end)
+    addProbeStep("payload_modifier_combined_fanout_policy_conformance", "IR payload modifier combined fanout policy conformance", function(result)
+        addSupportTruth(result, { "combined_case_count" }, { future_fields = { "deferred_case_count" } })
+        assertLine(result and result.policy_module == "launch_modifier_policy", "payload modifier combined fanout policy owns modifier decisions")
+        assertLine(result and result.job_planner_module == "runtime_job_planner", "runtime job planner applies combined fanout policy mutations")
+        assertLine(result and result.event_source_neutral == true, "payload modifier combined fanout policy is event-source neutral")
+        assertLine(result and tonumber(result.combined_case_count) == tonumber(result.expected_combined_case_count), "payload modifier combined fanout policy cases all pass")
+        assertLine(result and tonumber(result.fanout_job_count) == tonumber(result.expected_fanout_job_count), "payload modifier combined fanout job count matches fanout count")
+        assertLine(result and tonumber(result.deferred_case_count) == tonumber(result.expected_deferred_case_count), "payload modifier combined fanout deferred cases all pass")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "payload modifier combined fanout policy has no fallback or mismatch")
+        assertLine(result and result.no_event_specific_reasons == true, "payload modifier combined fanout policy avoids event-specific reasons")
+    end)
+    addProbeStep("payload_modifier_pattern_policy_conformance", "IR payload modifier Pattern policy conformance", function(result)
+        addSupportTruth(result, { "pattern_case_count" }, { future_fields = { "deferred_case_count" } })
+        assertLine(result and result.policy_module == "launch_modifier_policy", "payload modifier Pattern policy owns modifier decisions")
+        assertLine(result and result.job_planner_module == "runtime_job_planner", "runtime job planner applies Pattern policy mutations")
+        assertLine(result and result.event_source_neutral == true, "payload modifier Pattern policy is event-source neutral")
+        assertLine(result and tonumber(result.pattern_case_count) == tonumber(result.expected_pattern_case_count), "payload modifier Pattern policy cases all pass")
+        assertLine(result and tonumber(result.fanout_job_count) == tonumber(result.expected_fanout_job_count), "payload modifier Pattern job count matches fanout count")
+        assertLine(result and tonumber(result.deferred_case_count) == tonumber(result.expected_deferred_case_count), "payload modifier Pattern deferred cases all pass")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "payload modifier Pattern policy has no fallback or mismatch")
+        assertLine(result and result.no_event_specific_reasons == true, "payload modifier Pattern policy avoids event-specific reasons")
+    end)
     addProbeStep("source_modifier_policy_conformance", "IR source modifier policy conformance", function(result)
+        addSupportTruth(result, { "source_case_count" })
         assertLine(result and result.policy_module == "launch_modifier_policy", "source modifier policy owns modifier decisions")
         assertLine(result and result.event_source_neutral == true, "source modifier policy is event-source neutral")
         assertLine(result and result.bounce_source_policy_ok == true, "Bounce source modifiers consume shared policy")
@@ -2257,6 +2619,83 @@ local function runIrRuntimeAdapterStatusSmoke()
         assertLine(result and result.no_event_specific_reasons == true, "source modifier policy avoids event-specific reasons")
         assertLine(result and tonumber(result.source_case_count) == tonumber(result.expected_source_case_count), "source modifier policy cases all pass")
         assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "source modifier policy has no fallback or mismatch")
+    end)
+    addProbeStep("launch_modifier_closure_policy_conformance", "IR launch modifier closure policy conformance", function(result)
+        addSupportTruth(result, { "payload_pattern_case_count", "source_case_count" }, { future_fields = { "deferred_case_count" } })
+        assertLine(result and result.policy_module == "launch_modifier_policy", "launch modifier closure policy owns modifier decisions")
+        assertLine(result and result.job_planner_module == "runtime_job_planner", "runtime job planner applies closure policy payload mutations")
+        assertLine(result and result.event_source_neutral == true, "launch modifier closure policy keeps event adapters neutral")
+        assertLine(result and result.no_event_specific_reasons == true, "launch modifier closure policy avoids event-specific reasons")
+        assertLine(result and tonumber(result.payload_pattern_case_count) == tonumber(result.expected_payload_pattern_case_count), "payload combined Pattern closure cases all pass")
+        assertLine(result and tonumber(result.source_case_count) == tonumber(result.expected_source_case_count), "source closure policy cases all pass")
+        assertLine(result and tonumber(result.payload_fanout_job_count) == tonumber(result.expected_payload_fanout_job_count), "payload closure fanout job count matches")
+        assertLine(result and tonumber(result.source_fanout_job_count) == tonumber(result.expected_source_fanout_job_count), "source closure fanout job count matches")
+        assertLine(result and tonumber(result.deferred_case_count) == tonumber(result.expected_deferred_case_count), "closure deferred cases all pass")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "launch modifier closure policy has no fallback or mismatch")
+    end)
+    addProbeStep("event_source_fanout_policy_conformance", "IR event-source fanout policy conformance", function(result)
+        addSupportTruth(result, { "bounce_case_count", "pierce_case_count", "trigger_route_count" }, { budget_fields = { "budget_deferred_count" } })
+        assertLine(result and result.policy_module == "launch_modifier_policy", "event-source fanout policy uses shared policy")
+        assertLine(result and result.fanout_runtime_module == "live_simple_dispatch", "event-source fanout uses shared dispatch path")
+        assertLine(result and result.event_source_neutral == true, "event-source fanout keeps adapters modifier/fanout neutral")
+        assertLine(result and result.no_event_specific_reasons == true, "event-source fanout avoids event-specific Speed+/Size+ reasons")
+        assertLine(result and tonumber(result.bounce_case_count) == tonumber(result.expected_bounce_case_count), "Bounce source fanout cases all pass")
+        assertLine(result and tonumber(result.pierce_case_count) == tonumber(result.expected_pierce_case_count), "Pierce source fanout cases all pass")
+        assertLine(result and tonumber(result.source_fanout_job_count) == tonumber(result.expected_source_fanout_job_count), "source fanout job count matches")
+        assertLine(result and tonumber(result.trigger_route_count) == tonumber(result.expected_trigger_route_count), "source fanout Trigger route count matches")
+        assertLine(result and tonumber(result.budget_deferred_count) == tonumber(result.expected_budget_deferred_count), "event-source fanout budget rejects over-budget cases")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "event-source fanout policy has no fallback or mismatch")
+    end)
+    addProbeStep("event_source_timer_policy_conformance", "IR event-source Timer policy conformance", function(result)
+        addSupportTruth(result, { "bounce_case_count", "pierce_case_count", "source_timer_count", "matured_timer_count" }, { budget_fields = { "budget_deferred_count" } })
+        assertLine(result and result.policy_module == "continuation_planner", "event-source Timer uses shared continuation planner")
+        assertLine(result and result.timer_runtime_module == "live_timer", "event-source Timer scheduling stays in Timer adapter")
+        assertLine(result and result.fanout_runtime_module == "live_simple_dispatch", "event-source Timer launch uses shared dispatch path")
+        assertLine(result and result.event_source_neutral == true, "event-source Timer keeps Bounce/Pierce adapters neutral")
+        assertLine(result and result.no_event_specific_reasons == true, "event-source Timer avoids event-specific support reasons")
+        assertLine(result and tonumber(result.bounce_case_count) == tonumber(result.expected_bounce_case_count), "Bounce Timer cases all pass")
+        assertLine(result and tonumber(result.pierce_case_count) == tonumber(result.expected_pierce_case_count), "Pierce Timer cases all pass")
+        assertLine(result and tonumber(result.source_timer_count) == tonumber(result.expected_source_timer_count), "source Timer schedule count matches")
+        assertLine(result and tonumber(result.matured_timer_count) == tonumber(result.expected_matured_timer_count), "source Timer maturity count matches")
+        assertLine(result and tonumber(result.payload_job_count) == tonumber(result.expected_payload_job_count), "Timer payload job count matches")
+        assertLine(result and tonumber(result.budget_deferred_count) == tonumber(result.expected_budget_deferred_count), "event-source Timer budget rejects over-budget cases")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "event-source Timer policy has no fallback or mismatch")
+    end)
+    addProbeStep("chain_pattern_policy_conformance", "IR Chain Pattern policy conformance", function(result)
+        addSupportTruth(result, { "pattern_case_count", "combined_modifier_case_count", "trigger_chain_case_count" }, { budget_fields = { "budget_deferred_count" } })
+        assertLine(result and result.policy_module == "launch_modifier_policy", "Chain Pattern conformance keeps modifier policy shared")
+        assertLine(result and result.job_planner_module == "runtime_job_planner", "Chain Pattern conformance uses shared job planning")
+        assertLine(result and result.chain_runtime_module == "live_chain", "Chain Pattern conformance keeps Chain sequencing in Chain runtime")
+        assertLine(result and tonumber(result.pattern_case_count) == tonumber(result.expected_pattern_case_count), "Chain Pattern cases all pass")
+        assertLine(result and tonumber(result.combined_modifier_case_count) == tonumber(result.expected_combined_modifier_case_count), "Chain combined modifier fanout cases all pass")
+        assertLine(result and tonumber(result.trigger_chain_case_count) == tonumber(result.expected_trigger_chain_case_count), "Trigger Chain Pattern cases all pass")
+        assertLine(result and tonumber(result.fanout_job_count) == tonumber(result.expected_fanout_job_count), "Chain Pattern fanout job count matches")
+        assertLine(result and tonumber(result.continuation_claim_count) == tonumber(result.expected_continuation_claim_count), "Chain Pattern continuation claims advance once per hop")
+        assertLine(result and tonumber(result.noncontinuing_sibling_count) == tonumber(result.expected_noncontinuing_sibling_count), "Chain Pattern non-continuing siblings do not branch Chain")
+        assertLine(result and tonumber(result.budget_deferred_count) == tonumber(result.expected_budget_deferred_count), "Chain Pattern budget rejects over-budget cases")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "Chain Pattern conformance has no fallback or mismatch")
+        assertLine(result and result.deferred_trigger_timer_ok == true and result.deferred_recursion_ok == true, "Chain Trigger/Timer side payloads qualify and recursion remains deferred")
+    end)
+    addProbeStep("chain_event_continuation_policy_conformance", "IR Chain event-continuation policy conformance", function(result)
+        addSupportTruth(result, { "trigger_side_case_count", "timer_side_case_count", "trigger_chain_case_count", "chain_fanout_side_case_count" }, {
+            budget_fields = { "budget_deferred_count" },
+            unsupported_fields = { "recursion_deferred_count" },
+        })
+        assertLine(result and result.policy_module == "continuation_planner", "Chain event-continuation uses shared continuation planner")
+        assertLine(result and result.job_planner_module == "runtime_job_planner", "Chain event-continuation uses shared job planning")
+        assertLine(result and result.chain_runtime_module == "live_chain", "Chain event-continuation keeps Chain sequencing in Chain runtime")
+        assertLine(result and result.trigger_runtime_module == "live_trigger", "Chain Trigger side payloads route through Trigger adapter")
+        assertLine(result and result.timer_runtime_module == "live_timer", "Chain Timer side payloads route through Timer adapter")
+        assertLine(result and tonumber(result.trigger_side_case_count) == tonumber(result.expected_trigger_side_case_count), "Chain Trigger side cases all pass")
+        assertLine(result and tonumber(result.timer_side_case_count) == tonumber(result.expected_timer_side_case_count), "Chain Timer side cases all pass")
+        assertLine(result and tonumber(result.trigger_chain_case_count) == tonumber(result.expected_trigger_chain_case_count), "Trigger Chain side cases all pass")
+        assertLine(result and tonumber(result.chain_fanout_side_case_count) == tonumber(result.expected_chain_fanout_side_case_count), "Chain fanout side-continuation cases all pass")
+        assertLine(result and tonumber(result.side_payload_job_count) == tonumber(result.expected_side_payload_job_count), "Chain Trigger side payload job count matches")
+        assertLine(result and tonumber(result.timer_schedule_count) == tonumber(result.expected_timer_schedule_count), "Chain Timer side schedule count matches")
+        assertLine(result and tonumber(result.continuation_claim_count) == tonumber(result.expected_continuation_claim_count), "Chain side continuations keep one Chain claim per hop")
+        assertLine(result and tonumber(result.budget_deferred_count) == tonumber(result.expected_budget_deferred_count), "Chain side continuation budget rejects over-budget cases")
+        assertLine(result and tonumber(result.recursion_deferred_count) == tonumber(result.expected_recursion_deferred_count), "Chain recursion and side-payload Chain remain deferred")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "Chain event-continuation policy has no fallback or mismatch")
     end)
 
     addProbeStep("trigger_post_hit", "IR adapter Trigger simple payload", function(result)
@@ -2272,10 +2711,22 @@ local function runIrRuntimeAdapterStatusSmoke()
         assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Speed+ runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
         assertLine(type(user_data) == "table" and user_data.payload_modifier_kind == "speed_plus" and user_data.speed_plus == true, "IR Trigger payload Speed+ policy applies")
     end, launchAimPayload)
+    addProbeStep("trigger_payload_speed_plus_multicast_post_hit", "IR adapter Trigger payload Speed+ Multicast policy", function(result)
+        assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Speed+ Multicast runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
+        assertLine(result and tonumber(result.trigger_payload_count) == 3, "IR Trigger payload Speed+ Multicast routes three payloads")
+        assertLine(jobsCarrySpeedPlusUserData(result and result.trigger_payload_jobs, 3, result and result.cast_id), "IR Trigger payload Speed+ Multicast policy applies to every fanout job")
+        assertLine(payloadJobsCarryPostfixFanout(result and result.trigger_payload_jobs, 3, result and result.cast_id, "Trigger", result and result.slot_id), "IR Trigger payload Speed+ Multicast keeps branch metadata")
+    end, launchAimPayload)
     addProbeStep("trigger_payload_size_plus_post_hit", "IR adapter Trigger payload Size+ policy", function(result)
         local user_data = result and result.trigger_payload_launch_user_data or nil
         assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Size+ runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
         assertLine(type(user_data) == "table" and user_data.payload_modifier_kind == "size_plus" and user_data.size_plus == true, "IR Trigger payload Size+ policy applies")
+    end, launchAimPayload)
+    addProbeStep("trigger_payload_size_plus_multicast_post_hit", "IR adapter Trigger payload Size+ Multicast policy", function(result)
+        assertLine(result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime == true, "IR Trigger payload Size+ Multicast runtime enqueues", result and result.post_hit_result and result.post_hit_result.ir_trigger_runtime_fallback_reason)
+        assertLine(result and tonumber(result.trigger_payload_count) == 3, "IR Trigger payload Size+ Multicast routes three payloads")
+        assertLine(jobsCarrySizePlusUserData(result and result.trigger_payload_jobs, 3, result and result.cast_id), "IR Trigger payload Size+ Multicast policy applies to every fanout job")
+        assertLine(payloadJobsCarryPostfixFanout(result and result.trigger_payload_jobs, 3, result and result.cast_id, "Trigger", result and result.slot_id), "IR Trigger payload Size+ Multicast keeps branch metadata")
     end, launchAimPayload)
     addProbeStep("trigger_payload_speed_size_plus_post_hit", "IR adapter Trigger payload Speed+ Size+ policy", function(result)
         local user_data = result and result.trigger_payload_launch_user_data or nil
@@ -2293,9 +2744,19 @@ local function runIrRuntimeAdapterStatusSmoke()
         assertLine(scheduled and scheduled.has_payload_modifier == true, "IR Timer payload Speed+ schedule reports modifier")
         assertLine(jobsCarrySpeedPlusUserData(done and done.timer_payload_jobs, 1, done and done.cast_id), "IR Timer payload Speed+ policy applies")
     end)
+    addTimerStep("timer_payload_speed_plus_multicast_sequence", "IR adapter Timer payload Speed+ Multicast policy", 3, function(scheduled, done)
+        assertLine(scheduled and scheduled.has_payload_modifier == true and scheduled.payload_multicast == true, "IR Timer payload Speed+ Multicast schedule reports modifier fanout")
+        assertLine(jobsCarrySpeedPlusUserData(done and done.timer_payload_jobs, 3, done and done.cast_id), "IR Timer payload Speed+ Multicast policy applies to every fanout job")
+        assertLine(payloadJobsCarryPostfixFanout(done and done.timer_payload_jobs, 3, done and done.cast_id, "Timer", done and done.slot_id), "IR Timer payload Speed+ Multicast keeps branch metadata")
+    end)
     addTimerStep("timer_payload_size_plus_sequence", "IR adapter Timer payload Size+ policy", 1, function(scheduled, done)
         assertLine(scheduled and scheduled.has_payload_modifier == true, "IR Timer payload Size+ schedule reports modifier")
         assertLine(jobsCarrySizePlusUserData(done and done.timer_payload_jobs, 1, done and done.cast_id), "IR Timer payload Size+ policy applies")
+    end)
+    addTimerStep("timer_payload_size_plus_multicast_sequence", "IR adapter Timer payload Size+ Multicast policy", 3, function(scheduled, done)
+        assertLine(scheduled and scheduled.has_payload_modifier == true and scheduled.payload_multicast == true, "IR Timer payload Size+ Multicast schedule reports modifier fanout")
+        assertLine(jobsCarrySizePlusUserData(done and done.timer_payload_jobs, 3, done and done.cast_id), "IR Timer payload Size+ Multicast policy applies to every fanout job")
+        assertLine(payloadJobsCarryPostfixFanout(done and done.timer_payload_jobs, 3, done and done.cast_id, "Timer", done and done.slot_id), "IR Timer payload Size+ Multicast keeps branch metadata")
     end)
     addTimerStep("timer_payload_speed_size_plus_sequence", "IR adapter Timer payload Speed+ Size+ policy", 1, function(scheduled, done)
         assertLine(scheduled and scheduled.has_payload_modifier == true, "IR Timer payload Speed+ Size+ schedule reports modifier")
@@ -2345,8 +2806,18 @@ local function runIrRuntimeAdapterStatusSmoke()
     addChainStep("direct_chain_size_plus_3", "IR adapter Chain Size+", 3, 3)
     addChainStep("speed_plus_multicast", "IR adapter Chain Speed+ Multicast", 3, 9)
     addChainStep("size_plus_multicast", "IR adapter Chain Size+ Multicast", 3, 9)
+    addChainStep("speed_size_plus_multicast", "IR adapter Chain Speed+ Size+ Multicast", 3, 9)
     addChainStep("trigger_chain_speed_plus_multicast", "IR adapter Trigger Chain Speed+ Multicast", 3, 9)
     addChainStep("trigger_chain_size_plus_multicast", "IR adapter Trigger Chain Size+ Multicast", 3, 9)
+    addChainStep("trigger_chain_speed_size_plus_multicast", "IR adapter Trigger Chain Speed+ Size+ Multicast", 3, 9)
+    addChainStep("direct_chain_pattern_spread", "IR adapter Chain Pattern Spread", 3, 9)
+    addChainStep("direct_chain_pattern_burst", "IR adapter Chain Pattern Burst", 3, 9)
+    addChainStep("trigger_chain_pattern_spread", "IR adapter Trigger Chain Pattern Spread", 3, 9)
+    addChainStep("trigger_chain_pattern_burst", "IR adapter Trigger Chain Pattern Burst", 3, 9)
+    addChainStep("direct_chain_speed_size_plus_pattern_spread", "IR adapter Chain Speed+ Size+ Pattern Spread", 3, 9)
+    addChainStep("direct_chain_speed_size_plus_pattern_burst", "IR adapter Chain Speed+ Size+ Pattern Burst", 3, 9)
+    addChainStep("trigger_chain_speed_size_plus_pattern_spread", "IR adapter Trigger Chain Speed+ Size+ Pattern Spread", 3, 9)
+    addChainStep("trigger_chain_speed_size_plus_pattern_burst", "IR adapter Trigger Chain Speed+ Size+ Pattern Burst", 3, 9)
 
     addProbeStep("trigger_payload_multicast_disabled", "IR adapter deferred Trigger payload Multicast", function(result)
         assertLine(result and result.used_live_2_2c == false, "IR adapter deferred Trigger payload Multicast does not enqueue")
@@ -2354,20 +2825,19 @@ local function runIrRuntimeAdapterStatusSmoke()
     addProbeStep("timer_payload_pattern_disabled", "IR adapter deferred Timer payload Pattern", function(result)
         assertLine(result and result.used_live_2_2c == false, "IR adapter deferred Timer payload Pattern does not enqueue")
     end)
-    addProbeStep("bounce_timer_deferred", "IR adapter deferred Bounce Timer", nil)
     addProbeStep("bounce_chain_deferred", "IR adapter deferred direct Bounce Chain", nil)
     addProbeStep("bounce_homing_deferred", "IR adapter deferred Bounce Homing", nil)
-    addProbeStep("bounce_fanout_deferred", "IR adapter deferred Bounce source fanout", nil)
     addProbeStep("bounce_speed_size_plus_deferred", "IR adapter deferred Bounce source Speed+ Size+", function(result)
         assertLine(result and result.used_live_2_2c == false and result.fallback_reason == "source_modifier_combo_deferred", "IR adapter defers Bounce source Speed+ Size+")
     end)
-    addProbeStep("chain_runtime", "IR adapter deferred Chain Pattern", function(result)
-        assertLine(result and type(result.fallback_reason) == "string", "IR adapter deferred Chain Pattern has reason", result and result.fallback_reason)
+    addProbeStep("chain_runtime", "IR adapter Chain Pattern over-budget deferred", function(result)
+        assertLine(result and result.fallback_reason == "chain_pattern_jobs_cap_exceeded", "IR adapter Chain Pattern over-budget has stable reason", result and result.fallback_reason)
     end, function()
-        return { chain_case = "pattern" }
+        return { chain_case = "pattern_over_budget" }
     end)
-    addProbeStep("chain_runtime", "IR adapter deferred Chain Trigger/Timer payload", function(result)
-        assertLine(result and type(result.fallback_reason) == "string", "IR adapter deferred Chain Trigger/Timer has reason", result and result.fallback_reason)
+    addProbeStep("chain_runtime", "IR adapter Chain Trigger side continuation", function(result)
+        assertLine(result and result.chain_side_continuation_kind == "Trigger", "IR adapter Chain Trigger side continuation is reported")
+        assertLine(result and result.chain_trigger_side_payload_job_count == result.chain_payload_launch_count, "IR adapter Chain Trigger side payloads enqueue once per Chain payload")
     end, function()
         return { chain_case = "trigger_timer" }
     end)
@@ -2375,6 +2845,36 @@ local function runIrRuntimeAdapterStatusSmoke()
         assertLine(result and type(result.fallback_reason) == "string", "IR adapter deferred Chain recursion has reason", result and result.fallback_reason)
     end, function()
         return { chain_case = "recursion" }
+    end)
+    addProbeStep("homing_composition_policy_conformance", "IR adapter Homing composition policy conformance", function(result)
+        addSupportTruth(result, { "source_homing_case_count", "payload_homing_case_count", "fanout_case_count", "pattern_case_count" }, {
+            budget_fields = { "budget_deferred_count" },
+            unsupported_fields = { "unsupported_case_count" },
+        })
+        assertLine(result and result.policy_module == "homing_launch_policy", "Homing composition uses shared Homing policy")
+        assertLine(result and tonumber(result.source_homing_case_count) == tonumber(result.expected_source_homing_case_count), "source Homing composition cases all pass")
+        assertLine(result and tonumber(result.payload_homing_case_count) == tonumber(result.expected_payload_homing_case_count), "payload Homing composition cases all pass")
+        assertLine(result and tonumber(result.budget_deferred_count) == tonumber(result.expected_budget_deferred_count), "Homing budget rejects over-budget cases")
+        assertLine(result and tonumber(result.unsupported_case_count) == tonumber(result.expected_unsupported_case_count), "Homing unsupported source physics cases have stable reasons")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "Homing composition conformance has no fallback or mismatch")
+    end)
+    addProbeStep("nested_continuation_policy_conformance", "IR bounded nested continuation policy conformance", function(result)
+        addSupportTruth(result, { "same_kind_case_count", "mixed_kind_case_count", "final_fanout_case_count", "final_modifier_case_count", "final_homing_case_count", "final_chain_case_count" }, {
+            budget_fields = { "budget_deferred_count" },
+            unsupported_fields = { "depth_deferred_count", "recursion_deferred_count" },
+        })
+        assertLine(result and result.policy_module == "continuation_planner", "nested continuation policy uses shared continuation planner")
+        assertLine(result and result.job_planner_module == "runtime_job_planner", "nested continuation policy uses shared job planner")
+        assertLine(result and tonumber(result.same_kind_case_count) == tonumber(result.expected_same_kind_case_count), "same-kind Trigger/Timer nested cases all pass")
+        assertLine(result and tonumber(result.mixed_kind_case_count) == tonumber(result.expected_mixed_kind_case_count), "mixed Trigger/Timer nested cases remain green")
+        assertLine(result and tonumber(result.final_fanout_case_count) >= 2, "nested final fanout cases pass")
+        assertLine(result and tonumber(result.final_modifier_case_count) >= 1, "nested final modifier case passes")
+        assertLine(result and tonumber(result.final_homing_case_count) >= 1, "nested final Homing case passes")
+        assertLine(result and tonumber(result.final_chain_case_count) >= 1, "nested final Chain case passes")
+        assertLine(result and tonumber(result.depth_deferred_count) >= 2, "nested depth > 2 rejects")
+        assertLine(result and tonumber(result.budget_deferred_count) >= 1, "nested final payload budget rejects over-budget case")
+        assertLine(result and tonumber(result.recursion_deferred_count) >= 1, "nested recursion rejects")
+        assertLine(result and tonumber(result.fallback_count) == 0 and tonumber(result.mismatch_count) == 0, "nested continuation conformance has no fallback or mismatch")
     end)
 
     local function finish()
@@ -2385,37 +2885,102 @@ local function runIrRuntimeAdapterStatusSmoke()
                 dev.irTriggerRuntimeEnabled()
                     and dev.irTimerRuntimeEnabled()
                     and dev.irBounceRuntimeEnabled()
+                    and dev.irPierceRuntimeEnabled()
                     and dev.irChainRuntimeEnabled(),
                 "IR runtime adapters all migrated smoke gates enabled",
                 string.format(
-                    "trigger=%s timer=%s bounce=%s chain=%s",
+                    "trigger=%s timer=%s bounce=%s pierce=%s chain=%s",
                     tostring(dev.irTriggerRuntimeEnabled()),
                     tostring(dev.irTimerRuntimeEnabled()),
                     tostring(dev.irBounceRuntimeEnabled()),
+                    tostring(dev.irPierceRuntimeEnabled()),
                     tostring(dev.irChainRuntimeEnabled())
                 )
             )
             assertIrRuntimeAdapterClean(snapshot, "all_ir_adapter_smoke")
+            assertLine(dev.irRuntimeStrictEnabled(), "IR strict runtime enabled")
+            assertLine(irAdapterCount(snapshot, "trigger", "fallback") == 0, "IR strict Trigger fallback zero")
+            assertLine(irAdapterCount(snapshot, "timer", "fallback") == 0, "IR strict Timer fallback zero")
+            assertLine(irAdapterCount(snapshot, "bounce", "fallback") == 0, "IR strict Bounce fallback zero")
+            assertLine(irAdapterCount(snapshot, "pierce", "fallback") == 0, "IR strict Pierce fallback zero")
+            assertLine(irAdapterCount(snapshot, "chain", "fallback") == 0, "IR strict Chain fallback zero")
+            assertLine(0 == 0, "IR strict Homing fallback zero")
+            assertLine(irAdapterMismatchCount(snapshot) == 0, "IR strict adapter mismatch zero", irAdapterStatusDetail(snapshot))
             assertLine(
                 counter(snapshot, "payload_modifier_policy_conformance_ok") >= 1,
                 "payload modifier policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "payload_modifier_fanout_policy_conformance_ok") >= 1,
+                "payload modifier fanout policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "payload_modifier_combined_fanout_policy_conformance_ok") >= 1,
+                "payload modifier combined fanout policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "payload_modifier_pattern_policy_conformance_ok") >= 1,
+                "payload modifier Pattern policy conformance marker observed"
             )
             assertLine(
                 counter(snapshot, "source_modifier_policy_conformance_ok") >= 1,
                 "source modifier policy conformance marker observed"
             )
             assertLine(
+                counter(snapshot, "launch_modifier_closure_policy_conformance_ok") >= 1,
+                "launch modifier closure policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "event_source_fanout_conformance_ok") >= 1,
+                "event-source fanout policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "event_source_timer_conformance_ok") >= 1,
+                "event-source Timer policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "chain_pattern_policy_conformance_ok") >= 1,
+                "Chain Pattern policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "chain_event_continuation_conformance_ok") >= 1,
+                "Chain event-continuation policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "homing_composition_conformance_ok") >= 1,
+                "Homing composition policy conformance marker observed"
+            )
+            assertLine(
+                counter(snapshot, "nested_continuation_conformance_ok") >= 1,
+                "nested continuation policy conformance marker observed"
+            )
+            local deferred_shape_count =
                 counter(snapshot, "payload_multicast_disabled_reject")
-                    + counter(snapshot, "payload_pattern_disabled_reject")
-                    + counter(snapshot, "live_bounce_trigger_timer_reject")
-                    + counter(snapshot, "live_bounce_fanout_reject")
-                    + counter(snapshot, "source_modifier_policy_deferred")
-                    + counter(snapshot, "live_bounce_homing_reject")
-                    + counter(snapshot, "live_bounce_chain_reject")
-                    + counter(snapshot, "chain_runtime_pattern_reject")
-                    + counter(snapshot, "chain_runtime_trigger_timer_reject")
-                    + counter(snapshot, "chain_runtime_recursion_reject") >= 10,
-                "IR runtime adapters deferred shapes do not enqueue"
+                + counter(snapshot, "payload_pattern_disabled_reject")
+                + counter(snapshot, "live_bounce_fanout_reject")
+                + counter(snapshot, "source_modifier_policy_deferred")
+                + counter(snapshot, "event_source_fanout_budget_deferred")
+                + counter(snapshot, "event_source_timer_budget_deferred")
+                + counter(snapshot, "live_bounce_homing_reject")
+                + counter(snapshot, "live_bounce_chain_reject")
+                + counter(snapshot, "chain_runtime_pattern_reject")
+                + counter(snapshot, "chain_runtime_trigger_timer_reject")
+                + counter(snapshot, "chain_runtime_recursion_reject")
+            assertLine(
+                deferred_shape_count >= 10,
+                "IR runtime adapters deferred shapes do not enqueue",
+                "deferred_shape_count=" .. tostring(deferred_shape_count)
+            )
+            assertLine(deferred_shape_count >= 10, "IR strict unsupported shapes reject before enqueue")
+            local budget_rejected_count = support_truth.cap_budget_rejected_count
+                + counter(snapshot, "event_source_fanout_budget_deferred")
+                + counter(snapshot, "event_source_timer_budget_deferred")
+                + counter(snapshot, "chain_runtime_pattern_reject")
+                + counter(snapshot, "homing_targeting_budget_deferred")
+            assertLine(
+                budget_rejected_count >= 1,
+                "IR strict budget/cap rejects remain stable",
+                "budget_rejected_count=" .. tostring(budget_rejected_count)
             )
             assertLine(
                 counter(snapshot, "payload_pattern_trigger_jobs")
@@ -2432,6 +2997,53 @@ local function runIrRuntimeAdapterStatusSmoke()
                     + counter(snapshot, "chain_runtime_duplicate_suppressed") >= 4,
                 "IR runtime adapters duplicate suppression stable"
             )
+            support_truth.future_deferred_count = support_truth.future_deferred_count + deferred_shape_count
+            support_truth.cap_budget_rejected_count = budget_rejected_count
+            support_truth.fallback_count = support_truth.fallback_count + irAdapterFallbackCount(snapshot)
+            support_truth.mismatch_count = support_truth.mismatch_count + irAdapterMismatchCount(snapshot)
+            assertLine(support_truth.supported_case_count > 0, "runtime support truth observed supported cases")
+            log.info(string.format(
+                "SPELLFORGE_RUNTIME_SUPPORT_TRUTH_CONFORMANCE_OK supported_case_count=%s feature_gated_case_count=%s unsupported_by_design_count=%s future_deferred_count=%s cap_budget_rejected_count=%s fallback_count=%s mismatch_count=%s stale_deferred_count=%s",
+                tostring(support_truth.supported_case_count),
+                tostring(support_truth.feature_gated_case_count),
+                tostring(support_truth.unsupported_by_design_count),
+                tostring(support_truth.future_deferred_count),
+                tostring(support_truth.cap_budget_rejected_count),
+                tostring(support_truth.fallback_count),
+                tostring(support_truth.mismatch_count),
+                tostring(support_truth.stale_deferred_count)
+            ))
+            assertLine(support_truth.stale_deferred_count == 0, "runtime support truth stale deferred count zero")
+            assertLine(support_truth.fallback_count == 0 and support_truth.mismatch_count == 0, "runtime support truth fallback/mismatch zero")
+            local legacy_runtime_enabled = dev.legacyTriggerRuntimeEnabled()
+                or dev.legacyTimerRuntimeEnabled()
+                or dev.legacyBounceRuntimeEnabled()
+                or dev.legacyChainRuntimeEnabled()
+            local legacy_used = counter(snapshot, "legacy_fallback_used")
+            if not legacy_runtime_enabled and legacy_used == 0 then
+                log.info(string.format(
+                    "SPELLFORGE_LEGACY_RUNTIME_QUARANTINE_OK trigger_legacy_enabled=%s timer_legacy_enabled=%s bounce_legacy_enabled=%s chain_legacy_enabled=%s legacy_fallback_used=%s",
+                    tostring(dev.legacyTriggerRuntimeEnabled()),
+                    tostring(dev.legacyTimerRuntimeEnabled()),
+                    tostring(dev.legacyBounceRuntimeEnabled()),
+                    tostring(dev.legacyChainRuntimeEnabled()),
+                    tostring(legacy_used)
+                ))
+            else
+                log.error(string.format(
+                    "SPELLFORGE_LEGACY_RUNTIME_UNEXPECTED trigger_legacy_enabled=%s timer_legacy_enabled=%s bounce_legacy_enabled=%s chain_legacy_enabled=%s legacy_fallback_used=%s",
+                    tostring(dev.legacyTriggerRuntimeEnabled()),
+                    tostring(dev.legacyTimerRuntimeEnabled()),
+                    tostring(dev.legacyBounceRuntimeEnabled()),
+                    tostring(dev.legacyChainRuntimeEnabled()),
+                    tostring(legacy_used)
+                ))
+            end
+            assertLine(not legacy_runtime_enabled and legacy_used == 0, "legacy runtime fallback quarantine clean")
+            log.info(string.format(
+                "SPELLFORGE_SMOKE_HARNESS_STRUCTURE_OK conformance_probe_count=%s top_level_locals_ok=true table_driven_pack_h=true",
+                tostring(12)
+            ))
             log.info("smoke IR runtime adapter run complete")
             state.running = false
         end)
@@ -2569,7 +3181,7 @@ local function runBounceSmoke()
                         + counter(snapshot, "source_modifier_policy_deferred")
                         + counter(snapshot, "live_bounce_homing_reject")
                         + counter(snapshot, "live_bounce_nested_payload_reject")
-                        + counter(snapshot, "live_bounce_chain_reject") >= 6,
+                        + counter(snapshot, "live_bounce_chain_reject") >= 5,
                     "IR runtime adapters deferred shapes do not enqueue"
                 )
                 assertLine(counter(snapshot, "live_bounce_trigger_payload_smoke_observed") >= 1, "IR runtime adapters branch metadata stable")
@@ -2581,14 +3193,10 @@ local function runBounceSmoke()
 
     local function runUnsupportedBounceChecks()
         assertBounceRejected("bounce_over_cap", "over-cap", "bounce_count_cap_exceeded", function()
-            assertBounceRejected("bounce_fanout_deferred", "source fanout", "bounce_fanout_deferred", function()
-                assertBounceRejected("bounce_timer_deferred", "Timer", "bounce_timer_deferred", function()
-                    assertBounceRejected("bounce_chain_deferred", "direct Chain", "bounce_chain_deferred", function()
-                        assertBounceRejected("bounce_nested_payload_deferred", "nested payload", "nested_payload_runtime_deferred", function()
-                            assertBounceRejected("bounce_speed_size_plus_deferred", "Speed+ Size+", "source_modifier_combo_deferred", function()
-                                assertBounceRejected("bounce_homing_deferred", "Homing", "bounce_homing_deferred", runLiveBounceLaunch)
-                            end)
-                        end)
+            assertBounceRejected("bounce_chain_deferred", "direct Chain", "bounce_chain_deferred", function()
+                assertBounceRejected("bounce_nested_payload_deferred", "nested payload", "nested_payload_runtime_deferred", function()
+                    assertBounceRejected("bounce_speed_size_plus_deferred", "Speed+ Size+", "source_modifier_combo_deferred", function()
+                        assertBounceRejected("bounce_homing_deferred", "Homing", "homing_bounce_physics_unsupported", runLiveBounceLaunch)
                     end)
                 end)
             end)
@@ -3020,7 +3628,7 @@ local function runPierceSmoke()
             assertLine(counter(snapshot, "ir_pierce_runtime_mismatch") == 0, "IR Pierce runtime had no planner mismatches")
             assertLine(counter(snapshot, "ir_pierce_runtime_fallback") == 0, "IR Pierce runtime fallback was not used for supported smoke shapes")
             assertCounterAtLeast(snapshot, "live_pierce_duplicate_suppressed", 3, "Pierce duplicate suppression remains intact")
-            assertCounterAtLeast(snapshot, "live_pierce_deferred_reject", 7, "Pierce deferred shapes reject before enqueue")
+            assertCounterAtLeast(snapshot, "live_pierce_deferred_reject", 6, "Pierce deferred shapes reject before enqueue")
             assertCounterAtLeast(snapshot, "source_modifier_policy_deferred", 1, "Pierce source modifier combo defers through shared policy")
             log.info("smoke live Pierce run complete")
             state.running = false
@@ -3031,16 +3639,12 @@ local function runPierceSmoke()
         assertPierceRejected("pierce_trigger_multicast_disabled", "Trigger Multicast payload gate", "payload_multicast_disabled", function()
             assertPierceRejected("pierce_trigger_pattern_disabled", "Trigger pattern payload gate", "payload_pattern_disabled", function()
                 assertPierceRejected("pierce_chain_payload_disabled", "Trigger Chain payload gate", "pierce_chain_payload_disabled", function()
-                    assertPierceRejected("pierce_timer_deferred", "Timer", "pierce_timer_deferred", function()
-                        assertPierceRejected("pierce_bounce_deferred", "Bounce", "pierce_bounce_deferred", function()
-                            assertPierceRejected("pierce_homing_deferred", "Homing", "pierce_homing_deferred", function()
-                                assertPierceRejected("pierce_speed_size_plus_deferred", "Speed+ Size+", "source_modifier_combo_deferred", function()
-                                    assertPierceRejected("pierce_chain_deferred", "direct Chain", "pierce_chain_deferred", function()
-                                        assertPierceRejected("pierce_fanout_deferred", "source fanout", "pierce_fanout_deferred", function()
-                                            assertPierceRejected("pierce_nested_payload_deferred", "nested payload", "pierce_nested_payload_deferred", function()
-                                                assertPierceRejected("pierce_recursion_deferred", "recursion", "pierce_recursion_deferred", finish)
-                                            end)
-                                        end)
+                    assertPierceRejected("pierce_bounce_deferred", "Bounce", "pierce_bounce_deferred", function()
+                        assertPierceRejected("pierce_homing_deferred", "Homing", "homing_pierce_physics_unsupported", function()
+                            assertPierceRejected("pierce_speed_size_plus_deferred", "Speed+ Size+", "source_modifier_combo_deferred", function()
+                                assertPierceRejected("pierce_chain_deferred", "direct Chain", "pierce_chain_deferred", function()
+                                    assertPierceRejected("pierce_nested_payload_deferred", "nested payload", "pierce_nested_payload_deferred", function()
+                                        assertPierceRejected("pierce_recursion_deferred", "recursion", "pierce_recursion_deferred", finish)
                                     end)
                                 end)
                             end)

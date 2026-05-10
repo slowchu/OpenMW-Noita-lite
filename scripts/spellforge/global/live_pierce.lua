@@ -134,14 +134,11 @@ function live_pierce.selectV0Plan(plan, opts)
     end
 
     local bounds = plan.bounds or {}
-    if bounds.has_timer then
-        return rejectSelect("pierce_timer_deferred", "live_pierce_deferred_reject")
-    end
     if bounds.has_bounce then
         return rejectSelect("pierce_bounce_deferred", "live_pierce_deferred_reject")
     end
     if bounds.has_homing then
-        return rejectSelect("pierce_homing_deferred", "live_pierce_deferred_reject")
+        return rejectSelect("homing_pierce_physics_unsupported", "live_pierce_deferred_reject")
     end
     if bounds.has_multicast or bounds.has_pattern then
         return rejectSelect("pierce_fanout_deferred", "live_pierce_deferred_reject")
@@ -327,9 +324,9 @@ function live_pierce.decorateSourceJob(job, binding)
     job.branch_scope = branch_scope
     job.branch_id = branch_id
     job.branch_parent_id = branch_parent_id
-    job.branch_kind = "pierce_source"
-    job.branch_index = 1
-    job.branch_count = 1
+    job.branch_kind = binding.branch_kind or "pierce_source"
+    job.branch_index = binding.branch_index or 1
+    job.branch_count = binding.branch_count or 1
     payload.pierce_runtime = true
     payload.pierce_role = "source"
     payload.pierce_id = binding.pierce_id
@@ -354,9 +351,9 @@ function live_pierce.decorateSourceJob(job, binding)
     payload.branch_scope = branch_scope
     payload.branch_id = branch_id
     payload.branch_parent_id = branch_parent_id
-    payload.branch_kind = "pierce_source"
-    payload.branch_index = 1
-    payload.branch_count = 1
+    payload.branch_kind = binding.branch_kind or "pierce_source"
+    payload.branch_index = binding.branch_index or 1
+    payload.branch_count = binding.branch_count or 1
     return job
 end
 

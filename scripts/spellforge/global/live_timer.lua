@@ -50,6 +50,16 @@ local function hasOps(ops)
     return type(ops) == "table" and #ops > 0
 end
 
+local function sourcePrefixAllowed(ops, options)
+    if not hasOps(ops) then
+        return true
+    end
+    if options and options.allow_source_homing == true and #ops == 1 and ops[1] and ops[1].opcode == "Homing" then
+        return true
+    end
+    return false
+end
+
 local function hasPayloadBindings(value)
     return type(value) == "table" and #value > 0
 end
@@ -111,6 +121,10 @@ local function timerDelayFromOp(op)
     return seconds, ticks, capped, nil
 end
 
+function live_timer.delayFromOp(op)
+    return timerDelayFromOp(op)
+end
+
 function live_timer.selectV0Plan(plan, opts)
     local options = opts or {}
     if type(plan) ~= "table" then
@@ -134,7 +148,7 @@ function live_timer.selectV0Plan(plan, opts)
     if type(group) ~= "table" then
         return rejectSelect("missing_group")
     end
-    if hasOps(group.prefix_ops) then
+    if not sourcePrefixAllowed(group.prefix_ops, options) then
         return rejectSelect("source_has_prefix_ops")
     end
     if not postfixIsOnlyTimer(group) then
@@ -175,7 +189,7 @@ function live_timer.selectV0Plan(plan, opts)
     if source_slot.trigger_source_slot_id ~= nil or source_slot.timer_source_slot_id ~= nil then
         return rejectSelect("source_slot_has_payload_source")
     end
-    if hasOps(source_slot.prefix_ops) then
+    if not sourcePrefixAllowed(source_slot.prefix_ops, options) then
         return rejectSelect("source_slot_has_prefix_ops")
     end
     if not postfixIsOnlyTimer(source_slot) then
@@ -290,6 +304,7 @@ function live_timer.selectV0Plan(plan, opts)
         payload_pattern_kind = payload_result.pattern_kind,
         payload_pattern_op = payload_result.pattern_op,
         has_payload_modifier = payload_result.has_payload_modifier == true,
+        has_payload_homing = payload_result.has_payload_homing == true,
         payload_modifier_kinds = payload_result.payload_modifier_kinds,
         payload_multicast_fanout_count = payload_result.fanout_count,
         max_payload_fanout = tonumber(options.max_fanout) or limits.MAX_NESTED_PAYLOAD_FANOUT,
@@ -397,6 +412,7 @@ function live_timer.decorateSourceJob(job, binding)
     if type(job) ~= "table" or type(binding) ~= "table" then
         return
     end
+    job.source_prefix_opcode = binding.source_prefix_opcode or job.source_prefix_opcode
     job.source_postfix_opcode = "Timer"
     job.root_source_slot_id = binding.root_source_slot_id or binding.source_slot_id
     job.current_source_slot_id = binding.current_source_slot_id or binding.source_slot_id
@@ -415,6 +431,7 @@ function live_timer.decorateSourceJob(job, binding)
     job.nested_final_fanout_kind = binding.nested_final_fanout_kind
     job.payload_count = tonumber(binding.payload_count) or 1
     job.payload = job.payload or {}
+    job.payload.source_prefix_opcode = binding.source_prefix_opcode or job.payload.source_prefix_opcode
     job.payload.source_slot_id = binding.source_slot_id
     job.payload.source_helper_engine_id = binding.source_helper_engine_id
     job.payload.source_postfix_opcode = "Timer"
@@ -640,6 +657,26 @@ local function irPlannerOptions(binding, options)
         max_live_launches_per_tick = binding.max_live_launches_per_tick
             or (options and options.max_live_launches_per_tick),
         chaos_budget_profile = binding.chaos_budget_profile or (options and options.chaos_budget_profile),
+        allow_source_homing = options and options.allow_source_homing == true,
+        allow_payload_homing = (binding and binding.has_payload_homing == true)
+            or (options and options.allow_payload_homing == true),
+        allow_homing = options and options.allow_homing == true,
+        force_homing_enabled = options and options.force_homing_enabled,
+        force_homing_disabled = options and options.force_homing_disabled,
+        homing_enabled = (options and options.homing_enabled == true) or dev.liveHomingEnabled() == true,
+        max_homing_fanout_per_cast = options and options.max_homing_fanout_per_cast,
+        max_homing_target_scans_per_cast = options and options.max_homing_target_scans_per_cast,
+        max_soft_homing_registrations_per_cast = options and options.max_soft_homing_registrations_per_cast,
+        homing_target_id = options and options.homing_target_id,
+        homing_target_position = options and options.homing_target_position,
+        homing_actor_scan = options and options.homing_actor_scan,
+        allow_nested_trigger_timer = options and options.allow_nested_trigger_timer == true,
+        allow_nested_final_fanout = options and options.allow_nested_final_fanout == true,
+        allow_nested_payload_modifiers = options and options.allow_nested_payload_modifiers == true,
+        allow_nested_payload_homing = options and options.allow_nested_payload_homing == true,
+        max_live_nested_continuation_depth = options and options.max_live_nested_continuation_depth,
+        max_nested_continuation_jobs_per_cast = options and options.max_nested_continuation_jobs_per_cast,
+        max_nested_final_payload_jobs_per_cast = options and options.max_nested_final_payload_jobs_per_cast,
     }
 end
 
@@ -923,10 +960,13 @@ local function buildIrTimerRuntimePlan(binding, payloads, options, timer_context
     local event = {
         event_kind = "timer_matured",
         source_slot_id = binding.source_slot_id,
+        source_helper_engine_id = binding.source_helper_engine_id,
+        source_prefix_opcode = binding.source_prefix_opcode,
         source_postfix_opcode = "Timer",
         cast_id = binding.cast_id,
         source_job_id = binding.source_job_id,
         parent_job_id = binding.source_job_id,
+        projectile_id = binding.source_projectile_id,
         timer_id = timer_context and timer_context.timer_id,
         timer_delay_ticks = timer_context and timer_context.delay_ticks,
         timer_delay_seconds = timer_context and timer_context.delay_seconds,
@@ -934,6 +974,17 @@ local function buildIrTimerRuntimePlan(binding, payloads, options, timer_context
         timer_due_seconds = timer_context and timer_context.due_seconds,
         branch_scope = branchScope(binding),
         branch_parent_id = branchParentId(binding),
+        chain_runtime = binding.chain_runtime,
+        chain_id = binding.chain_id,
+        chain_hop_index = binding.chain_hop_index,
+        chain_max_hops = binding.chain_max_hops,
+        chain_continuation_group_id = binding.chain_continuation_group_id
+            or (binding.source_user_data and binding.source_user_data.chain_continuation_group_id),
+        bounce_id = binding.bounce_id,
+        bounce_max = binding.bounce_max,
+        bounce_power = binding.bounce_power,
+        pierce_id = binding.pierce_id,
+        pierce_limit = binding.pierce_limit,
     }
     local planned = ir_runtime_adapter.planEvent(binding, plan, event, planner_options)
     if planned.ok ~= true then
@@ -1062,6 +1113,18 @@ local function recordTimerPayloadEnqueued(data, source_result, job_ids, payload_
             runtime_stats.inc("nested_tt_runtime_ok")
         end
     end
+    if data.chain_runtime == true and data.source_prefix_opcode == "Chain" then
+        runtime_stats.inc("chain_timer_side_payload_enqueued", #job_ids)
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_TIMER_SIDE_PAYLOAD_ENQUEUED timer_id=%s recipe_id=%s cast_id=%s chain_id=%s hop_index=%s payload_count=%s",
+            tostring(data.timer_id),
+            tostring(data.recipe_id),
+            tostring(data.cast_id),
+            tostring(data.chain_id),
+            tostring(data.chain_hop_index),
+            tostring(#job_ids)
+        ))
+    end
     if data.payload_multicast == true then
         runtime_stats.inc("payload_multicast_jobs", #job_ids)
         runtime_stats.inc("payload_multicast_timer_jobs", #job_ids)
@@ -1187,6 +1250,7 @@ local function enrichIrTimerPayload(planned_job, data, payload, index, count, pa
     payload_launch.cast_id = data.cast_id
     payload_launch.source_slot_id = data.source_slot_id
     payload_launch.source_helper_engine_id = data.source_helper_engine_id
+    payload_launch.source_prefix_opcode = data.source_prefix_opcode
     payload_launch.source_postfix_opcode = "Timer"
     payload_launch.root_source_slot_id = payload.root_source_slot_id or data.root_source_slot_id
     payload_launch.current_source_slot_id = payload.current_source_slot_id or payload.slot_id
@@ -1208,6 +1272,21 @@ local function enrichIrTimerPayload(planned_job, data, payload, index, count, pa
     payload_launch.timer_due_seconds = data.due_seconds
     payload_launch.timer_delay_semantics = "async_simulation_timer"
     payload_launch.timer_duplicate_key = shortKey(data.duplicate_key)
+    payload_launch.bounce_runtime = data.bounce_runtime
+    payload_launch.bounce_role = data.bounce_role
+    payload_launch.bounce_id = data.bounce_id
+    payload_launch.bounce_max = data.bounce_max
+    payload_launch.bounce_power = data.bounce_power
+    payload_launch.pierce_runtime = data.pierce_runtime
+    payload_launch.pierce_role = data.pierce_role
+    payload_launch.pierce_id = data.pierce_id
+    payload_launch.pierce_limit = data.pierce_limit
+    payload_launch.chain_runtime = data.chain_runtime
+    payload_launch.chain_role = data.chain_role
+    payload_launch.chain_id = data.chain_id
+    payload_launch.chain_hop_index = data.chain_hop_index
+    payload_launch.chain_max_hops = data.chain_max_hops
+    payload_launch.chain_continuation_group_id = data.chain_continuation_group_id
     payload_launch.payload_multicast = data.payload_multicast == true
     payload_launch.payload_pattern = data.payload_pattern == true
     payload_launch.payload_count = count
@@ -1259,6 +1338,7 @@ local function enrichIrTimerPayload(planned_job, data, payload, index, count, pa
     job.timer_id = data.timer_id
     job.source_slot_id = data.source_slot_id
     job.source_helper_engine_id = data.source_helper_engine_id
+    job.source_prefix_opcode = data.source_prefix_opcode
     job.source_postfix_opcode = "Timer"
     job.payload_slot_id = payload.slot_id
     job.timer_source_slot_id = data.source_slot_id
@@ -1271,6 +1351,21 @@ local function enrichIrTimerPayload(planned_job, data, payload, index, count, pa
     job.timer_due_seconds = data.due_seconds
     job.timer_delay_semantics = "async_simulation_timer"
     job.timer_duplicate_key = shortKey(data.duplicate_key)
+    job.bounce_runtime = data.bounce_runtime
+    job.bounce_role = data.bounce_role
+    job.bounce_id = data.bounce_id
+    job.bounce_max = data.bounce_max
+    job.bounce_power = data.bounce_power
+    job.pierce_runtime = data.pierce_runtime
+    job.pierce_role = data.pierce_role
+    job.pierce_id = data.pierce_id
+    job.pierce_limit = data.pierce_limit
+    job.chain_runtime = data.chain_runtime
+    job.chain_role = data.chain_role
+    job.chain_id = data.chain_id
+    job.chain_hop_index = data.chain_hop_index
+    job.chain_max_hops = data.chain_max_hops
+    job.chain_continuation_group_id = data.chain_continuation_group_id
     copyBranchFields(job, branch)
     job.payload = payload_launch
     return job
@@ -1389,6 +1484,7 @@ local function enqueuePayloadFromTimer(data, source_result)
             cast_id = data.cast_id,
             source_slot_id = data.source_slot_id,
             source_helper_engine_id = data.source_helper_engine_id,
+            source_prefix_opcode = data.source_prefix_opcode,
             source_postfix_opcode = "Timer",
             root_source_slot_id = payload.root_source_slot_id or data.root_source_slot_id,
             current_source_slot_id = payload.current_source_slot_id or payload.slot_id,
@@ -1410,6 +1506,21 @@ local function enqueuePayloadFromTimer(data, source_result)
             timer_due_seconds = data.due_seconds,
             timer_delay_semantics = "async_simulation_timer",
             timer_duplicate_key = shortKey(data.duplicate_key),
+            bounce_runtime = data.bounce_runtime,
+            bounce_role = data.bounce_role,
+            bounce_id = data.bounce_id,
+            bounce_max = data.bounce_max,
+            bounce_power = data.bounce_power,
+            pierce_runtime = data.pierce_runtime,
+            pierce_role = data.pierce_role,
+            pierce_id = data.pierce_id,
+            pierce_limit = data.pierce_limit,
+            chain_runtime = data.chain_runtime,
+            chain_role = data.chain_role,
+            chain_id = data.chain_id,
+            chain_hop_index = data.chain_hop_index,
+            chain_max_hops = data.chain_max_hops,
+            chain_continuation_group_id = data.chain_continuation_group_id,
             payload_multicast = data.payload_multicast == true,
             payload_pattern = data.payload_pattern == true,
             payload_count = #validated.payloads,
@@ -1461,6 +1572,7 @@ local function enqueuePayloadFromTimer(data, source_result)
             timer_id = data.timer_id,
             source_slot_id = data.source_slot_id,
             source_helper_engine_id = data.source_helper_engine_id,
+            source_prefix_opcode = data.source_prefix_opcode,
             source_postfix_opcode = "Timer",
             payload_slot_id = payload.slot_id,
             timer_source_slot_id = data.source_slot_id,
@@ -1473,6 +1585,21 @@ local function enqueuePayloadFromTimer(data, source_result)
             timer_due_seconds = data.due_seconds,
             timer_delay_semantics = "async_simulation_timer",
             timer_duplicate_key = shortKey(data.duplicate_key),
+            bounce_runtime = data.bounce_runtime,
+            bounce_role = data.bounce_role,
+            bounce_id = data.bounce_id,
+            bounce_max = data.bounce_max,
+            bounce_power = data.bounce_power,
+            pierce_runtime = data.pierce_runtime,
+            pierce_role = data.pierce_role,
+            pierce_id = data.pierce_id,
+            pierce_limit = data.pierce_limit,
+            chain_runtime = data.chain_runtime,
+            chain_role = data.chain_role,
+            chain_id = data.chain_id,
+            chain_hop_index = data.chain_hop_index,
+            chain_max_hops = data.chain_max_hops,
+            chain_continuation_group_id = data.chain_continuation_group_id,
             branch_scope = branch.branch_scope,
             branch_id = branch.branch_id,
             branch_parent_id = branch.branch_parent_id,
@@ -1655,6 +1782,18 @@ local function onAsyncTimerDue(data)
         tostring(timer_id),
         tostring(found)
     ))
+    if type(data) == "table" and data.chain_runtime == true and data.source_prefix_opcode == "Chain" then
+        runtime_stats.inc("chain_timer_side_payload_matured")
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_TIMER_SIDE_PAYLOAD_MATURED timer_id=%s recipe_id=%s cast_id=%s chain_id=%s hop_index=%s found=%s",
+            tostring(timer_id),
+            tostring(data.recipe_id),
+            tostring(data.cast_id),
+            tostring(data.chain_id),
+            tostring(data.chain_hop_index),
+            tostring(found)
+        ))
+    end
     local source_result = detonateTimerSource(data)
     return enqueuePayloadFromTimer(data, source_result)
 end
@@ -1810,6 +1949,24 @@ function live_timer.schedulePayload(binding, opts)
         source_mute_light = options.source_mute_light or binding.source_mute_light,
         source_slot_id = binding.source_slot_id,
         source_helper_engine_id = binding.source_helper_engine_id,
+        source_prefix_opcode = binding.source_prefix_opcode,
+        source_postfix_opcode = "Timer",
+        bounce_runtime = binding.source_prefix_opcode == "Bounce" and true or nil,
+        bounce_role = binding.source_prefix_opcode == "Bounce" and "source" or nil,
+        bounce_id = binding.bounce_id,
+        bounce_max = binding.bounce_max,
+        bounce_power = binding.bounce_power,
+        pierce_runtime = binding.source_prefix_opcode == "Pierce" and true or nil,
+        pierce_role = binding.source_prefix_opcode == "Pierce" and "source" or nil,
+        pierce_id = binding.pierce_id,
+        pierce_limit = binding.pierce_limit,
+        chain_runtime = binding.chain_runtime,
+        chain_role = binding.chain_role,
+        chain_id = binding.chain_id,
+        chain_hop_index = binding.chain_hop_index,
+        chain_max_hops = binding.chain_max_hops,
+        chain_continuation_group_id = binding.chain_continuation_group_id
+            or (binding.source_user_data and binding.source_user_data.chain_continuation_group_id),
         payload_slot_id = binding.payload_slot_id,
         payload_helper_engine_id = binding.payload_helper_engine_id,
         payloads = payloads,
@@ -1886,6 +2043,19 @@ function live_timer.schedulePayload(binding, opts)
         tostring(timer_data.branch_kind),
         tostring(delay_seconds)
     ))
+    if timer_data.chain_runtime == true and timer_data.source_prefix_opcode == "Chain" then
+        runtime_stats.inc("chain_timer_side_payload_scheduled")
+        log.info(string.format(
+            "SPELLFORGE_CHAIN_TIMER_SIDE_PAYLOAD_SCHEDULED timer_id=%s recipe_id=%s cast_id=%s chain_id=%s hop_index=%s source_slot_id=%s payload_count=%s",
+            tostring(timer_id),
+            tostring(binding.recipe_id),
+            tostring(binding.cast_id),
+            tostring(timer_data.chain_id),
+            tostring(timer_data.chain_hop_index),
+            tostring(binding.source_slot_id),
+            tostring(#payloads)
+        ))
+    end
 
     return {
         ok = true,

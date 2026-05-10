@@ -23,6 +23,12 @@ local function setDevTrue(key)
     end
 end
 
+local function setDevFalse(key)
+    if dev_section:get(key) ~= false then
+        dev_section:set(key, false)
+    end
+end
+
 local function apply()
     if state.applied or state.failed then
         return
@@ -52,6 +58,16 @@ local function apply()
         setDevTrue("enable_live_soft_homing_probe")
         setDevTrue("enable_live_chain_multicast_v0")
         setDevTrue("enable_chaos_budget_v0")
+        setDevTrue("enable_ir_trigger_runtime_v0")
+        setDevTrue("enable_ir_timer_runtime_v0")
+        setDevTrue("enable_ir_bounce_runtime_v0")
+        setDevTrue("enable_ir_chain_runtime_v0")
+        setDevTrue("enable_ir_pierce_runtime_v0")
+        setDevTrue("enable_ir_runtime_strict_v0")
+        setDevFalse("enable_legacy_trigger_runtime_v0")
+        setDevFalse("enable_legacy_timer_runtime_v0")
+        setDevFalse("enable_legacy_bounce_runtime_v0")
+        setDevFalse("enable_legacy_chain_runtime_v0")
     end)
     if not ok then
         state.failed = true
@@ -60,7 +76,7 @@ local function apply()
     end
 
     state.applied = true
-    log.info("enabled SpellforgeDev.enable_smoke_tests, SpellforgeDev.enable_dev_launch, SpellforgeDev.enable_live_2_2c_runtime, SpellforgeDev.enable_live_multicast, SpellforgeDev.enable_live_spread_burst, SpellforgeDev.enable_live_trigger, SpellforgeDev.enable_live_timer, SpellforgeDev.enable_live_speed_plus, SpellforgeDev.enable_live_size_plus, SpellforgeDev.enable_live_payload_multicast_v0, SpellforgeDev.enable_live_payload_pattern_v0, SpellforgeDev.enable_live_nested_trigger_timer_v1, SpellforgeDev.enable_live_nested_final_fanout_v0, SpellforgeDev.enable_live_chain_audit_v0, SpellforgeDev.enable_live_chain_runtime_v0, SpellforgeDev.enable_live_bounce_v0, SpellforgeDev.enable_live_pierce_v0, SpellforgeDev.enable_live_homing_v0, SpellforgeDev.enable_live_soft_homing_v0, SpellforgeDev.enable_live_soft_homing_probe, SpellforgeDev.enable_live_chain_multicast_v0, and SpellforgeDev.enable_chaos_budget_v0; IR runtime adapters are preferred automatically under their matching live gates")
+    log.info("enabled SpellforgeDev smoke/live gates, explicit IR runtime gates, and SpellforgeDev.enable_ir_runtime_strict_v0; legacy runtime debug flags are disabled for Pack H quarantine checks")
 end
 
 return {

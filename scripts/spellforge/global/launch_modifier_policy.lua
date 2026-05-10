@@ -7,7 +7,7 @@ local live_speed_plus = require("scripts.spellforge.global.live_speed_plus")
 
 local launch_modifier_policy = {}
 
-launch_modifier_policy.VERSION = "spellforge-launch-modifier-policy-v0"
+launch_modifier_policy.VERSION = "spellforge-launch-modifier-policy-v4"
 
 local function hasPayloadBindings(entry)
     return type(entry and entry.payload_bindings) == "table" and #entry.payload_bindings > 0
@@ -15,6 +15,35 @@ end
 
 local function hasPostfix(entry)
     return type(entry and entry.postfix_ops) == "table" and #entry.postfix_ops > 0
+end
+
+local function entryBySlotId(plan, ir, slot_id)
+    if slot_id == nil then
+        return nil
+    end
+    if ir and ir.entries_by_slot_id and ir.entries_by_slot_id[slot_id] then
+        return ir.entries_by_slot_id[slot_id]
+    end
+    for _, slot in ipairs(plan and plan.emission_slots or {}) do
+        if slot and slot.slot_id == slot_id then
+            return slot
+        end
+    end
+    return nil
+end
+
+local function isNestedPayloadEntry(plan, ir, entry)
+    if tonumber(entry and entry.payload_depth) and tonumber(entry.payload_depth) >= 2 then
+        return true
+    end
+    local parent = entryBySlotId(plan, ir, entry and entry.parent_slot_id)
+    if parent and tonumber(parent.payload_depth) and tonumber(parent.payload_depth) >= 1 then
+        return true
+    end
+    if parent and (parent.source_postfix_opcode == "Trigger" or parent.source_postfix_opcode == "Timer") then
+        return true
+    end
+    return false
 end
 
 local function cloneWarnings(warnings)
@@ -71,6 +100,10 @@ local function emitOk(entry, kind, opts)
     end
 end
 
+local emitFanoutDeferred
+local emitFanoutOk
+local inspectPrefixOps
+
 local function modifierKind(features)
     if features and features.speed_plus == true and features.size_plus == true then
         return "speed_plus_size_plus"
@@ -106,6 +139,9 @@ end
 local function reject(entry, reason, features, mutations, warnings, opts)
     local mapped = compatibilityReason(reason, opts)
     emitDeferred(entry, mapped, opts)
+    if emitFanoutDeferred then
+        emitFanoutDeferred(entry, mapped, features, opts)
+    end
     return {
         ok = false,
         version = launch_modifier_policy.VERSION,
@@ -139,7 +175,163 @@ local function multicastFanout(op)
     return math.max(1, math.floor(count))
 end
 
-local function inspectPrefixOps(entry)
+local function clampPositiveInt(value, default_value, hard_max)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        n = default_value or 1
+    end
+    n = math.floor(n)
+    if n < 1 then
+        n = 1
+    end
+    local max_value = tonumber(hard_max)
+    if max_value ~= nil and n > max_value then
+        n = max_value
+    end
+    return n
+end
+
+local function sourceEventCount(source_kind, source_entry)
+    local _, details = inspectPrefixOps(source_entry)
+    if source_kind == "bounce" then
+        return clampPositiveInt(
+            details and details.bounce_op and details.bounce_op.params and details.bounce_op.params.bounces,
+            1,
+            limits.MAX_BOUNCE_COUNT_HARD
+        )
+    elseif source_kind == "pierce" then
+        return clampPositiveInt(
+            details and details.pierce_op and details.pierce_op.params and details.pierce_op.params.pierces,
+            2,
+            limits.MAX_PIERCE_COUNT_HARD
+        )
+    end
+    return 1
+end
+
+local function payloadFanoutModifier(features)
+    return features
+        and features.multicast == true
+        and (features.speed_plus == true or features.size_plus == true)
+end
+
+local function payloadPatternModifier(features)
+    return payloadFanoutModifier(features) and features.pattern == true
+end
+
+emitFanoutDeferred = function(entry, reason, features, opts)
+    if opts and opts.quiet == true then
+        return
+    end
+    if opts and opts.policy_kind == "source" then
+        return
+    end
+    if not payloadFanoutModifier(features) then
+        return
+    end
+    runtime_stats.inc("payload_modifier_fanout_policy_deferred")
+    log.info(string.format(
+        "SPELLFORGE_PAYLOAD_MODIFIER_FANOUT_POLICY_DEFERRED recipe_id=%s slot_id=%s reason=%s",
+        tostring(entry and entry.recipe_id),
+        tostring(entry and entry.slot_id),
+        tostring(reason)
+    ))
+    if features.speed_plus == true and features.size_plus == true then
+        runtime_stats.inc("payload_modifier_combined_fanout_deferred")
+        log.info(string.format(
+            "SPELLFORGE_PAYLOAD_MODIFIER_COMBINED_FANOUT_DEFERRED recipe_id=%s slot_id=%s reason=%s",
+            tostring(entry and entry.recipe_id),
+            tostring(entry and entry.slot_id),
+            tostring(reason)
+        ))
+    end
+    if reason == "payload_modifier_combo_deferred" and features.speed_plus == true and features.size_plus == true then
+        runtime_stats.inc("payload_modifier_combined_multicast_deferred")
+        log.info(string.format(
+            "SPELLFORGE_PAYLOAD_MODIFIER_COMBINED_MULTICAST_DEFERRED recipe_id=%s slot_id=%s reason=%s",
+            tostring(entry and entry.recipe_id),
+            tostring(entry and entry.slot_id),
+            tostring(reason)
+        ))
+        if features.pattern == true then
+            runtime_stats.inc("payload_modifier_combined_pattern_deferred")
+            log.info(string.format(
+                "SPELLFORGE_PAYLOAD_MODIFIER_COMBINED_PATTERN_DEFERRED recipe_id=%s slot_id=%s reason=%s",
+                tostring(entry and entry.recipe_id),
+                tostring(entry and entry.slot_id),
+                tostring(reason)
+            ))
+        end
+    elseif reason == "payload_modifier_pattern_deferred" then
+        runtime_stats.inc("payload_modifier_pattern_deferred")
+        log.info(string.format(
+            "SPELLFORGE_PAYLOAD_MODIFIER_PATTERN_DEFERRED recipe_id=%s slot_id=%s reason=%s",
+            tostring(entry and entry.recipe_id),
+            tostring(entry and entry.slot_id),
+            tostring(reason)
+        ))
+    end
+    if payloadPatternModifier(features) then
+        runtime_stats.inc("payload_modifier_pattern_policy_deferred")
+        log.info(string.format(
+            "SPELLFORGE_PAYLOAD_MODIFIER_PATTERN_POLICY_DEFERRED recipe_id=%s slot_id=%s reason=%s",
+            tostring(entry and entry.recipe_id),
+            tostring(entry and entry.slot_id),
+            tostring(reason)
+        ))
+        if reason == "payload_modifier_nested_deferred" then
+            runtime_stats.inc("payload_modifier_nested_pattern_deferred")
+            log.info(string.format(
+                "SPELLFORGE_PAYLOAD_MODIFIER_NESTED_PATTERN_DEFERRED recipe_id=%s slot_id=%s reason=%s",
+                tostring(entry and entry.recipe_id),
+                tostring(entry and entry.slot_id),
+                tostring(reason)
+            ))
+        end
+    end
+end
+
+emitFanoutOk = function(entry, kind, features, details, opts)
+    if opts and opts.quiet == true then
+        return
+    end
+    if opts and opts.policy_kind == "source" then
+        return
+    end
+    if kind == nil or not payloadFanoutModifier(features) then
+        return
+    end
+    runtime_stats.inc("payload_modifier_fanout_policy_ok")
+    log.info(string.format(
+        "SPELLFORGE_PAYLOAD_MODIFIER_FANOUT_POLICY_OK recipe_id=%s slot_id=%s payload_modifier_kind=%s fanout_count=%s",
+        tostring(entry and entry.recipe_id),
+        tostring(entry and entry.slot_id),
+        tostring(kind),
+        tostring(multicastFanout(details and details.multicast_op))
+    ))
+    if kind == "speed_plus_size_plus" then
+        runtime_stats.inc("payload_modifier_combined_fanout_policy_ok")
+        log.info(string.format(
+            "SPELLFORGE_PAYLOAD_MODIFIER_COMBINED_FANOUT_POLICY_OK recipe_id=%s slot_id=%s fanout_count=%s",
+            tostring(entry and entry.recipe_id),
+            tostring(entry and entry.slot_id),
+            tostring(multicastFanout(details and details.multicast_op))
+        ))
+    end
+    if payloadPatternModifier(features) then
+        runtime_stats.inc("payload_modifier_pattern_policy_ok")
+        log.info(string.format(
+            "SPELLFORGE_PAYLOAD_MODIFIER_PATTERN_POLICY_OK recipe_id=%s slot_id=%s payload_modifier_kind=%s pattern_kind=%s fanout_count=%s",
+            tostring(entry and entry.recipe_id),
+            tostring(entry and entry.slot_id),
+            tostring(kind),
+            tostring(features.pattern_kind),
+            tostring(multicastFanout(details and details.multicast_op))
+        ))
+    end
+end
+
+inspectPrefixOps = function(entry)
     local features = {
         speed_plus = false,
         size_plus = false,
@@ -217,6 +409,177 @@ local function inspectPrefixOps(entry)
     end
 
     return features, details
+end
+
+function launch_modifier_policy.eventSourceFanoutBudget(plan, ir, source_entry, opts)
+    local options = opts or {}
+    local source_kind = options.source_kind
+    if source_kind ~= "bounce" and source_kind ~= "pierce" then
+        return {
+            ok = false,
+            rejection_reason = "event_source_fanout_budget_exceeded",
+            source_kind = source_kind,
+        }
+    end
+
+    local source_fanout_count = clampPositiveInt(
+        options.source_fanout_count,
+        1,
+        options.max_source_fanout or options.max_projectiles or limits.MAX_PROJECTILES_PER_CAST
+    )
+    local event_count_per_source = clampPositiveInt(
+        options.event_count_per_source or sourceEventCount(source_kind, source_entry),
+        1,
+        source_kind == "bounce" and limits.MAX_BOUNCE_COUNT_HARD or limits.MAX_PIERCE_COUNT_HARD
+    )
+    local payload_fanout_count = clampPositiveInt(
+        options.payload_fanout_count,
+        1,
+        options.max_payload_fanout or limits.MAX_NESTED_PAYLOAD_FANOUT
+    )
+    local total_event_jobs = source_fanout_count * event_count_per_source * payload_fanout_count
+    local shared_cap = tonumber(options.max_event_source_resumes_per_cast)
+        or limits.MAX_EVENT_SOURCE_RESUMES_PER_CAST
+    local source_cap = nil
+    local source_reason = nil
+    if source_kind == "bounce" then
+        source_cap = tonumber(options.max_bounce_payload_jobs_per_cast)
+            or limits.MAX_BOUNCE_PAYLOAD_JOBS_PER_CAST
+        source_reason = "bounce_fanout_budget_exceeded"
+    elseif source_kind == "pierce" then
+        source_cap = tonumber(options.max_pierce_payload_jobs_per_cast)
+            or limits.MAX_PIERCE_PAYLOAD_JOBS_PER_CAST
+        source_reason = "pierce_fanout_budget_exceeded"
+    end
+
+    local ok = total_event_jobs <= shared_cap and (source_cap == nil or total_event_jobs <= source_cap)
+    local reason = nil
+    if total_event_jobs > shared_cap then
+        reason = "event_source_fanout_budget_exceeded"
+    elseif source_cap ~= nil and total_event_jobs > source_cap then
+        reason = source_reason
+    end
+
+    if options.quiet ~= true then
+        if ok then
+            runtime_stats.inc("event_source_fanout_budget_ok")
+            log.info(string.format(
+                "SPELLFORGE_EVENT_SOURCE_FANOUT_BUDGET_OK source_kind=%s source_fanout_count=%s event_count_per_source=%s payload_fanout_count=%s total_event_jobs=%s shared_cap=%s source_cap=%s",
+                tostring(source_kind),
+                tostring(source_fanout_count),
+                tostring(event_count_per_source),
+                tostring(payload_fanout_count),
+                tostring(total_event_jobs),
+                tostring(shared_cap),
+                tostring(source_cap)
+            ))
+        else
+            runtime_stats.inc("event_source_fanout_budget_deferred")
+            log.info(string.format(
+                "SPELLFORGE_EVENT_SOURCE_FANOUT_BUDGET_DEFERRED source_kind=%s reason=%s source_fanout_count=%s event_count_per_source=%s payload_fanout_count=%s total_event_jobs=%s shared_cap=%s source_cap=%s",
+                tostring(source_kind),
+                tostring(reason),
+                tostring(source_fanout_count),
+                tostring(event_count_per_source),
+                tostring(payload_fanout_count),
+                tostring(total_event_jobs),
+                tostring(shared_cap),
+                tostring(source_cap)
+            ))
+        end
+    end
+
+    return {
+        ok = ok,
+        rejection_reason = reason,
+        source_kind = source_kind,
+        source_fanout_count = source_fanout_count,
+        event_count_per_source = event_count_per_source,
+        payload_fanout_count = payload_fanout_count,
+        total_event_jobs = total_event_jobs,
+        shared_cap = shared_cap,
+        source_cap = source_cap,
+    }
+end
+
+function launch_modifier_policy.eventSourceTimerBudget(plan, ir, source_entry, opts)
+    local options = opts or {}
+    local source_kind = options.source_kind
+    if source_kind ~= "bounce" and source_kind ~= "pierce" then
+        return {
+            ok = false,
+            rejection_reason = "event_source_timer_budget_exceeded",
+            source_kind = source_kind,
+        }
+    end
+
+    local source_fanout_count = clampPositiveInt(
+        options.source_fanout_count,
+        1,
+        options.max_source_fanout or options.max_projectiles or limits.MAX_PROJECTILES_PER_CAST
+    )
+    local payload_fanout_count = clampPositiveInt(
+        options.timer_payload_fanout_count or options.payload_fanout_count,
+        1,
+        options.max_payload_fanout or limits.MAX_NESTED_PAYLOAD_FANOUT
+    )
+    local total_timer_jobs = source_fanout_count * payload_fanout_count
+    local shared_cap = tonumber(options.max_event_source_timer_jobs_per_cast)
+        or limits.MAX_EVENT_SOURCE_TIMER_JOBS_PER_CAST
+    local source_cap = tonumber(options.max_timer_payload_jobs_per_cast)
+        or (source_kind == "bounce" and limits.MAX_BOUNCE_PAYLOAD_JOBS_PER_CAST)
+        or (source_kind == "pierce" and limits.MAX_PIERCE_PAYLOAD_JOBS_PER_CAST)
+        or shared_cap
+    local source_reason = source_kind == "bounce"
+        and "bounce_timer_budget_exceeded"
+        or "pierce_timer_budget_exceeded"
+
+    local ok = total_timer_jobs <= shared_cap and total_timer_jobs <= source_cap
+    local reason = nil
+    if total_timer_jobs > shared_cap then
+        reason = "event_source_timer_budget_exceeded"
+    elseif total_timer_jobs > source_cap then
+        reason = source_reason
+    end
+
+    if options.quiet ~= true then
+        if ok then
+            runtime_stats.inc("event_source_timer_budget_ok")
+            log.info(string.format(
+                "SPELLFORGE_EVENT_SOURCE_TIMER_BUDGET_OK source_kind=%s source_fanout_count=%s timer_payload_fanout_count=%s total_timer_jobs=%s shared_cap=%s source_cap=%s",
+                tostring(source_kind),
+                tostring(source_fanout_count),
+                tostring(payload_fanout_count),
+                tostring(total_timer_jobs),
+                tostring(shared_cap),
+                tostring(source_cap)
+            ))
+        else
+            runtime_stats.inc("event_source_timer_budget_deferred")
+            log.info(string.format(
+                "SPELLFORGE_EVENT_SOURCE_TIMER_BUDGET_DEFERRED source_kind=%s reason=%s source_fanout_count=%s timer_payload_fanout_count=%s total_timer_jobs=%s shared_cap=%s source_cap=%s",
+                tostring(source_kind),
+                tostring(reason),
+                tostring(source_fanout_count),
+                tostring(payload_fanout_count),
+                tostring(total_timer_jobs),
+                tostring(shared_cap),
+                tostring(source_cap)
+            ))
+        end
+    end
+
+    return {
+        ok = ok,
+        rejection_reason = reason,
+        source_kind = source_kind,
+        source_fanout_count = source_fanout_count,
+        timer_payload_fanout_count = payload_fanout_count,
+        payload_fanout_count = payload_fanout_count,
+        total_timer_jobs = total_timer_jobs,
+        shared_cap = shared_cap,
+        source_cap = source_cap,
+    }
 end
 
 local function modifierEnabled(kind, opts)
@@ -383,17 +746,19 @@ function launch_modifier_policy.inspectPayloadEntry(plan, ir, payload_entry, opt
 
     local has_modifier = features.speed_plus == true or features.size_plus == true
     if has_modifier then
-        if features.pattern then
-            return reject(payload_entry, "payload_modifier_pattern_deferred", features, mutations, warnings, options)
-        end
-        if features.homing then
-            return reject(payload_entry, "payload_modifier_homing_deferred", features, mutations, warnings, options)
+        if isNestedPayloadEntry(plan, ir, payload_entry) and options.allow_nested_payload_modifiers ~= true then
+            return reject(payload_entry, "payload_modifier_nested_deferred", features, mutations, warnings, options)
         end
         if (features.pierce or features.bounce) and options.allow_payload_source_modifiers ~= true then
             return reject(payload_entry, "payload_modifier_unsupported_prefix", features, mutations, warnings, options)
         end
         if (hasPostfix(payload_entry) or hasPayloadBindings(payload_entry)) and options.allow_nested_payload_modifiers ~= true then
             return reject(payload_entry, "payload_modifier_nested_deferred", features, mutations, warnings, options)
+        end
+        if features.pattern then
+            if not features.multicast or details.pattern_count ~= 1 then
+                return reject(payload_entry, "payload_modifier_pattern_deferred", features, mutations, warnings, options)
+            end
         end
     end
 
@@ -404,13 +769,8 @@ function launch_modifier_policy.inspectPayloadEntry(plan, ir, payload_entry, opt
         if details.multicast_count > 1 then
             return reject(payload_entry, "payload_modifier_cap_exceeded", features, mutations, warnings, options)
         end
-        if details.multicast_count == 1 and features.speed_plus and features.size_plus then
-            return reject(payload_entry, "payload_modifier_combo_deferred", features, mutations, warnings, options)
-        end
     elseif details.multicast_count > 1 then
         return reject(payload_entry, "payload_modifier_cap_exceeded", features, mutations, warnings, options)
-    elseif details.multicast_count == 1 and features.speed_plus and features.size_plus then
-        return reject(payload_entry, "payload_modifier_combo_deferred", features, mutations, warnings, options)
     end
 
     if features.multicast then
@@ -419,7 +779,9 @@ function launch_modifier_policy.inspectPayloadEntry(plan, ir, payload_entry, opt
         if features.chain and not chainMulticastEnabled(options) then
             return reject(payload_entry, "chain_multicast_disabled", features, mutations, warnings, options)
         end
-        local cap = tonumber(options.max_chain_multicast_fanout or options.max_payload_modifier_fanout or options.max_fanout)
+        local cap = features.pattern
+            and tonumber(options.max_chain_pattern_fanout or options.max_chain_multicast_fanout or options.max_payload_modifier_fanout or options.max_fanout)
+            or tonumber(options.max_chain_multicast_fanout or options.max_payload_modifier_fanout or options.max_fanout)
             or limits.MAX_NESTED_PAYLOAD_FANOUT
         if fanout_count > cap then
             return reject(payload_entry, "payload_modifier_cap_exceeded", features, mutations, warnings, options)
@@ -462,6 +824,7 @@ function launch_modifier_policy.inspectPayloadEntry(plan, ir, payload_entry, opt
         mutations.size_plus = mutation
     end
     mutations.payload_modifier_kind = modifierKind(features)
+    emitFanoutOk(payload_entry, mutations.payload_modifier_kind, features, details, options)
 
     return success(payload_entry, features, mutations, warnings, options)
 end
@@ -482,6 +845,7 @@ function launch_modifier_policy.inspectSourceEntry(plan, ir, source_entry, opts)
         speed_plus = nil,
         size_plus = nil,
         size_plus_apply_result = nil,
+        source_multicast_fanout_count = nil,
     }
     local warnings = {}
     local has_modifier = features.speed_plus == true or features.size_plus == true
@@ -492,17 +856,23 @@ function launch_modifier_policy.inspectSourceEntry(plan, ir, source_entry, opts)
     if details.speed_count > 1 or details.size_count > 1 then
         return reject(source_entry, "source_modifier_combo_deferred", features, mutations, warnings, options)
     end
-    if features.speed_plus and features.size_plus then
+    if (features.bounce or features.pierce)
+        and features.speed_plus
+        and features.size_plus
+        and options.allow_event_source_modifier_combo ~= true then
         return reject(source_entry, "source_modifier_combo_deferred", features, mutations, warnings, options)
     end
-    if details.pattern_ambiguous == true or features.pattern or features.multicast then
-        if has_modifier or features.bounce or features.pierce then
-            return reject(source_entry, "source_modifier_pattern_deferred", features, mutations, warnings, options)
-        end
+    if details.pattern_ambiguous == true then
+        return reject(source_entry, "source_modifier_pattern_deferred", features, mutations, warnings, options)
     end
-    if features.homing then
-        if has_modifier or features.bounce or features.pierce then
-            return reject(source_entry, "source_modifier_homing_deferred", features, mutations, warnings, options)
+    if (features.bounce or features.pierce)
+        and (features.pattern or features.multicast)
+        and options.allow_event_source_fanout ~= true then
+        return reject(source_entry, "source_modifier_pattern_deferred", features, mutations, warnings, options)
+    end
+    if features.pattern then
+        if not features.multicast or details.pattern_count ~= 1 then
+            return reject(source_entry, "source_modifier_pattern_deferred", features, mutations, warnings, options)
         end
     end
     if features.chain then
@@ -524,6 +894,15 @@ function launch_modifier_policy.inspectSourceEntry(plan, ir, source_entry, opts)
     end
     if features.pierce and options.allow_pierce_source ~= true then
         return reject(source_entry, "source_modifier_unsupported_prefix", features, mutations, warnings, options)
+    end
+    if features.multicast then
+        local fanout_count = multicastFanout(details.multicast_op)
+        mutations.source_multicast_fanout_count = fanout_count
+        local cap = tonumber(options.max_source_modifier_fanout or options.max_fanout or options.max_projectiles)
+            or limits.MAX_PROJECTILES_PER_CAST
+        if fanout_count > cap then
+            return reject(source_entry, "source_modifier_cap_exceeded", features, mutations, warnings, options)
+        end
     end
 
     local mutation = nil
@@ -586,6 +965,32 @@ function launch_modifier_policy.applyToJob(plan, ir, payload_entry, job, event_c
             tostring(job and job.payload_slot_id),
             tostring(mutations.speed_plus and mutations.speed_plus.speed_plus_speed)
         ))
+        if inspected.modifier_features and inspected.modifier_features.multicast == true then
+            runtime_stats.inc("payload_speed_plus_multicast_policy_applied")
+            log.info(string.format(
+                "SPELLFORGE_PAYLOAD_SPEED_PLUS_MULTICAST_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s payload_slot_id=%s fanout_count=%s speed_value=%s",
+                tostring(job and job.recipe_id),
+                tostring(event_context and event_context.event_kind),
+                tostring(job and job.slot_id),
+                tostring(job and job.payload_slot_id),
+                tostring(job and job.fanout_count),
+                tostring(mutations.speed_plus and mutations.speed_plus.speed_plus_speed)
+            ))
+        end
+        if inspected.modifier_features and inspected.modifier_features.pattern == true then
+            runtime_stats.inc("payload_speed_plus_pattern_policy_applied")
+            log.info(string.format(
+                "SPELLFORGE_PAYLOAD_SPEED_PLUS_PATTERN_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s payload_slot_id=%s pattern_kind=%s pattern_index=%s pattern_count=%s speed_value=%s",
+                tostring(job and job.recipe_id),
+                tostring(event_context and event_context.event_kind),
+                tostring(job and job.slot_id),
+                tostring(job and job.payload_slot_id),
+                tostring(job and job.pattern_kind),
+                tostring(job and job.pattern_index),
+                tostring(job and job.pattern_count),
+                tostring(mutations.speed_plus and mutations.speed_plus.speed_plus_speed)
+            ))
+        end
     end
     if applied.size_plus == true then
         runtime_stats.inc("payload_size_plus_policy_applied")
@@ -597,6 +1002,32 @@ function launch_modifier_policy.applyToJob(plan, ir, payload_entry, job, event_c
             tostring(job and job.payload_slot_id),
             tostring(mutations.size_plus and mutations.size_plus.size_plus_area)
         ))
+        if inspected.modifier_features and inspected.modifier_features.multicast == true then
+            runtime_stats.inc("payload_size_plus_multicast_policy_applied")
+            log.info(string.format(
+                "SPELLFORGE_PAYLOAD_SIZE_PLUS_MULTICAST_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s payload_slot_id=%s fanout_count=%s size_area=%s",
+                tostring(job and job.recipe_id),
+                tostring(event_context and event_context.event_kind),
+                tostring(job and job.slot_id),
+                tostring(job and job.payload_slot_id),
+                tostring(job and job.fanout_count),
+                tostring(mutations.size_plus and mutations.size_plus.size_plus_area)
+            ))
+        end
+        if inspected.modifier_features and inspected.modifier_features.pattern == true then
+            runtime_stats.inc("payload_size_plus_pattern_policy_applied")
+            log.info(string.format(
+                "SPELLFORGE_PAYLOAD_SIZE_PLUS_PATTERN_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s payload_slot_id=%s pattern_kind=%s pattern_index=%s pattern_count=%s size_area=%s",
+                tostring(job and job.recipe_id),
+                tostring(event_context and event_context.event_kind),
+                tostring(job and job.slot_id),
+                tostring(job and job.payload_slot_id),
+                tostring(job and job.pattern_kind),
+                tostring(job and job.pattern_index),
+                tostring(job and job.pattern_count),
+                tostring(mutations.size_plus and mutations.size_plus.size_plus_area)
+            ))
+        end
     end
     if applied.speed_plus == true and applied.size_plus == true then
         runtime_stats.inc("payload_speed_size_plus_policy_applied")
@@ -609,6 +1040,34 @@ function launch_modifier_policy.applyToJob(plan, ir, payload_entry, job, event_c
             tostring(mutations.speed_plus and mutations.speed_plus.speed_plus_speed),
             tostring(mutations.size_plus and mutations.size_plus.size_plus_area)
         ))
+        if inspected.modifier_features and inspected.modifier_features.multicast == true then
+            runtime_stats.inc("payload_speed_size_plus_multicast_policy_applied")
+            log.info(string.format(
+                "SPELLFORGE_PAYLOAD_SPEED_SIZE_PLUS_MULTICAST_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s payload_slot_id=%s fanout_count=%s speed_value=%s size_area=%s",
+                tostring(job and job.recipe_id),
+                tostring(event_context and event_context.event_kind),
+                tostring(job and job.slot_id),
+                tostring(job and job.payload_slot_id),
+                tostring(job and job.fanout_count),
+                tostring(mutations.speed_plus and mutations.speed_plus.speed_plus_speed),
+                tostring(mutations.size_plus and mutations.size_plus.size_plus_area)
+            ))
+        end
+        if inspected.modifier_features and inspected.modifier_features.pattern == true then
+            runtime_stats.inc("payload_speed_size_plus_pattern_policy_applied")
+            log.info(string.format(
+                "SPELLFORGE_PAYLOAD_SPEED_SIZE_PLUS_PATTERN_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s payload_slot_id=%s pattern_kind=%s pattern_index=%s pattern_count=%s speed_value=%s size_area=%s",
+                tostring(job and job.recipe_id),
+                tostring(event_context and event_context.event_kind),
+                tostring(job and job.slot_id),
+                tostring(job and job.payload_slot_id),
+                tostring(job and job.pattern_kind),
+                tostring(job and job.pattern_index),
+                tostring(job and job.pattern_count),
+                tostring(mutations.speed_plus and mutations.speed_plus.speed_plus_speed),
+                tostring(mutations.size_plus and mutations.size_plus.size_plus_area)
+            ))
+        end
     end
     return inspected
 end
@@ -656,6 +1115,41 @@ function launch_modifier_policy.applySourcePolicyToLaunchSpec(plan, ir, source_e
             tostring(event_context and event_context.event_kind),
             tostring(launch_spec and launch_spec.slot_id),
             tostring(mutations.size_plus and mutations.size_plus.size_plus_area)
+        ))
+    end
+    if applied.speed_plus == true and applied.size_plus == true then
+        runtime_stats.inc("source_speed_size_plus_policy_applied")
+        log.info(string.format(
+            "SPELLFORGE_SOURCE_SPEED_SIZE_PLUS_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s speed_value=%s size_area=%s",
+            tostring(launch_spec and launch_spec.recipe_id),
+            tostring(event_context and event_context.event_kind),
+            tostring(launch_spec and launch_spec.slot_id),
+            tostring(mutations.speed_plus and mutations.speed_plus.speed_plus_speed),
+            tostring(mutations.size_plus and mutations.size_plus.size_plus_area)
+        ))
+    end
+    if inspected.modifier_features and inspected.modifier_features.multicast == true then
+        runtime_stats.inc("source_modifier_multicast_policy_applied")
+        log.info(string.format(
+            "SPELLFORGE_SOURCE_MODIFIER_MULTICAST_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s source_modifier_kind=%s fanout_count=%s",
+            tostring(launch_spec and launch_spec.recipe_id),
+            tostring(event_context and event_context.event_kind),
+            tostring(launch_spec and launch_spec.slot_id),
+            tostring(launch_spec and launch_spec.source_modifier_kind),
+            tostring(launch_spec and launch_spec.fanout_count or mutations.source_multicast_fanout_count)
+        ))
+    end
+    if inspected.modifier_features and inspected.modifier_features.pattern == true then
+        runtime_stats.inc("source_modifier_pattern_policy_applied")
+        log.info(string.format(
+            "SPELLFORGE_SOURCE_MODIFIER_PATTERN_POLICY_APPLIED recipe_id=%s event_kind=%s slot_id=%s source_modifier_kind=%s pattern_kind=%s pattern_index=%s pattern_count=%s",
+            tostring(launch_spec and launch_spec.recipe_id),
+            tostring(event_context and event_context.event_kind),
+            tostring(launch_spec and launch_spec.slot_id),
+            tostring(launch_spec and launch_spec.source_modifier_kind),
+            tostring(launch_spec and launch_spec.pattern_kind),
+            tostring(launch_spec and launch_spec.pattern_index),
+            tostring(launch_spec and launch_spec.pattern_count)
         ))
     end
     return inspected
