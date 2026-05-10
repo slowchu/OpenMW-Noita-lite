@@ -26,7 +26,7 @@ The player authors spells through a Morrowind-like spellmaking flow. A Spellforg
    These are the actual spell effects: Fire Damage, Frost Damage, Shield, Resist Magic, etc.
 
 2. **Spellforge custom magical effects**  
-   These are control/modifier effects: Multicast, Trigger, Timer, Speed+, Size+, Spread, Burst, Chain.
+   These are control/modifier effects: Multicast, Trigger, Timer, Speed+, Size+, Spread, Burst, Chain, Bounce, Pierce, and Homing.
 
 The recipe is the spell effect list.
 
@@ -80,7 +80,7 @@ Spellforge v1 does not attempt to support:
 - NPC usage of composed Spellforge spells
 - multiplayer/TES3MP correctness
 - persistent world hazards such as lava floors, fire patches, ice walls, etc.
-- homing projectiles unless a cheap bounded implementation becomes available
+- unbounded or per-frame homing projectiles
 - live editing while combat is active
 - exact vanilla parity for every reflection/resist/cost edge case
 
@@ -222,23 +222,67 @@ should not branch on modifier kind.
 
 For source launches, `launch_modifier_policy.lua` also owns supported/deferred
 source modifier decisions. Generic source launch/spec creation applies
-policy-produced source mutations before SFP launch fields are finalized. Bounce
-and Pierce adapters may add only their own event/source facts such as
-`bounceEnabled`, `bounceMax`, `bouncePower`, `detonateOnActorHit`, `piercing`,
-`pierceLimit`, and event identity. They must not compute or interpret Speed+/Size+
-fields.
+policy-produced source mutations before SFP launch fields are finalized. Generic
+source fanout code owns primary Multicast/Spread/Burst sibling emission, including
+Bounce/Pierce source fanout. Bounce and Pierce adapters may add only their own
+event/source facts such as `bounceEnabled`, `bounceMax`, `bouncePower`,
+`detonateOnActorHit`, `piercing`, `pierceLimit`, and event identity. They must
+not compute or interpret Speed+/Size+ fields, and they must not own
+Multicast/Spread/Burst fanout semantics.
 
 The policy may return a mutation set, not just a single modifier. Combined
 Speed+ Size+ on one simple payload branch is handled by applying the Speed+
 launch-field mutation and Size+ helper-spec mutation from the same policy result.
-Single Speed+ or single Size+ may also compose with bounded Chain payload
-Multicast when the Chain Multicast and matching modifier gates are enabled.
-Combined Speed+ Size+ plus Multicast remains deferred until proven separately.
-Source policy v0 supports single Speed+ or single Size+ on simple source launches,
-including the narrow `Bounce/Pierce -> Speed+/Size+ -> simple target emitter`
-composition. Combined source Speed+ Size+, source fanout/pattern composition,
-Homing, Timer, direct source Chain, nested runtime, and recursive source modifier
-stacks remain deferred until separately proven.
+Single or combined Speed+/Size+ may also compose with direct Trigger/Timer
+payload Multicast and direct Trigger/Timer payload Spread/Burst + Multicast when
+the matching Multicast/Pattern and modifier gates are enabled. Bounded Chain
+payload Multicast and Spread/Burst + Multicast can consume the same policy for
+zero, one, or both Speed+/Size+ modifiers while Chain keeps one continuation
+claim per hop.
+Source policy supports ordinary source Speed+/Size+ simple launches, ordinary
+source combined Speed+ Size+ simple launches, ordinary source Speed+/Size+
+Multicast, ordinary source combined Speed+ Size+ Multicast, and ordinary source
+Speed+/Size+ or combined Speed+ Size+ Spread/Burst + Multicast through generic
+launch/spec creation. It also supports
+`Bounce/Pierce -> Speed+/Size+ -> simple target emitter`, plus Bounce/Pierce
+primary source Multicast or Spread/Burst + Multicast with zero, one, or both
+Speed+/Size+ modifiers. Unmodified Bounce/Pierce source fanout with Trigger
+simple payload must pass conservative event-budget accounting before registration:
+`source_fanout_count * event_count_per_source * payload_fanout_count`, capped by
+`MAX_EVENT_SOURCE_RESUMES_PER_CAST` and the source-kind payload-job caps. Bounce/
+Pierce source Timer continuations schedule once per source emission or source
+fanout sibling through `live_timer.lua`, not once per Bounce/Pierce event. Source
+Speed+/Size+ plus Trigger payloads, simple no-fanout Bounce/Pierce combined
+Speed+ Size+, direct source Bounce/Pierce/Chain Homing compositions, direct
+source Chain, arbitrary nested source-event runtime, repeated same-actor Pierce
+ticks, post-launch steering, and recursive source modifier stacks remain rejected
+with stable classified reasons until separately proven or marked unsupported by
+design.
+
+Chain owns target acquisition, LOS, hop sequencing, duplicate suppression, and
+the single Chain continuation claim for each hop. Chain payload emitters may
+carry one bounded Trigger or Timer side continuation. Trigger side payloads route
+through `live_trigger.lua`; Timer side payloads route through `live_timer.lua`.
+Those side continuations use separate idempotency keys and may fire for fanout
+siblings when `max_hops * chain_payload_fanout_count * side_payload_fanout_count`
+stays under the Chain side-continuation caps. They must not advance Chain, create
+Chain->Chain recursion, or turn fanout siblings into independent Chain branches.
+
+Homing launch-time targeting semantics belong in
+`scripts/spellforge/global/homing_launch_policy.lua` and reusable helpers in
+`scripts/spellforge/global/live_homing.lua`. That policy owns Homing support/defer
+decisions, bounded target metadata acquisition, launch-time forceVec computation,
+soft-Homing registration decisions, Homing caps, and stable Homing rejection
+reasons. Source launch and runtime payload jobs may carry Homing metadata next to
+Speed+/Size+, fanout, Pattern, Trigger, Timer, Bounce, Pierce, or Chain metadata,
+but event adapters and fanout code must not compute Homing targets or forceVec.
+Homing may run only bounded launch-time scans or use the existing central
+low-frequency soft-Homing manager. Current explicitly requested soft-Homing
+registration remains single-projectile; multi-sibling soft fanout must defer
+with a stable Homing policy reason until every sibling can be registered safely.
+Ordinary Homing fanout should continue using launch-time `forceVec`. It must not add
+per-projectile Spellforge Lua brains, per-frame actor scans, or high-frequency
+retarget loops.
 
 Size+ is special only because helper specs must be mutated before helper records
 are materialized. That pre-materialization step must still route through the
@@ -249,6 +293,14 @@ All new policy support remains behind the normal live 2.2c gates and the
 relevant opcode/modifier gates. This policy must not add per-frame actor scans,
 per-projectile Spellforge Lua brains, unbounded actor scans, post-launch
 projectile mutation loops, or arbitrary recursive modifier stacking.
+
+Pack H adds a support-truth closure contract on top of the runtime policy:
+
+- `feature_matrix.analyze` is the public support truth and is backed by runtime IR when a plan has IR artifacts.
+- `feature_matrix.lua`, `feature_matrix_ir.lua`, continuation planning, runtime job planning, and live smoke behavior must agree for representative supported and unsupported shapes.
+- `SpellforgeDev.enable_ir_runtime_strict_v0` is smoke/dev-only. In strict mode, supported Trigger/Timer/Bounce/Pierce/Chain shapes must use the IR adapter/planner/job-planner path with zero unexpected fallback or mismatch.
+- Legacy Trigger/Timer/Bounce/Chain paths may remain only as explicit debug/quarantine paths; strict smoke treats unexpected legacy fallback as a failure.
+- Remaining unsafe v1 shapes should be classified as `unsupported_by_design`, while plausible future work should be classified as `future_deferred`; both must reject before enqueue.
 
 #### Launch modifier policy review checklist
 
@@ -263,6 +315,10 @@ A new change violates this architecture if it:
 - copies Chain modifier inspection into another event adapter
 - branches in an event adapter on payload Speed+/Size+
 - branches in an event adapter on source Speed+/Size+
+- adds Bounce/Pierce-specific Multicast/Spread/Burst fanout logic to
+  `live_bounce.lua` or `live_pierce.lua`
+- adds event-specific fanout reasons such as `bounce_multicast_supported` or
+  `pierce_burst_supported`
 - mutates helper specs outside `launch_modifier_policy.lua` for payload or source
   Size+
 - applies Speed+/Size+ fields outside `runtime_job_planner.lua` or
@@ -271,6 +327,15 @@ A new change violates this architecture if it:
   source launches
 - expands support by adding one-off Trigger/Timer/Bounce/Pierce/Chain modifier
   branches instead of broadening the shared policy
+- copies Trigger/Timer side-payload builders into Chain instead of routing side
+  continuations through the shared Trigger/Timer IR paths
+- lets Chain fanout siblings create multiple independent Chain continuation
+  claims
+- computes Homing targets or forceVec in `live_trigger.lua`, `live_timer.lua`,
+  `live_bounce.lua`, `live_pierce.lua`, `live_chain.lua`, source fanout code, or
+  Chain target-provider code
+- adds per-projectile Homing Lua brains, per-frame actor scans, or high-frequency
+  retarget loops
 
 A valid change:
 
@@ -280,8 +345,14 @@ A valid change:
   IR-planned jobs
 - updates generic source launch/spec creation to apply policy-produced source
   mutations before launch
+- updates generic source fanout and event-source budget code so Bounce/Pierce
+  source siblings consume shared fanout semantics
 - lets event adapters pass only event context, gates, and caps into the shared
   policy/runtime path
+- lets Chain attach/preserve side-continuation metadata while Trigger/Timer
+  adapters and the shared IR job planner own side-payload enqueue behavior
+- updates `homing_launch_policy.lua` / `live_homing.lua` to broaden bounded
+  launch-time Homing support or central soft-Homing registration behavior
 - adds conformance smokes proving multiple event adapters consume the same policy
   without event-specific modifier code
 
@@ -590,7 +661,7 @@ This rule prevents trivial exponential blowups and makes player intent readable.
 
 ## 11. v1 Opcode Vocabulary
 
-v1 currently contains nine Spellforge operators.
+v1 currently contains eleven Spellforge operators.
 
 | Opcode | Kind | Range / Parameters | Binding | Notes |
 |---|---|---|---|---|
@@ -600,7 +671,9 @@ v1 currently contains nine Spellforge operators.
 | Speed+ | Prefix | percent scalar | next emitter group | modifies projectile speed |
 | Size+ | Prefix | percent scalar | next emitter group | modifies area/VFX scale where supported |
 | Chain | Prefix | hops 1–5 | next emitter group | bounded target hopping |
+| Bounce | Prefix | bounces 1-5 normal, 8 chaos | next emitter group | SFP-backed source bounce events |
 | Pierce | Prefix | pierces 1-3 normal, 5 hard | next emitter group | SFP-backed pass-through through unique actors |
+| Homing | Prefix | bounded force/target metadata | next emitter group | launch-time forceVec or central soft-Homing policy |
 | Trigger | Postfix | none | previous emitter group | payload on resolution |
 | Timer | Postfix | 0.5–5.0s | previous emitter group | payload after delay |
 
@@ -758,6 +831,9 @@ Hard limits are enforced in both compiler and runtime.
 
 ```lua
 MAX_RECURSION_DEPTH = 3
+MAX_LIVE_NESTED_CONTINUATION_DEPTH = 2
+MAX_NESTED_CONTINUATION_JOBS_PER_CAST = 32
+MAX_NESTED_FINAL_PAYLOAD_JOBS_PER_CAST = 32
 MAX_PROJECTILES_PER_CAST = 32
 MAX_CHAIN_HOPS = 5
 MAX_SCAN_RADIUS = 2048
@@ -836,7 +912,7 @@ The compiler may allocate one helper spell record per static emission slot in th
 - Speed+, Size+ do not add slots — they modify launch parameters only
 - For cap accounting, Chain N counts as N additional emission slots per initial emission, unless implemented later as a non-projectile direct-apply chain
 - Trigger/Timer payloads contribute their own slots per trigger-projectile emission
-- Nested Trigger/Timer is bounded by `MAX_RECURSION_DEPTH` (3)
+- Nested Trigger/Timer continuation runtime is bounded by `MAX_LIVE_NESTED_CONTINUATION_DEPTH` (2); depth greater than 2 rejects before enqueue
 
 ### Static Cap Enforcement
 
