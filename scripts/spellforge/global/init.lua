@@ -1,0 +1,261 @@
+local core = require("openmw.core")
+
+local compiler = require("scripts.spellforge.global.compiler")
+local dev_launch = require("scripts.spellforge.global.dev_launch")
+local executor = require("scripts.spellforge.global.executor")
+local events = require("scripts.spellforge.shared.events")
+local helper_records = require("scripts.spellforge.global.helper_records")
+local live_timer = require("scripts.spellforge.global.live_timer")
+local live_simple_dispatch = require("scripts.spellforge.global.live_simple_dispatch")
+local live_chain = require("scripts.spellforge.global.live_chain")
+local live_soft_homing = require("scripts.spellforge.global.live_soft_homing")
+local records = require("scripts.spellforge.global.records")
+local sfp_adapter = require("scripts.spellforge.global.sfp_adapter")
+local sfp_smoke = require("scripts.spellforge.global.sfp_smoke")
+local ui_catalog = require("scripts.spellforge.global.ui_catalog")
+local ui_contract = require("scripts.spellforge.global.ui_contract")
+local log = require("scripts.spellforge.shared.log").new("global.init")
+local did_records_probe = false
+
+live_timer.registerCallbacks()
+
+local function isBackendReady()
+    return sfp_adapter.capabilities().has_interface == true
+end
+
+local function runSpellsRecordsProbe()
+    if did_records_probe then
+        return
+    end
+    did_records_probe = true
+
+    local count = 0
+    local first_key, first_value
+    for k, v in pairs(core.magic.spells.records) do
+        count = count + 1
+        if count == 1 then
+            first_key, first_value = k, v
+        end
+        if count >= 3 then
+            break
+        end
+    end
+    log.debug(string.format(
+        "spells.records probe: count>=%d first_key_type=%s first_key=%s first_value_type=%s first_value_id=%s",
+        count,
+        type(first_key),
+        tostring(first_key),
+        type(first_value),
+        tostring(first_value and first_value.id)
+    ))
+
+    local probe_id = first_value and first_value.id or "fireball"
+    log.debug(string.format(
+        "spells.records lookup probe: by_string=%s by_int=%s",
+        tostring(core.magic.spells.records[probe_id] ~= nil),
+        tostring(core.magic.spells.records[1] ~= nil)
+    ))
+end
+
+local function getSender(payload, event_name)
+    if not payload or not payload.sender then
+        log.error(string.format("%s missing payload.sender", event_name))
+        return nil
+    end
+    if type(payload.sender.sendEvent) ~= "function" then
+        log.error(string.format("%s payload.sender is not event-capable actor", event_name))
+        return nil
+    end
+    return payload.sender
+end
+
+local function onCheckBackend(payload)
+    runSpellsRecordsProbe()
+
+    local sender = getSender(payload, events.CHECK_BACKEND)
+    if not sender then
+        return
+    end
+
+    if isBackendReady() then
+        sender:sendEvent(events.BACKEND_READY, { backend_version = "sfp-unknown" })
+        log.debug("backend handshake ready")
+    else
+        sender:sendEvent(events.BACKEND_UNAVAILABLE, { reason = "Spell Framework Plus (I.MagExp) missing" })
+        log.warn("backend handshake unavailable")
+    end
+end
+
+local function onCompileRecipe(payload)
+    local sender = getSender(payload, events.COMPILE_RECIPE)
+    if not sender then
+        return
+    end
+
+    if not isBackendReady() then
+        sender:sendEvent(events.COMPILE_RESULT, {
+            request_id = payload and payload.request_id,
+            ok = false,
+            error = "Backend unavailable",
+        })
+        return
+    end
+
+    local result = compiler.handleCompileEvent(payload or {})
+    sender:sendEvent(events.COMPILE_RESULT, result)
+end
+
+local function onValidateRecipe(payload)
+    local sender = getSender(payload, events.VALIDATE_RECIPE)
+    if not sender then
+        return
+    end
+
+    sender:sendEvent(events.VALIDATE_RESULT, ui_contract.validateRecipe(payload or {}))
+end
+
+local function onPreviewRecipe(payload)
+    local sender = getSender(payload, events.PREVIEW_RECIPE)
+    if not sender then
+        return
+    end
+
+    sender:sendEvent(events.PREVIEW_RESULT, ui_contract.previewRecipe(payload or {}))
+end
+
+local function onQueryUiCatalog(payload)
+    local sender = getSender(payload, events.QUERY_UI_CATALOG)
+    if not sender then
+        return
+    end
+
+    local result = ui_catalog.build(payload or {})
+    local available = result.available_effects or {}
+    log.info(string.format(
+        "SPELLFORGE_AVAILABLE_EFFECTS_QUERY_OK source=%s count=%s",
+        tostring(available.source_mode or result.available_effect_source_mode),
+        tostring(available.base_effect_count or result.base_effect_count or 0)
+    ))
+    if available.source_mode == "player_known" then
+        log.info(string.format(
+            "SPELLFORGE_AVAILABLE_EFFECTS_KNOWN_SCAN_OK count=%s",
+            tostring(available.base_effect_count or 0)
+        ))
+    elseif available.capability_notes and available.capability_notes.known_effect_scan_unavailable then
+        log.warn("SPELLFORGE_AVAILABLE_EFFECTS_FALLBACK_USED reason=known_effect_scan_unavailable")
+    end
+    sender:sendEvent(events.UI_CATALOG_RESULT, result)
+end
+
+local function onQueryAvailableEffects(payload)
+    local sender = getSender(payload, events.QUERY_AVAILABLE_EFFECTS)
+    if not sender then
+        return
+    end
+
+    local result = ui_catalog.availableEffects(payload or {})
+    log.info(string.format(
+        "SPELLFORGE_AVAILABLE_EFFECTS_QUERY_OK source=%s count=%s",
+        tostring(result.source_mode),
+        tostring(result.base_effect_count or 0)
+    ))
+    if result.source_mode == "player_known" then
+        log.info(string.format(
+            "SPELLFORGE_AVAILABLE_EFFECTS_KNOWN_SCAN_OK count=%s",
+            tostring(result.base_effect_count or 0)
+        ))
+    elseif result.capability_notes and result.capability_notes.known_effect_scan_unavailable then
+        log.warn("SPELLFORGE_AVAILABLE_EFFECTS_FALLBACK_USED reason=known_effect_scan_unavailable")
+    end
+    sender:sendEvent(events.AVAILABLE_EFFECTS_RESULT, result)
+end
+
+local function onDeleteCompiled(payload)
+    local deleted = false
+    local recipe_id = nil
+    if payload and payload.recipe_id then
+        recipe_id = payload.recipe_id
+        deleted = records.deleteByRecipeId(recipe_id)
+    elseif payload and payload.spell_id then
+        deleted, recipe_id = records.deleteBySpellId(payload.spell_id)
+    end
+
+    local helper_records_cleared = recipe_id and helper_records.clearForRecipe(recipe_id) or 0
+    log.info(string.format(
+        "delete request handled deleted=%s recipe_id=%s helper_records_cleared=%s",
+        tostring(deleted),
+        tostring(recipe_id),
+        tostring(helper_records_cleared)
+    ))
+end
+
+
+local function onQuerySpellMetadata(payload)
+    local sender = getSender(payload, events.QUERY_SPELL_METADATA)
+    if not sender then
+        return
+    end
+
+    local spell_id = payload and payload.spell_id
+    local recipe_id, entry, root = records.findRootNodeByEngineSpellId(spell_id)
+    sender:sendEvent(events.QUERY_SPELL_METADATA_RESULT, {
+        request_id = payload and payload.request_id,
+        spell_id = spell_id,
+        is_spellforge = recipe_id ~= nil,
+        recipe_id = recipe_id,
+        root_base_spell_id = root and root.base_spell_id or nil,
+        root_range = root and root.marker_range or nil,
+        root_real_effects = root and root.real_effects or nil,
+        frontend_spell_id = entry and entry.frontend_spell_id or nil,
+    })
+end
+
+local function onSfpSpellState(payload)
+    sfp_smoke.onSpellState(payload)
+    live_soft_homing.onSpellState(payload)
+end
+
+return {
+    eventHandlers = {
+        [events.CHECK_BACKEND] = onCheckBackend,
+        [events.COMPILE_RECIPE] = onCompileRecipe,
+        [events.VALIDATE_RECIPE] = onValidateRecipe,
+        [events.PREVIEW_RECIPE] = onPreviewRecipe,
+        [events.QUERY_UI_CATALOG] = onQueryUiCatalog,
+        [events.QUERY_AVAILABLE_EFFECTS] = onQueryAvailableEffects,
+        [events.DELETE_COMPILED] = onDeleteCompiled,
+        [events.QUERY_SPELL_METADATA] = onQuerySpellMetadata,
+        [events.CAST_REQUEST] = executor.onCastRequest,
+        [events.INTERCEPT_CAST] = executor.onInterceptCast,
+        [events.DEBUG_LAUNCH_VANILLA_FIREBALL] = executor.onDebugLaunchVanillaFireball,
+        [events.DEV_LAUNCH_SIMPLE_EMITTER] = dev_launch.onSimpleEmitterRequest,
+        [events.DEV_LAUNCH_MULTICAST_EMITTER] = dev_launch.onMulticastEmitterRequest,
+        [events.DEV_LAUNCH_SPREAD_EMITTER] = dev_launch.onSpreadEmitterRequest,
+        [events.DEV_LAUNCH_BURST_EMITTER] = dev_launch.onBurstEmitterRequest,
+        [events.DEV_LAUNCH_TIMER_EMITTER] = dev_launch.onTimerEmitterRequest,
+        [events.DEV_LAUNCH_TRIGGER_EMITTER] = dev_launch.onTriggerEmitterRequest,
+        [events.DEV_LAUNCH_PERF_STRESS] = dev_launch.onPerformanceStressRequest,
+        [events.DEV_LAUNCH_PROBE_UNKNOWN_HELPER] = dev_launch.onProbeUnknownHelper,
+        [events.DEV_HELPER_HIT_IDEMPOTENCY_PROBE] = dev_launch.onHelperHitIdempotencyProbe,
+        [events.SFP_CAPABILITIES_REQUEST] = sfp_smoke.onCapabilitiesRequest,
+        [events.SFP_SPELL_STATE_REQUEST] = sfp_smoke.onSpellStateRequest,
+        [events.SFP_EMIT_OBJECT_PROBE_REQUEST] = sfp_smoke.onEmitObjectProbeRequest,
+        [events.LIVE_SIMPLE_DISPATCH_PROBE] = live_simple_dispatch.onProbe,
+        [events.BEGIN_CAST_OBSERVE] = executor.onBeginObserve,
+        [events.CAST_DIAG_SIGNAL] = executor.onCastDiagSignal,
+        [events.INTERCEPT_DISPATCH_SUPPRESSED] = executor.onInterceptDispatchSuppressed,
+        [events.RUNTIME_STATS_REQUEST] = executor.onRuntimeStatsRequest,
+        [events.CHAIN_LOS_RESULT] = live_chain.onLosResult,
+        MagExp_OnMagicHit = executor.onMagicHit,
+        MagExp_OnProjectileBounce = executor.onProjectileBounce,
+        MagExp_OnProjectilePierce = executor.onProjectilePierce,
+        MagExp_SpellState = onSfpSpellState,
+    },
+    engineHandlers = {
+        -- OpenMW engine handlers docs (global scripts): onPlayerAdded/onUpdate are documented;
+        -- there is no documented global onSpellCast handler.
+        -- https://openmw.readthedocs.io/en/latest/reference/lua-scripting/engine_handlers.html
+        onPlayerAdded = executor.onPlayerAdded,
+        onUpdate = executor.onUpdate,
+    },
+}
