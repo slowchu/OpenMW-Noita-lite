@@ -5,10 +5,10 @@
 - **Phase 1 (Foundation + Compiler): complete**
   - Compiler pipeline validated by `smoke_compiler.lua`.
   - Recipe compile/cache/createRecord/add-to-spellbook path proven.
-- **Phase 2 (Executor): runtime closure audit in progress**
+- **Phase 2 (Executor): runtime closure cleanup in progress**
   - Current stable foundation: **2.2b Intercept Dispatch**.
   - Current live work: **2.2c Opcode Runtime** behind default-off gates.
-  - Current migration work: **2.2d IR Runtime Adapter**. Runtime IR, the public IR-backed feature matrix, continuation planning, runtime job planning, launch/Homing policies, and the shared IR runtime adapter are active. Trigger, Timer, Bounce, Pierce, Chain, and supported Homing launch paths route through shared runtime/policy paths under their matching live gates. Pack H adds strict IR runtime smoke status, support-truth conformance, reason classification, and legacy fallback quarantine before UI polish.
+  - Current migration work: **2.2d IR Runtime Adapter**. Runtime IR, the public IR-backed feature matrix, continuation planning, runtime job planning, launch/Homing policies, and the shared IR runtime adapter are active. Trigger, Timer, Bounce, Pierce, Chain, and supported Homing launch paths route through shared runtime/policy paths under their matching live gates. Pack H added strict IR runtime smoke status, support-truth conformance, reason classification, and legacy fallback quarantine. Pack H.5 is a cleanup-only module inventory and smoke fixture consolidation pass before UI polish.
 
 ## What was deliberately not proven in Phase 1
 
@@ -69,9 +69,9 @@
 
 ## Near-Term Before UI Polish
 
-1. Finish Pack H in-game smoke verification. Required closure markers are `SPELLFORGE_RUNTIME_SUPPORT_TRUTH_CONFORMANCE_OK`, `SPELLFORGE_FEATURE_RUNTIME_AGREEMENT_OK`, `SPELLFORGE_IR_RUNTIME_STRICT_OK`, `SPELLFORGE_LEGACY_RUNTIME_QUARANTINE_OK`, and `SPELLFORGE_SMOKE_HARNESS_STRUCTURE_OK`.
+1. Finish Pack H.5 smoke verification after cleanup. Required closure markers are `SPELLFORGE_RUNTIME_SUPPORT_TRUTH_CONFORMANCE_OK`, `SPELLFORGE_FEATURE_RUNTIME_AGREEMENT_OK`, `SPELLFORGE_IR_RUNTIME_STRICT_OK`, `SPELLFORGE_LEGACY_RUNTIME_QUARANTINE_OK`, `SPELLFORGE_SMOKE_HARNESS_STRUCTURE_OK`, and `SPELLFORGE_SMOKE_FIXTURE_LOAD_OK`.
 2. Treat remaining unsafe v1 shapes as explicit support-truth outcomes, not vague unknowns. Chain recursion/Chain->Chain, Chain side payloads containing Chain, direct Bounce/Pierce source Chain, Bounce/Pierce source Speed+/Size+ with Trigger payloads, simple no-fanout Bounce/Pierce combined Speed+ Size+, Bounce/Pierce/Chain source Homing, repeated same-actor Pierce ticks, Homing recursion, depth > 2, cyclic continuations, per-frame scans, and per-projectile brains must reject before enqueue with stable classified reasons.
-3. If Pack H is green, make UI polish the next major milestone. The UI should consume the IR-backed feature matrix and its `unsupported_by_design` / `future_deferred` / budget/gate classifications rather than encoding runtime rules itself.
+3. If Pack H.5 is green, make UI polish the next major milestone. The UI should consume the IR-backed feature matrix and its `unsupported_by_design` / `future_deferred` / budget/gate classifications rather than encoding runtime rules itself.
 
 ## Lessons captured (carry-over constraints)
 

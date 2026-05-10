@@ -1,6 +1,8 @@
 # OpenMW Noita Lite
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the authoritative design and module contract.
+See [`MODULE_INVENTORY.md`](MODULE_INVENTORY.md) for the Pack H.5 module ownership
+and smoke fixture cleanup inventory.
 
 Current project status:
 
@@ -22,6 +24,7 @@ The global event API is:
 - `Spellforge_ValidateRecipe` -> `Spellforge_ValidateResult`
 - `Spellforge_PreviewRecipe` -> `Spellforge_PreviewResult`
 - `Spellforge_QueryUiCatalog` -> `Spellforge_UiCatalogResult`
+- `Spellforge_QueryAvailableEffects` -> `Spellforge_AvailableEffectsResult`
 
 Validation returns stable issue fields: `code`, `path`, `message`, `severity`,
 and optional `details`. Preview returns the normalized recipe, recipe id, bounds,
@@ -38,9 +41,12 @@ Bounce/Pierce Trigger payload fanout, event-source fanout/Timer, Chain
 fanout/side-continuation, Homing composition, and bounded depth-2 nesting report
 as feature-gated instead of stale deferred entries.
 
-The UI catalog result is static metadata for building the interface: recipe
-schema version, supported operator opcodes/effect IDs, operator parameters,
-feature matrix catalog, event names, relevant limits, and dry-run defaults.
+The UI catalog result is metadata for building the interface: recipe schema
+version, available base effects, supported operator opcodes/effect IDs, operator
+parameters, feature matrix catalog, event names, relevant limits, and dry-run
+defaults. Base effects come from a best-effort player-known effect scan when
+OpenMW exposes spellbook records; otherwise the catalog reports
+`known_effect_scan_unavailable` and falls back to a static dev catalog.
 
 Player scripts also have a UI API boundary in `player/ui.lua`. It wraps catalog,
 validate, preview, save, delete, and lifecycle event plumbing behind simple calls
@@ -48,14 +54,17 @@ and caches the latest results for the visible shell. The first dev/smoke-gated
 spellcrafting shell lives in `player/spellcrafting_ui.lua` and opens with `Y`
 when dev hotkeys or smoke tests are enabled. The shell fits itself to the
 detected `Windows` UI layer, opens from a safe top-left position, and logs its
-`screen=`, `layer=`, `window=`, and `position=` dimensions on open. The visible
-Create action now saves, validates, previews, materializes helper records, and
-creates a player-visible generated frontend spell while keeping live runtime
-behavior behind the existing dev/smoke gates. If preview reports a deferred
-runtime combination, Create is blocked before helper records or frontend spells
-are materialized; the player UI wrapper applies the same guard for cached
-deferred previews. Saved recipe loads sanitize malformed operator parameter
-maps before rendering.
+`screen=`, `layer=`, `window=`, and `position=` dimensions on open. Its Base
+Effects and Operators palettes are catalog-driven and virtualized/paginated so
+long effect/operator lists do not create hundreds of widgets or overflow the
+frame; base effects also support text search plus a compact school filter. The
+visible Create action now saves, validates, previews, materializes helper
+records, and creates a player-visible generated frontend spell while keeping
+live runtime behavior behind the existing dev/smoke gates. If preview reports a
+deferred runtime combination, Create is blocked before helper records or
+frontend spells are materialized; the player UI wrapper applies the same guard
+for cached deferred previews. Saved recipe loads sanitize malformed operator
+parameter maps before rendering.
 
 Saved UI recipes use `spellforge-saved-recipe-v1`: stable saved ids, title/name
 metadata, normalized effect-list recipes with `ui_id` fields, recipe ids from
@@ -65,11 +74,11 @@ draft, validate, preview, compile-pending, compiled, stale, delete-pending, and
 deleted states without exposing helper records to the player spellbook.
 
 The plan-cache smoke add-on also includes a player-side UI API smoke. It
-exercises catalog, cache, save, validate, preview, compile, delete, and
-spellbook-pollution checks through the same wrapper the visible shell uses,
-including the cached deferred-preview compile guard. Player storage keeps a
-small read-through cache so UI calls can read saved recipes and lifecycle state
-immediately after writes.
+exercises catalog, available-effects query, virtualized list probes, cache,
+save, validate, preview, compile, delete, and spellbook-pollution checks through
+the same wrapper the visible shell uses, including the cached deferred-preview
+compile guard. Player storage keeps a small read-through cache so UI calls can
+read saved recipes and lifecycle state immediately after writes.
 
 ## Dev and smoke gates
 
@@ -185,6 +194,7 @@ single/combined payload Pattern policy smokes, launch modifier closure policy,
 event-source fanout/Timer policy smokes, Chain fanout/side-continuation smokes,
 Homing composition, bounded nested continuation, strict IR runtime status,
 support-truth conformance, legacy quarantine, and smoke-harness structure checks,
+including the relocated live dispatch fixture load marker,
 `K` for live Homing v0 SFP 1.7 `forceVec` dry-run plus the delayed soft
 redirect/retarget runtime/probe, or `Numpad .` for
 the chaos budget high-fanout stress suite, including Chain+Multicast high-fanout

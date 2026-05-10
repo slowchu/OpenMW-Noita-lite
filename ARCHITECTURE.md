@@ -1166,9 +1166,50 @@ corresponding fireball's hit position.
 
 ---
 
-## 23. Proposed Module Layout
+## 23. Module Layout
 
-Final 2.2c-oriented layout:
+Pack H.5 records the current module ownership inventory in
+`MODULE_INVENTORY.md`. That inventory is the cleanup map for future refactors.
+The important architectural rule is that cleanup must preserve real boundaries:
+policy, planner, adapter, runtime launch/hit, event adapter, UI, shared contract,
+and smoke fixture modules are separate for a reason.
+
+Current top-level layout:
+
+```text
+scripts/spellforge/
+  context/                  -- OpenMW custom effect records
+  shared/                   -- constants, limits, schemas, validation, events
+  global/                   -- backend runtime, planners, policies, adapters
+  player/                   -- player intercept, storage, UI shell/API
+  tests/                    -- smoke entrypoints and smoke-only helpers
+  tests/fixtures/           -- table-based smoke fixture data
+```
+
+Key runtime seams that should not be collapsed into a monolith:
+
+- `runtime_ir.lua`
+- `feature_matrix_ir.lua`
+- `continuation_planner.lua`
+- `runtime_job_planner.lua`
+- `launch_modifier_policy.lua`
+- `homing_launch_policy.lua`
+- `live_trigger.lua`
+- `live_timer.lua`
+- `live_bounce.lua`
+- `live_pierce.lua`
+- `live_chain.lua`
+- `live_homing.lua`
+- `runtime_launch.lua`
+- `runtime_hits.lua`
+- `orchestrator.lua`
+- `sfp_adapter.lua`
+
+Smoke-only data should live under `scripts/spellforge/tests/fixtures/` or in
+clearly named `smoke_*` modules. `global/live_dispatch_recipes.lua` is retained
+only as a compatibility wrapper for the relocated fixture catalog.
+
+Historical 2.2c-oriented sketch, kept only for milestone context:
 
 ```text
 scripts/spellforge/

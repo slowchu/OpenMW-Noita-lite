@@ -17,8 +17,26 @@ Latest handoff truth:
 - Smoke90/Smoke91 proved the consolidated Trigger/Timer/Bounce/Chain IR adapter path with zero fallback/mismatch counts. Smoke101 proved Pierce v0 smoke plus the live SFP Pierce pass-through budget.
 - `Pierce 3` now means three actor pass-throughs, then normal collision on the fourth actor or any geometry hit. Smoke101 showed projectiles piercing three distinct dremora and then colliding with a fourth distinct dremora, with no Spellforge limit-stop or old exit-nudge marker.
 - Launch-modifier policy v5 is shared: `launch_modifier_policy.lua` owns Speed+/Size+ payload and source-launch decisions plus pre-materialization Size+ helper-spec mutation. `runtime_job_planner.lua` applies accepted payload mutations to IR-planned jobs, and generic source launch/spec creation applies accepted source mutations before SFP launch fields are finalized. Event adapters pass event context, gates, caps, and their own Bounce/Pierce facts, but do not interpret Speed+/Size+ semantics. The policy now supports payload Speed+/Size+ shapes, single and combined Speed+/Size+ direct Trigger/Timer payload Multicast fanout, single and combined Speed+/Size+ direct Trigger/Timer payload Spread/Burst + Multicast, ordinary source combined Speed+ Size+ simple launch, ordinary source Speed+/Size+ primary Multicast, ordinary source combined Speed+ Size+ primary Multicast, ordinary source Speed+/Size+ primary Spread/Burst + Multicast, ordinary source combined Speed+ Size+ primary Spread/Burst + Multicast, single Bounce/Pierce source Speed+ or Size+ simple launches, and Bounce/Pierce source Multicast or Spread/Burst + Multicast fanout with zero, one, or both Speed+/Size+ source modifiers. Bounce/Pierce source fanout may route existing Trigger simple payload continuations when the conservative event budget passes, and Bounce/Pierce source projectiles may now carry Timer continuations through the shared Timer/IR path. Event-source Timer schedules once per source emission or source fanout sibling, not once per Bounce/Pierce event, and budgets payload work as `source_fanout_count * timer_payload_fanout_count`. Chain now supports bounded direct and Trigger->Chain Spread/Burst + Multicast payload fanout plus combined Speed+ Size+ Multicast and combined Speed+ Size+ Spread/Burst + Multicast while preserving one Chain continuation claim per hop. Chain payload emitters may also carry bounded Trigger or Timer side continuations, including Chain fanout/pattern siblings when side-continuation budgets pass; side continuations do not advance Chain. Homing composition Pack F adds a shared `homing_launch_policy.lua` for launch-time Homing metadata/forceVec decisions across ordinary source launches, source Multicast/Spread/Burst, source Speed+/Size+, source Trigger/Timer continuations, and direct Trigger/Timer payload Homing fanout/modifier shapes. Nested continuation Pack G allows bounded depth-2 Trigger/Timer nesting, including same-kind Trigger->Trigger and Timer->Timer, with final payload fanout/pattern/modifier/Homing/non-recursive Chain shapes under shared planner caps. Source Speed+/Size+ plus Trigger payload, direct Bounce/Pierce source Chain, Chain recursion, Chain side payloads containing Chain, arbitrary nested Bounce/Pierce runtime, repeated same-actor Pierce ticks, depth greater than 2, and arbitrary recursion now report as classified future-deferred or unsupported-by-design v1 surfaces. The `I` all-IR smoke starts with `SPELLFORGE_PAYLOAD_MODIFIER_POLICY_CONFORMANCE_OK`, `SPELLFORGE_SOURCE_MODIFIER_POLICY_CONFORMANCE_OK`, `SPELLFORGE_PAYLOAD_MODIFIER_FANOUT_CONFORMANCE_OK`, `SPELLFORGE_PAYLOAD_MODIFIER_COMBINED_FANOUT_CONFORMANCE_OK`, `SPELLFORGE_PAYLOAD_MODIFIER_PATTERN_CONFORMANCE_OK`, `SPELLFORGE_LAUNCH_MODIFIER_CLOSURE_CONFORMANCE_OK`, `SPELLFORGE_EVENT_SOURCE_FANOUT_CONFORMANCE_OK`, `SPELLFORGE_EVENT_SOURCE_TIMER_CONFORMANCE_OK`, `SPELLFORGE_CHAIN_PATTERN_CONFORMANCE_OK`, `SPELLFORGE_CHAIN_EVENT_CONTINUATION_CONFORMANCE_OK`, `SPELLFORGE_HOMING_COMPOSITION_CONFORMANCE_OK`, and `SPELLFORGE_NESTED_CONTINUATION_CONFORMANCE_OK` to prove shared policy/fanout/Timer/Chain/Homing/nesting consumption without event-specific Speed+/Size+, Multicast/Pattern, Timer, Homing, or same-kind nested handlers.
-- The spellcrafting shell is functional and intentionally not visually final. Opcode/runtime correctness is still the priority before more UI polish.
+- The spellcrafting shell is functional and intentionally not visually final. UI Pack 1 replaces the placeholder hardcoded base-effect palette with the available-effect catalog path and adds virtualized/paginated Base Effects, Operators, and saved-recipe lists without changing runtime support.
 - Pack H is a runtime closure/support-truth audit, not a new opcode support pack. It adds feature-matrix reason classifications, explicit strict IR smoke mode (`SpellforgeDev.enable_ir_runtime_strict_v0`), legacy runtime quarantine flags, full A-G support-truth aggregation, feature-matrix/runtime agreement markers, and a smoke-harness structure marker. Supported v1 runtime behavior must run through runtime IR, continuation planning, runtime job planning, and shared policies with zero unexpected fallback/mismatch in strict mode.
+- Pack H.5 is a cleanup/refactor pass only. It adds `MODULE_INVENTORY.md`, moves the large live dispatch recipe catalog into `scripts/spellforge/tests/fixtures/live_dispatch_recipes.lua`, leaves `scripts/spellforge/global/live_dispatch_recipes.lua` as a compatibility wrapper, deletes unused no-op prototype stubs, and adds `SPELLFORGE_SMOKE_FIXTURE_LOAD_OK` to the `I` smoke structure checks. Runtime behavior, support classifications, gates, SFP behavior, and UI visuals are unchanged.
+
+### UI Pack 1 - available effects and virtual lists
+
+UI Pack 1 starts the visible UI work without touching runtime semantics. The
+normal spellcrafting palette now asks the backend for available base effects
+instead of using the old local `BASE_EFFECTS` placeholder. The player API tries
+to scan the player's spellbook for known effect IDs and sends that context to
+global catalog/validation/preview/compile requests; if the scan is unavailable
+or empty, the catalog reports a fallback source mode and the
+`known_effect_scan_unavailable` capability warning. Operators still come from
+the Spellforge operator catalog.
+
+The visible shell uses paginated/virtualized lists for Base Effects, Operators,
+and saved recipes. Base Effects show the source mode (`Known Effects`,
+`Dev Catalog`, or `Fallback Catalog`), support text search, and include a compact
+school/category filter. Validation remains backend-authoritative with stable
+effect availability/bounds issue codes.
 
 ### Pack H reason audit
 
@@ -37,12 +55,12 @@ Pack H smokes require `SPELLFORGE_RUNTIME_SUPPORT_TRUTH_CONFORMANCE_OK` with `st
 
 ### UI readiness report
 
-- runtime support truth stable: yes, when Pack H strict smoke is green
+- runtime support truth stable: yes; Pack H strict smoke passed with zero fallback/mismatch and zero stale deferred count
 - feature matrix public contract stable: yes; `feature_matrix.analyze` is IR-backed and now reports classified reasons
 - unsupported-by-design reasons available: yes
 - create/update/delete flows stable: yes for the current dev-gated shell and saved recipe lifecycle
-- remaining blockers before UI polish: run Pack H smoke once in-game and confirm strict fallback/mismatch stays zero
-- recommended next UI task: polish the existing spellcrafting shell around the IR-backed feature matrix classifications, without changing runtime semantics
+- remaining blockers before UI polish: run the player UI API smoke after UI Pack 1 and confirm the available-effect catalog, virtualized list, validation, preview, save/delete, and compile markers stay green
+- recommended next UI task: continue UI ergonomics around recipe editing/status clarity, still without changing runtime semantics
 
 A UI-facing static contract now feeds the dev-gated visible spellcrafting shell. It accepts the effect-list recipe model `spellforge-ui-recipe-v1`, returns structured validation issues, and can produce dry-run planning previews through emission slots and helper specs without materializing helper records, launching projectiles, or requiring the SFP backend to be ready.
 
@@ -73,13 +91,16 @@ The 2.2d IR migration is underway behind the existing default-off live gates: ru
   - validates recipes with structured `{ code, path, message, severity, details }` issues
   - previews compiled plan shape, bounds, emission slots, helper specs, and deferred runtime notes
   - includes a machine-readable feature matrix with active features, required gates, limits, and deferred reasons
-  - exposes `Spellforge_ValidateRecipe` / `Spellforge_ValidateResult`, `Spellforge_PreviewRecipe` / `Spellforge_PreviewResult`, and `Spellforge_QueryUiCatalog` / `Spellforge_UiCatalogResult`
-  - the catalog result exposes recipe schema metadata, operator opcodes/effect IDs, operator parameters, feature definitions, event names, limits, and dry-run defaults
-  - player `ui.lua` wraps catalog, save/update/delete, validate, preview, and lifecycle requests behind cacheable player-side calls
+  - exposes `Spellforge_ValidateRecipe` / `Spellforge_ValidateResult`, `Spellforge_PreviewRecipe` / `Spellforge_PreviewResult`, `Spellforge_QueryUiCatalog` / `Spellforge_UiCatalogResult`, and `Spellforge_QueryAvailableEffects` / `Spellforge_AvailableEffectsResult`
+  - the catalog result exposes recipe schema metadata, available base effects, operator opcodes/effect IDs, operator parameters, feature definitions, event names, limits, and dry-run defaults
+  - available base effects use a best-effort player-known spellbook scan when spell records are accessible, or an explicit `known_effect_scan_unavailable` fallback/static catalog path when they are not
+  - backend validation remains authoritative for base-effect IDs, ranges, and magnitude/duration/area bounds; stable issue codes include `effect_unknown`, `effect_unavailable`, `effect_range_invalid`, `effect_bounds_invalid`, `known_effect_scan_unavailable`, and `operator_effect_not_base_effect`
+  - player `ui.lua` wraps catalog, available-effects, save/update/delete, validate, preview, and lifecycle requests behind cacheable player-side calls
   - player `storage.lua` persists saved UI recipes and generated-spell lifecycle entries
   - saved recipe migration rejects unsupported saved schema versions with structured errors
   - generated spell lifecycle entries track draft, validated, previewed, compile-pending, compiled, stale, delete-pending, deleted, and error states
   - player `spellcrafting_ui.lua` opens a dev/smoke-gated vanilla-inspired `Spellmaking` shell on `Y`
+  - the shell no longer uses a normal hardcoded `BASE_EFFECTS` palette; Base Effects, Operators, and saved recipes are paginated/virtualized, and Base Effects have text search plus a compact school filter
   - the shell uses the player UI API for catalog, save/update/delete, validate, preview, and real saved-recipe compile actions
   - compile saves, validates, previews, materializes helper records, creates one player-visible generated frontend spell, and leaves live runtime behavior behind the existing gates
   - if preview reports a deferred runtime combination, the visible Create action and cached player UI compile wrapper now block before materializing helper records or frontend spells
@@ -2256,20 +2277,20 @@ Still deferred for Bounce/Pierce source composition:
 
 ## Recommended Next Roadmap
 
-### 0. Pack H verification
+### 0. Pack H.5 cleanup verification
 
-Run the `I` all-IR smoke after Pack H. Required closure markers are:
+Run the `I` all-IR smoke after Pack H.5 cleanup. Required closure markers are:
 `SPELLFORGE_IR_RUNTIME_STRICT_OK`, `SPELLFORGE_RUNTIME_SUPPORT_TRUTH_CONFORMANCE_OK`,
 `SPELLFORGE_FEATURE_RUNTIME_AGREEMENT_OK`, `SPELLFORGE_LEGACY_RUNTIME_QUARANTINE_OK`,
-and `SPELLFORGE_SMOKE_HARNESS_STRUCTURE_OK`.
+`SPELLFORGE_SMOKE_HARNESS_STRUCTURE_OK`, and `SPELLFORGE_SMOKE_FIXTURE_LOAD_OK`.
 
-### 1. UI polish, if Pack H is green
+### 1. UI polish, if Pack H.5 is green
 
-The next major milestone can be visible spellcrafting UI polish once Pack H
-confirms `stale_deferred_count=0`, strict fallback/mismatch counts are zero, and
-the feature matrix/runtime agreement smoke is green. The UI should consume the
-IR-backed `feature_matrix` contract and its classified reason buckets instead of
-duplicating runtime rules.
+The next major milestone can be visible spellcrafting UI polish once Pack H.5
+confirms the relocated smoke fixture loads, `stale_deferred_count=0`, strict
+fallback/mismatch counts are zero, and the feature matrix/runtime agreement
+smoke is green. The UI should consume the IR-backed `feature_matrix` contract
+and its classified reason buckets instead of duplicating runtime rules.
 
 ### 2. Future runtime broadening
 
