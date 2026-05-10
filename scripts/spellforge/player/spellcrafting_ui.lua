@@ -19,6 +19,10 @@ local MIN_WINDOW_SIZE = v2(500, 420)
 local SCREEN_MARGIN = 8
 local DEFAULT_TITLE = "New Spell"
 
+local SCROLLBAR_WIDTH = 14
+local SCROLLBAR_ARROW_H = 16
+local SCROLLBAR_THUMB_MIN = 14
+
 local function mkColor(r, g, b, a)
     if util.color and util.color.rgba then
         return util.color.rgba(r, g, b, a or 1)
@@ -861,10 +865,6 @@ local function setListStart(list_name, state_key, total, visible, next_start)
     ))
     render()
 end
-
-local SCROLLBAR_WIDTH = 14
-local SCROLLBAR_ARROW_H = 16
-local SCROLLBAR_THUMB_MIN = 14
 
 local function scrollbar(list_name, state_key, meta, opts)
     local options = opts or {}
