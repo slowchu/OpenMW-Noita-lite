@@ -259,7 +259,6 @@ local function catalogStep()
         assertLine(effects_request and effects_request.ok == true, "1 UI available effects request queued")
     end, {
         force = true,
-        dev_full_catalog = true,
         request_id = "smoke-player-ui-api-catalog",
     })
     assertLine(request.ok == true and isNonEmptyString(request.request_id), "1 catalog request queued")
